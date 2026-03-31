@@ -1,0 +1,30 @@
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css";
+
+ 
+@import "nativewind/theme";
+
+/* Dark background from the start - prevents white flash */
+html, body, #root {
+  background-color: #0D0208;
+  min-height: 100%;
+}
+
+/* Web font loading - non-blocking, SEO friendly */
+@font-face {
+  font-family: "matrix";
+  src: url("/fonts/matrix-code.otf") format("opentype");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "neo";
+  src: url("/fonts/neo-pc.otf") format("opentype");
+  font-display: swap;
+}
+
+@theme {
+    /* Colors */
+
+}

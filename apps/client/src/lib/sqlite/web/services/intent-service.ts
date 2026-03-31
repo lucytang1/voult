@@ -1,0 +1,87 @@
+import { operation_type } from "../type";
+import { sql } from "../utils";
+import { v4 as uuidv4 } from "uuid";
+import { useAppStore } from "@/src/lib/state";
+import * as z from "zod";
+
+export type CreateIntentPayload = {
+  payload: string;
+  payloadIv: string;
+  deviceId: string;
+};
+export function createIntent(payload: CreateIntentPayload) {
+  const id = uuidv4();
+  const operation = "create";
+  const createdAt = new Date().toISOString();
+  const baseVersion = useAppStore.getState().vaultVersion;
+
+  console.log(
+    "createIntent ",
+    id,
+    operation,
+    payload.payload,
+    payload.payloadIv,
+    payload.deviceId,
+    baseVersion,
+    createdAt,
+    null,
+  );
+
+  return sql(
+    `
+        INSERT INTO intent (id, operation, payload, payload_iv, device_id, base_version, created_at, error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+    `,
+    [
+      id,
+      operation,
+      payload.payload,
+      payload.payloadIv,
+      payload.deviceId,
+      baseVersion,
+      createdAt,
+      null,
+    ],
+  );
+}
+
+const PendingIntentSchema = z.array(z.object({
+  id: z.uuidv4(),
+  operation: z.enum(["create", "update", "delete"]),
+  payload: z.string(),
+  payload_iv: z.string(),
+  device_id: z.string(),
+  base_version: z.number(),
+  created_at: z.string(),
+  synced: z.number(),
+  error: z.string().nullable(),
+}));
+
+
+//fetches untried pending intents 
+export async function fetchPendingIntents() {
+  const { rows } = await sql(`SELECT * FROM intent WHERE synced = 0 AND error IS NULL ORDER BY created_at ASC`)
+  const pendingIntents = PendingIntentSchema.safeParse(rows);
+  if (!pendingIntents.success) {
+    console.error("Failed to parse pending intents", pendingIntents.error);
+    return [];
+  }
+  console.log("pendingIntents", pendingIntents.data);
+  return pendingIntents.data;
+}
+
+export async function fetchIntents() {
+  const { rows } = await sql(`SELECT * FROM intent`);
+  return rows;
+}
+
+export async function markIntentsSynced(ids: string[]) {
+  if (!ids.length) {
+    return;
+  }
+  const placeholders = ids.map(() => "?").join(", ");
+  await sql(
+    `UPDATE intent SET synced = 1 WHERE id IN (${placeholders})`,
+    ids,
+  );
+}

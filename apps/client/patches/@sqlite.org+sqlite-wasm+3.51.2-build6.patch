@@ -1,0 +1,53 @@
+diff --git a/node_modules/@sqlite.org/sqlite-wasm/dist/index.mjs b/node_modules/@sqlite.org/sqlite-wasm/dist/index.mjs
+index 77a3037..2de86b4 100644
+--- a/node_modules/@sqlite.org/sqlite-wasm/dist/index.mjs
++++ b/node_modules/@sqlite.org/sqlite-wasm/dist/index.mjs
+@@ -40,7 +40,7 @@ async function sqlite3InitModule(moduleArg = {}) {
+ 	var ENVIRONMENT_IS_WORKER = !!globalThis.WorkerGlobalScope;
+ 	globalThis.process?.versions?.node && globalThis.process?.type;
+ 	var thisProgram = "./this.program";
+-	var _scriptName = import.meta.url;
++	var _scriptName = globalThis?.document?.currentScript?.src || globalThis?.location?.href || "";
+ 	var scriptDirectory = "";
+ 	function locateFile(path) {
+ 		if (Module["locateFile"]) return Module["locateFile"](path, scriptDirectory);
+@@ -127,7 +127,7 @@ async function sqlite3InitModule(moduleArg = {}) {
+ 	var wasmBinaryFile;
+ 	function findWasmBinary() {
+ 		if (Module["locateFile"]) return locateFile("sqlite3.wasm");
+-		return new URL("sqlite3.wasm", import.meta.url).href;
++		return "/sqlite/sqlite3.wasm";
+ 	}
+ 	function getBinarySync(file) {
+ 		if (file == wasmBinaryFile && wasmBinary) return new Uint8Array(wasmBinary);
+@@ -9107,7 +9107,7 @@ async function sqlite3InitModule(moduleArg = {}) {
+ 						promiseWasRejected = false;
+ 						return promiseResolve_(sqlite3);
+ 					};
+-					const W = new Worker(new URL("sqlite3-opfs-async-proxy.js", import.meta.url));
++					const W = new Worker("/sqlite/sqlite3-opfs-async-proxy.js");
+ 					setTimeout(() => {
+ 						if (void 0 === promiseWasRejected) promiseReject(/* @__PURE__ */ new Error("Timeout while waiting for OPFS async proxy worker."));
+ 					}, 4e3);
+@@ -9768,11 +9768,9 @@ async function sqlite3InitModule(moduleArg = {}) {
+ 					};
+ 				});
+ 			};
+-			installOpfsVfs.defaultProxyUri = "sqlite3-opfs-async-proxy.js";
++			installOpfsVfs.defaultProxyUri = "/sqlite/sqlite3-opfs-async-proxy.js";
+ 			globalThis.sqlite3ApiBootstrap.initializersAsync.push(async (sqlite3) => {
+ 				try {
+-					let proxyJs = installOpfsVfs.defaultProxyUri;
+-					if (sqlite3?.scriptInfo?.sqlite3Dir) installOpfsVfs.defaultProxyUri = sqlite3.scriptInfo.sqlite3Dir + proxyJs;
+ 					return installOpfsVfs().catch((e) => {
+ 						sqlite3.config.warn("Ignoring inability to install OPFS sqlite3_vfs:", e.message);
+ 					});
+@@ -10610,7 +10608,7 @@ globalThis.sqlite3Worker1Promiser = function callee(config = callee.defaultConfi
+ };
+ globalThis.sqlite3Worker1Promiser.defaultConfig = {
+ 	worker: function() {
+-		return new Worker(new URL("sqlite3-worker1.mjs", import.meta.url), { type: "module" });
++		return new Worker("/sqlite/sqlite3-worker1.mjs", { type: "module" });
+ 	},
+ 	onerror: (...args) => console.error("sqlite3Worker1Promiser():", ...args)
+ };

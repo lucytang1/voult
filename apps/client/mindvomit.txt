@@ -1,0 +1,23 @@
+sync strategy(Between react native Client and the local http server)
+
+when to sync?
+
+How to sync?
+    - To sync, we need the latest server state? (Should we manually fetch server state from the server before every sync or rely on the react query server cache?)
+    - After we have a server state from step 1, we check if server state does not match the version from the client_state sqlite table. If it does matches, we get all the pending intents from the local sqlite table and apply them to the local vault and send the encrypted payload to the server, if the server version has increased, we apply the intents on this updated state. 
+
+    Algorithm:
+    - Get vault version from the client side table
+    - Get Pending intents from local sqlite in the order they were created
+    - Refetch vault from the server(it updates the zustand store)
+    - Make a copy of the decrypted vault from the zustand store for the duration of the function 
+    - Iterate through the intents, decrypting them and applying them properly based on their operation type
+    - after iteration try encrypting the vault back again and making an request to the update_vault endpoint, a post request with encrypted vault and the vault version 
+    - vault will reply back with 200 response with its body containing vault, vaultiv, iteration and updated vault base_version
+    - after you get the response update the zustand store and the client_state table vault_version key
+
+original vault:
+iv: 
+y3TvktBLjc8MzSRf
+vault:
+RwKjJirXE2zg5GF8gBuSBy9WTAYAL9rDOzhRZfDSiM053YZNiC/JO4EyqAg5nNP28KMcvGDBn5QQZzs+6qUKjdl+SAoOn6wZmStxNHT9VhCeHpw9Z3Kc/3mfdGMP3sITtbMyhEpNy9Jyc0J3xBFGHM+lEXeqiDZRILhYz+k8C6MmOcbUaJDVKftxg1nRD+skt4F1gVmjS5mQilwcdHBFrp7hyAQWkENLS21XDndPurqQWPCVt+w/ASPXRhWo9BEL55PoN4l8dKsei4ncnaAFgFOUYxM+l6JoXGzkriFTqTnmLt6klj2zfG7ymJzkRDty
