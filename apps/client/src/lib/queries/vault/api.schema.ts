@@ -23,6 +23,6 @@ export type UpdateVaultRequest = {
 export type UpdateVaultResponse = {
   vault: string;
   vaultiv: string;
-  iteration: number;
+  iterations: number;
   version: number;
 };

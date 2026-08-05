@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
-use actix_web::{post, http::StatusCode, web, HttpResponse};
+use actix_web::{HttpResponse, http::StatusCode, post, web};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set};
+use serde::{Deserialize, Serialize};
 
 use crate::entity::user::{self, Entity as User};
 use crate::entity::vault::{self, Entity as Vault};
@@ -39,8 +39,12 @@ fn error_response(status: StatusCode, error_msg: &str, code: &'static str) -> Ht
 }
 
 #[post("/update_vault")]
-pub async fn update_vault(pool: web::Data<DbPool>, payload: web::Json<UpdateVaultRequest>) -> HttpResponse {
+pub async fn update_vault(
+    pool: web::Data<DbPool>,
+    payload: web::Json<UpdateVaultRequest>,
+) -> HttpResponse {
     let request = payload.into_inner();
+    //find the user by email and user key
     let user = match User::find()
         .filter(user::Column::Email.eq(&request.email))
         .filter(user::Column::UserKey.eq(&request.user_key))
@@ -49,11 +53,7 @@ pub async fn update_vault(pool: web::Data<DbPool>, payload: web::Json<UpdateVaul
     {
         Ok(Some(user)) => user,
         Ok(None) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "user not found",
-                "USER_NOT_FOUND",
-            )
+            return error_response(StatusCode::NOT_FOUND, "user not found", "USER_NOT_FOUND");
         }
         Err(e) => {
             log::error!("failed to fetch user: {:?}", e);
@@ -65,6 +65,7 @@ pub async fn update_vault(pool: web::Data<DbPool>, payload: web::Json<UpdateVaul
         }
     };
 
+    // convert the vault_id from the database to a UUID
     let vault_id = match uuid_from_db(&user.vault_id) {
         Ok(id) => id,
         Err(e) => {
@@ -84,11 +85,7 @@ pub async fn update_vault(pool: web::Data<DbPool>, payload: web::Json<UpdateVaul
     {
         Ok(Some(vault)) => vault,
         Ok(None) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "vault not found",
-                "VAULT_NOT_FOUND",
-            )
+            return error_response(StatusCode::NOT_FOUND, "vault not found", "VAULT_NOT_FOUND");
         }
         Err(e) => {
             log::error!("failed to fetch vault: {:?}", e);

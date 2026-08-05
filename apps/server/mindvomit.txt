@@ -1,17 +1,23 @@
-user 
-id 
+user
+id
 email
 user_key
 vault_id (1 to 1) Vault(id)
 
-vault 
-id 
+vault
+id
 vault
 
 
-AUTH: 
-what do i need for this? 
+AUTH:
+what do i need for this?
 a session store (DB(Sqlite))
 interface to the store (CRUD operations on the session store)
 a middleware that is wired on the app which preprocesses a request (does authorization and authentication checks)
 
+sync algo
+a function that runs everytime sync is required
+load encrypted vault and vault version from the server
+checks if local vault version == server vault version
+if yes and there are pending intents, apply them on the decrypted server vault
+encrypt the vault and send it back to the server

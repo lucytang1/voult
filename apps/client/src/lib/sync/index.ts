@@ -1,3 +1,4 @@
+// TEST COMMENT: this edit was made by Claude on 2026-08-05
 import { useAppStore } from "../state";
 import { updateDecryptedVault, updateVaultVersion } from "../state";
 import { getlocalVaultVersion } from "../sqlite/web/services/client-state-service";
@@ -10,20 +11,20 @@ import { updateVault, fetchVault } from "../queries/vault/query";
 import { VaultRequest } from "../queries/vault/api.schema";
 
 const loadVaultFromServer = async (request: VaultRequest) => {
+  // fetch the vault and its version from the server
   const response = await fetchVault(request);
   const encKey = useAppStore.getState().encryptionKey;
   if (!encKey) {
     throw new Error("Encryption key is not set");
   }
+  //decrypt the vault
   const decryptedVault = await decrypt(response.vault.vault, response.vault.vaultiv, encKey);
+  // parse the decrypted vault into a typed object
   const parsedVault = JSON.parse(decryptedVault) as DecryptedVault;
-  useAppStore.setState({ decryptedVault: parsedVault });
-  return response;
+  return { parsedVault, version: response.vault.version };
 }
 
 export async function sync(queryClient: QueryClient) {
-  const localVersion = await getlocalVaultVersion();
-  const pendingIntents = await fetchPendingIntents();
   const authKey = useAppStore.getState().authKey;
   const encKey = useAppStore.getState().encryptionKey;
   const email = globalThis.localStorage.getItem("email") || "";
@@ -32,16 +33,30 @@ export async function sync(queryClient: QueryClient) {
     console.error("Sync prerequisites are missing");
     return;
   }
+
+  // 1. Fetch the vault and its version from the server
+  const authKeyB64 = await getAuthVerifierB64(authKey);
+  const { parsedVault, version: serverVersion } = await loadVaultFromServer({
+    email,
+    user_key: authKeyB64,
+  });
+
+  // 2. The local sqlite version is the source of truth — abort unless the server agrees
+  const localVersion = await getlocalVaultVersion();
+  if ((localVersion ?? 0) !== serverVersion) {
+    console.warn("Sync aborted: vault version mismatch", { localVersion, serverVersion });
+    return;
+  }
+
+  // 3. Nothing to push if there are no pending intents
+  const pendingIntents = await fetchPendingIntents();
   if (!pendingIntents.length) {
     return;
   }
 
-  const authKeyB64 = await getAuthVerifierB64(authKey);
-  await loadVaultFromServer({ email, user_key: authKeyB64 });
-
-  const decryptedVault = useAppStore.getState().decryptedVault;
+  // 4. Apply the pending create intents on top of the decrypted server vault
   const mutableVault = {
-    items: decryptedVault?.items ? [...decryptedVault.items] : [],
+    items: parsedVault?.items ? [...parsedVault.items] : [],
   };
   const successfullyAppliedIntentIds: string[] = [];
 
@@ -75,32 +90,29 @@ export async function sync(queryClient: QueryClient) {
     mutableVault.items.push(parsedIntentpayload.data);
     successfullyAppliedIntentIds.push(intent.id);
   }
-  console.log("mutableVault", mutableVault);
 
+  if (!successfullyAppliedIntentIds.length) {
+    console.warn("Sync aborted: no pending intents were applied");
+    return;
+  }
+
+  // 5. Encrypt the merged vault and push it with the local sqlite version as the base
   const encryptedVault = await encrypt(JSON.stringify(mutableVault), encKey);
-  const nextBaseVersion = localVersion ?? 0;
-  console.log("updateVault request", {
-    email,
-    user_key: authKeyB64,
-    vault: b64(encryptedVault.cipher),
-    vaultiv: b64(encryptedVault.iv),
-    version: nextBaseVersion,
-  });
-  let response: Awaited<ReturnType<typeof updateVault>> ;
+  let response: Awaited<ReturnType<typeof updateVault>>;
   try {
     response = await updateVault({
       email,
       user_key: authKeyB64,
       vault: b64(encryptedVault.cipher),
       vaultiv: b64(encryptedVault.iv),
-      version: nextBaseVersion,
+      version: localVersion ?? 0,
     });
   } catch (error) {
     console.error("Failed to update vault on server", error);
     return;
   }
-  console.log("response", response);
 
+  // 6. On success, refresh local state from the server's stored vault
   let syncedVaultJson: string;
   try {
     syncedVaultJson = await decrypt(response.vault, response.vaultiv, encKey);

@@ -1,5 +1,5 @@
 logs in with (email + user_key)
-return encrypted vault
+return encrypted vaulta
 
 
 Schema:
