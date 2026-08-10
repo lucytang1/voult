@@ -2,10 +2,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Slot } from "expo-router";
 import "../../global.css";
 import { initSQLite } from "../lib/sqlite/web/init-db";
+import { useSyncTriggers } from "../lib/sync/use-sync-triggers";
 import { useEffect } from "react";
 const queryClient = new QueryClient();
 
 export default function RootLayout() {
+  // useSyncTriggers();
   useEffect(() => {
     const fetchData = async () => {
       await initSQLite();
@@ -19,7 +21,7 @@ export default function RootLayout() {
     // }}>
     // {/* </PostHogProvider> */}
     <QueryClientProvider client={queryClient}>
-      <Slot />  
+      <Slot />
     </QueryClientProvider>
   );
 }

@@ -53,7 +53,7 @@ Status of each item reflects what's actually wired up in code today, not just de
 - [ ] **Automatic sync triggers** — sync currently only runs on a manual button press. Add: sync on app launch, after each local write, on network-reconnect / app-foreground
 - [ ] **Background / debounced sync** — avoid hammering the server; debounce and/or run in a worker
 - [ ] **Real device identity** — `deviceId` is hardcoded to `"test_device_id"`. Generate + persist per device (expo-application / expo-device are already installed) and record on the server for multi-device awareness
-- [ ] **Conflict resolution** — a version mismatch currently just aborts with a console warning. Define merge behavior: per-item (LWW by timestamp), intent-replay, or manual "keep this device / use server" UI
+- [x] **Conflict resolution** — a version mismatch currently just aborts with a console warning. Define merge behavior: per-item (LWW by timestamp), intent-replay, or manual "keep this device / use server" UI
 - [ ] **Offline vault read** — the decrypted vault is not persisted; the user cannot read entries while offline. Cache an encrypted snapshot locally and unlock it with the derived key
 - [ ] **Failed-intent retry & quarantine** — intents with an error are skipped forever (`error` column exists but is never written); add retry, error surfacing, and a clear/abandon path
 - [ ] **Sync progress & error UI** — surface sync state (pending/offline/failed) to the user instead of `console.warn`

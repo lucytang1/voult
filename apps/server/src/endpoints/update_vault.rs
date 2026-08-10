@@ -1,5 +1,6 @@
 use actix_web::{HttpResponse, http::StatusCode, post, web};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, QueryFilter};
+use sea_orm::sea_query::Expr;
 use serde::{Deserialize, Serialize};
 
 use crate::entity::user::{self, Entity as User};
@@ -97,22 +98,33 @@ pub async fn update_vault(
         }
     };
 
-    if vault.version != request.version as i32 {
-        return error_response(
-            StatusCode::CONFLICT,
-            "vault version mismatch",
-            "VERSION_CONFLICT",
-        );
-    }
+    // Atomic compare-and-swap: only write when the vault is still at the
+    // version the client pushed against. rows_affected == 0 means a
+    // concurrent push from another device already won — return 409.
+    let new_vault = request.vault;
+    let new_vaultiv = request.vaultiv;
 
-    let current_version = vault.version;
-    let mut vault_active = vault.into_active_model();
-    vault_active.vault = Set(request.vault);
-    vault_active.version = Set(current_version + 1);
-    vault_active.vaultiv = Set(request.vaultiv);
+    let update_result = Vault::update_many()
+        .col_expr(vault::Column::Vault, Expr::value(new_vault.clone()))
+        .col_expr(vault::Column::Vaultiv, Expr::value(new_vaultiv.clone()))
+        .col_expr(
+            vault::Column::Version,
+            Expr::col(vault::Column::Version).add(1),
+        )
+        .filter(vault::Column::Id.eq(uuid_to_db(vault_id)))
+        .filter(vault::Column::Version.eq(request.version as i32))
+        .exec(pool.get_ref())
+        .await;
 
-    let updated_vault = match vault_active.update(pool.get_ref()).await {
-        Ok(updated_vault) => updated_vault,
+    match update_result {
+        Ok(result) if result.rows_affected > 0 => {}
+        Ok(_) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "vault version mismatch",
+                "VERSION_CONFLICT",
+            );
+        }
         Err(e) => {
             log::error!("failed to update vault: {:?}", e);
             return error_response(
@@ -121,12 +133,13 @@ pub async fn update_vault(
                 "DB_ERROR",
             );
         }
-    };
+    }
 
+    // The CAS guarantees the stored version was request.version, so it is now +1.
     HttpResponse::Ok().json(UpdateVaultResponse {
-        vault: updated_vault.vault,
-        vaultiv: updated_vault.vaultiv,
-        iterations: updated_vault.iterations as u32,
-        version: updated_vault.version as u32,
+        vault: new_vault,
+        vaultiv: new_vaultiv,
+        iterations: vault.iterations as u32,
+        version: request.version + 1,
     })
 }

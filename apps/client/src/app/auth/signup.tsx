@@ -3,20 +3,24 @@ import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import { createSingupPayload } from "../../lib/crypto/index.web";
 import { useSignUp } from "../../lib/queries/SignUp/query";
+import { v4 as uuidv4 } from "uuid";
 
 const TEST_VAULT = {
   items: [
     {
+      id: uuidv4(),
       site: "Google",
       username: "test@example.com",
       password: "password",
     },
     {
+      id: uuidv4(),
       site: "Facebook",
       username: "test@example.com",
       password: "password",
     },
     {
+      id: uuidv4(),
       site: "Twitter",
       username: "test@example.com",
       password: "password",

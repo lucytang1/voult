@@ -7,7 +7,6 @@ import {
   VaultResponse,
 } from "./api.schema";
 import { useEffect } from "react";
-import { upsertVaultVersion } from "../../sqlite/web/services/client-state-service";
 import { updateVaultVersion } from "../../state";
 
 export async function fetchVault(request: VaultRequest) {
@@ -33,24 +32,16 @@ export const useGetVault = (
   });
   const { data } = query;
 
+  // Keep the in-memory version in sync with the latest fetch, but do NOT write
+  // client_state.vault_version here — sync() is the sole writer of the persisted
+  // base version (see conflict-resolution.md, §4f).
   useEffect(() => {
-    const run = async () => {
-      if (data) {
-        await updateClientSiteVaultVersion(data.vault.version);
-      }
-    };
-    run();
+    if (data) {
+      updateVaultVersion(data.vault.version);
+    }
   }, [data]);
   return query;
 };
-
-async function updateClientSiteVaultVersion(version: number) {
-  const { result } = await upsertVaultVersion(version);
-  if (result) {
-    updateVaultVersion(version);
-    console.log(result);
-  }
-}
 
 export async function updateVault(
   payload: UpdateVaultRequest,

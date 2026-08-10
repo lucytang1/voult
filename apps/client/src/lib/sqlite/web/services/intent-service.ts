@@ -9,9 +9,11 @@ export type CreateIntentPayload = {
   payloadIv: string;
   deviceId: string;
 };
-export function createIntent(payload: CreateIntentPayload) {
+export function createIntent(
+  operation: "create" | "update" | "delete",
+  payload: CreateIntentPayload,
+) {
   const id = uuidv4();
-  const operation = "create";
   const createdAt = new Date().toISOString();
   const baseVersion = useAppStore.getState().vaultVersion;
 
@@ -84,4 +86,11 @@ export async function markIntentsSynced(ids: string[]) {
     `UPDATE intent SET synced = 1 WHERE id IN (${placeholders})`,
     ids,
   );
+}
+
+// Quarantines an intent that could not be applied (failed to decrypt/parse, or
+// an unknown operation) so it stops blocking sync. fetchPendingIntents only
+// returns rows where error IS NULL.
+export async function markIntentError(id: string, error: string) {
+  await sql(`UPDATE intent SET error = ? WHERE id = ?`, [error, id]);
 }

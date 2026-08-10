@@ -1,11 +1,13 @@
 import { create } from "zustand";
 import { AppState, DecryptedVault, VaultItem } from "./type";
+import { UpdateVaultItem, CreateVaultItem, DeleteVaultItem } from "../sync/type";
 
 const useAppStore = create<AppState>()((set) => ({
   encryptionKey: null,
   authKey: null,
   decryptedVault: null,
   vaultVersion: null,
+  isSyncing: false,
 }));
 
 const updateEncryptionKey = (encryptionKey: CryptoKey) =>
@@ -13,11 +15,13 @@ const updateEncryptionKey = (encryptionKey: CryptoKey) =>
 const updateAuthKey = (authKey: CryptoKey) => useAppStore.setState({ authKey });
 const updateVaultVersion = (vaultVersion: number) =>
   useAppStore.setState({ vaultVersion });
+const setSyncStatus = (isSyncing: boolean) =>
+  useAppStore.setState({ isSyncing });
 
 const updateDecryptedVault = (decryptedVault: DecryptedVault) =>
   useAppStore.setState({ decryptedVault });
 
-const addVaultItem = (item: VaultItem) =>
+const addVaultItem = (item: CreateVaultItem) =>
   useAppStore.setState((state) => ({
     decryptedVault: {
       items: state.decryptedVault
@@ -27,25 +31,23 @@ const addVaultItem = (item: VaultItem) =>
   }));
 
 const updateVaultItem = (
-  site: string,
-  username: string,
-  updatedItem: VaultItem,
+  updateditem: UpdateVaultItem,
 ) =>
   useAppStore.setState((state) => ({
     decryptedVault: {
       items:
         state.decryptedVault?.items.map((item) =>
-          item.site === site && item.username === username ? updatedItem : item,
+          item.id === updateditem.id ? { ...item, ...updateditem.fields} : item,
         ) ?? [],
     },
   }));
 
-const deleteVaultItem = (site: string, username: string) =>
+const deleteVaultItem = (deleteitem: DeleteVaultItem) =>
   useAppStore.setState((state) => ({
     decryptedVault: {
       items:
         state.decryptedVault?.items.filter(
-          (item) => !(item.site === site && item.username === username),
+          (item) => !(item.id === deleteitem.id),
         ) ?? [],
     },
   }));
@@ -56,6 +58,7 @@ export {
   updateDecryptedVault,
   updateAuthKey,
   updateVaultVersion,
+  setSyncStatus,
   addVaultItem,
   updateVaultItem,
   deleteVaultItem,
