@@ -1,7 +1,9 @@
-import { useAppStore, updateDecryptedVault, addVaultItem, updateVaultItem, deleteVaultItem } from "@/src/lib/state";
+import { useAppStore, updateDecryptedVault, addVaultItem, updateVaultItem, deleteVaultItem, lockVault } from "@/src/lib/state";
+import type { LockMetadata } from "@/src/lib/state/type";
 import { useEffect, useState, useMemo } from "react";
-import { Pressable, Text, TextInput, View, ScrollView, Modal, Alert, Platform } from "react-native";
-import { getAuthVerifierB64, decrypt, encrypt } from "../../lib/crypto/index.web";
+import { Pressable, Text, TextInput, View, ScrollView, Modal } from "react-native";
+import { useQueryClient } from "@tanstack/react-query";
+import { decrypt, encrypt } from "../../lib/crypto/index.web";
 import { useGetVault } from "../../lib/queries/vault/query";
 import type { DecryptedVault, VaultItem } from "../../lib/state/type";
 import { UpdateVaultItem, CreateVaultItem, DeleteVaultItem } from "@/src/lib/sync/type";
@@ -9,7 +11,23 @@ import { CreateIntentPayload } from "@/src/lib/sqlite/web/services/intent-servic
 import { b64 } from "../../lib/crypto/index.web";
 import { createIntent } from "@/src/lib/sqlite/web/services/intent-service";
 import { syncScheduler } from "../../lib/sync/sync-scheduler";
+import { getOrCreateDeviceKey } from "../../lib/crypto/device-key";
+import { logout } from "../../lib/queries/logout/query";
+import { teardownAccountSession, lockAccountStorage } from "@/src/lib/auth/teardown";
+import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
+import { useRouter } from "expo-router";
 import { v4 as uuidv4 } from "uuid";
+
+// Device ids are cached per account — a shared single value could attribute
+// one account's intents to another after an account switch.
+const cachedDeviceIds: Record<string, string> = {};
+async function resolveDeviceId(userId: string) {
+  if (!cachedDeviceIds[userId]) {
+    const device = await getOrCreateDeviceKey(userId);
+    cachedDeviceIds[userId] = device.device_id;
+  }
+  return cachedDeviceIds[userId];
+}
 
 type TimeGroup = "Today" | "Last week" | "More than a month";
 
@@ -30,10 +48,12 @@ function getSiteIcon(site: string): string {
 }
 
 export default function Home() {
-  const encryptionKey = useAppStore((state) => state.encryptionKey);
-  const authKey = useAppStore((state) => state.authKey);
+  const vaultKey = useAppStore((state) => state.vaultKey);
+  const session = useAppStore((state) => state.session);
+  const isLocked = useAppStore((state) => state.isLocked);
   const isSyncing = useAppStore((state) => state.isSyncing);
-  const [userKeyB64, setUserKeyB64] = useState<string | null>(null);
+  const router = useRouter();
+  const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedItem, setSelectedItem] = useState<VaultItem | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -50,14 +70,62 @@ export default function Home() {
   const [editUsername, setEditUsername] = useState("");
   const [editPassword, setEditPassword] = useState("");
 
+  // Home requires the unlocked state; the guard bounces
+  // locked users to /lock and signed-out users to /auth/login.
+  useAuthGuard(["unlocked"]);
+
+  /**
+   * Lock: wipe decrypted material + vault ciphertext from the query cache,
+   * keep the session. Capture unlock metadata (salt/iterations/wrapped key)
+   * first so /lock can re-derive the key locally without round-trips.
+   */
+  const handleLock = async () => {
+    let metadata: LockMetadata | null = null;
+    const vault = getVault.data?.vault;
+    try {
+      const { fetchCryptoParams } = await import("../../lib/queries/cryptoParams/query");
+      const params = await fetchCryptoParams(session!.user.email);
+      if (vault?.vault_key_wrap && vault?.vault_key_wrap_iv) {
+        metadata = {
+          salt: params.salt,
+          iterations: params.iterations,
+          vaultKeyWrap: vault.vault_key_wrap,
+          vaultKeyWrapIv: vault.vault_key_wrap_iv,
+        };
+      }
+    } catch (e) {
+      // Non-fatal: unlock will fall back to fetching these from the server.
+      console.warn("Failed to capture lock metadata", e);
+    }
+    lockVault(metadata);
+    queryClient.removeQueries({ queryKey: ["vault"] });
+    // Release this account's SQLite handle while locked; its intents stay
+    // durable on the account's own OPFS file.
+    await lockAccountStorage();
+    router.replace("/lock" as any);
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+    } catch (error) {
+      console.error("Logout failed", error);
+    }
+    // Centralized teardown: closes the per-user DB, deletes only this
+    // account's device records, wipes session state and the query cache. No
+    // pending intents from this account can be considered for the next one.
+    await teardownAccountSession(queryClient);
+    router.replace("/" as any);
+  };
+
   const handleCreate = async (site: string, username: string, password: string) => {
-    if (!encryptionKey) return;
+    if (!vaultKey) return;
     const itemWithId: CreateVaultItem = { id: uuidv4(), site, username, password };
-    const { cipher, iv } = await encrypt(JSON.stringify(itemWithId), encryptionKey);
+    const { cipher, iv } = await encrypt(JSON.stringify(itemWithId), vaultKey);
     const intent: CreateIntentPayload = {
       payload: b64(cipher),
       payloadIv: b64(iv),
-      deviceId: "test_device_id",
+      deviceId: await resolveDeviceId(session!.user.id),
     }
     const { result, rows } = await createIntent("create", intent);
     if (result) {
@@ -72,7 +140,7 @@ export default function Home() {
   }
 
   const handleUpdate = async (item: VaultItem) => {
-    if (!encryptionKey) return;
+    if (!vaultKey) return;
     const updatedItem: UpdateVaultItem = {
       id: item.id,
       fields: {
@@ -81,11 +149,11 @@ export default function Home() {
         password: editPassword || item.password,
       }
     };
-    const { cipher, iv } = await encrypt(JSON.stringify(updatedItem), encryptionKey);
+    const { cipher, iv } = await encrypt(JSON.stringify(updatedItem), vaultKey);
     const intent: CreateIntentPayload = {
       payload: b64(cipher),
       payloadIv: b64(iv),
-      deviceId: "test_device_id",
+      deviceId: await resolveDeviceId(session!.user.id),
     }
     const { result } = await createIntent("update", intent);
     if (result) {
@@ -96,12 +164,12 @@ export default function Home() {
   }
 
   const handleDelete = async (item: VaultItem) => {
-    if (!encryptionKey) return;
-    const { cipher, iv } = await encrypt(JSON.stringify({ id: item.id }), encryptionKey);
+    if (!vaultKey) return;
+    const { cipher, iv } = await encrypt(JSON.stringify({ id: item.id }), vaultKey);
     const intent: CreateIntentPayload = {
       payload: b64(cipher),
       payloadIv: b64(iv),
-      deviceId: "test_device_id",
+      deviceId: await resolveDeviceId(session!.user.id),
     }
     const { result } = await createIntent("delete", intent);
     if (result) {
@@ -112,33 +180,21 @@ export default function Home() {
     setShowDeleteConfirm(false);
   }
 
-  useEffect(() => {
-    if (!authKey) {
-      setUserKeyB64(null);
-      return;
-    }
-    getAuthVerifierB64(authKey).then(setUserKeyB64);
-  }, [authKey]);
-
-  const getVault = useGetVault(
-    {
-      email: globalThis.localStorage.getItem("email") || "",
-      user_key: userKeyB64 ?? "",
-    },
-    { enabled: !!userKeyB64 }
-  );
+  const getVault = useGetVault({
+    enabled: !!vaultKey && !isLocked && !!session,
+  });
 
   const vaultData = getVault.data?.vault;
   useEffect(() => {
-    if (!vaultData || !encryptionKey) return;
-    decrypt(vaultData.vault, vaultData.vaultiv, encryptionKey)
+    if (!vaultData || !vaultKey) return;
+    decrypt(vaultData.vault, vaultData.vaultiv, vaultKey)
       .then((plain) => {
         const parsed = JSON.parse(plain) as DecryptedVault;
         updateDecryptedVault(parsed);
         console.log("decryptedVault", parsed);
       })
       .catch((err) => console.error("Failed to decrypt vault", err));
-  }, [vaultData, encryptionKey]);
+  }, [vaultData, vaultKey]);
 
   const decryptedVault = useAppStore((state) => state.decryptedVault);
 
@@ -199,7 +255,10 @@ export default function Home() {
 
         {/* Bottom Actions */}
         <View className="mt-auto border-t border-[#2a2a4a] px-2 py-3 space-y-1">
-          <Pressable className="flex-row items-center px-3 py-2 rounded-lg hover:bg-[#2a2a4a]">
+          <Pressable
+            className="flex-row items-center px-3 py-2 rounded-lg hover:bg-[#2a2a4a]"
+            onPress={handleLock}
+          >
             <Text className="text-gray-400 mr-3">🔒</Text>
             <Text className="text-gray-300 text-sm">Lock Voult</Text>
           </Pressable>
@@ -211,12 +270,19 @@ export default function Home() {
             <Text className="text-gray-400 mr-3">🔄</Text>
             <Text className="text-gray-300 text-sm">{isSyncing ? "Syncing..." : "Sync"}</Text>
           </Pressable>
+          <Pressable
+            className="flex-row items-center px-3 py-2 rounded-lg hover:bg-[#2a2a4a]"
+            onPress={handleLogout}
+          >
+            <Text className="text-gray-400 mr-3">⏻</Text>
+            <Text className="text-gray-300 text-sm">Log out</Text>
+          </Pressable>
         </View>
 
         {/* User Info */}
         <View className="border-t border-[#2a2a4a] px-4 py-3">
           <Text className="text-white text-sm truncate">
-            {globalThis.localStorage.getItem("email") || "user@example.com"}
+            {session?.user.email || "user@example.com"}
           </Text>
           <Text className="text-gray-400 text-xs">Free</Text>
         </View>

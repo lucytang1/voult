@@ -1,5 +1,6 @@
 import { sync } from "./index";
 import { setSyncStatus } from "../state";
+import { useAppStore } from "../state";
 
 export type SyncTrigger =
   | "window-focus"
@@ -13,6 +14,12 @@ class SyncScheduler {
 
   /** Fire-and-forget entry point used by ALL triggers (blackbox). */
   requestSync(trigger?: SyncTrigger): void {
+    // Locked vaults have no key material; pending intents stay queued and
+    // will sync on the first trigger after unlock. (sync() also self-bails.)
+    if (useAppStore.getState().isLocked) {
+      console.info("[SyncScheduler] skipping sync: vault is locked");
+      return;
+    }
     if (this.running) {
       // Coalesce: mark a follow-up run instead of starting a second sync.
       this.pending = true;

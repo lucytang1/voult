@@ -18,10 +18,37 @@ export interface DecryptedVault {
     items: VaultItem[];
 }
 
+export interface SessionState {
+  user: {
+    id: string;
+    email: string;
+  };
+  cryptoVersion: number;
+}
+
+/**
+ * Material needed to re-derive the vault key locally when unlocking after a
+ * lock. Captured in memory at lock time so unlock needs no extra round-trips;
+ * all values are zero-knowledge-safe (salt/iterations/wrapped key are things
+ * the server already knows).
+ */
+export interface LockMetadata {
+  salt: string;
+  iterations: number;
+  vaultKeyWrap: string;
+  vaultKeyWrapIv: string;
+}
+
+/** The three top-level app states. */
+export type AuthState = "not_authenticated" | "locked" | "unlocked";
+
 export interface AppState  {
-  encryptionKey: CryptoKey | null,
+  vaultKey: CryptoKey | null,
   authKey: CryptoKey | null,
+  session: SessionState | null,
   decryptedVault: DecryptedVault | null,
   vaultVersion: number | null,
+  isLocked: boolean,
   isSyncing: boolean,
+  lockMetadata: LockMetadata | null,
 }

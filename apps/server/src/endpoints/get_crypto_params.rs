@@ -1,4 +1,4 @@
-use actix_web::{get, http::StatusCode, web, HttpResponse};
+use actix_web::{HttpResponse, get, http::StatusCode, web};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +32,10 @@ fn error_response(status: StatusCode, error_msg: &str, code: &'static str) -> Ht
 }
 
 #[get("/get_crypto_params")]
-pub async fn get_crypto_params(pool: web::Data<DbPool>, payload: web::Query<GetCryptoParamsRequest>) -> HttpResponse {
+pub async fn get_crypto_params(
+    pool: web::Data<DbPool>,
+    payload: web::Query<GetCryptoParamsRequest>,
+) -> HttpResponse {
     let request = payload.into_inner();
     if request.email.trim().is_empty() {
         return error_response(
@@ -49,11 +52,7 @@ pub async fn get_crypto_params(pool: web::Data<DbPool>, payload: web::Query<GetC
     {
         Ok(Some(user)) => user,
         Ok(None) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "user not found",
-                "USER_NOT_FOUND",
-            )
+            return error_response(StatusCode::NOT_FOUND, "user not found", "USER_NOT_FOUND");
         }
         Err(e) => {
             log::error!("failed to fetch user: {:?}", e);
@@ -84,11 +83,7 @@ pub async fn get_crypto_params(pool: web::Data<DbPool>, payload: web::Query<GetC
     {
         Ok(Some(vault)) => vault,
         Ok(None) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "vault not found",
-                "VAULT_NOT_FOUND",
-            )
+            return error_response(StatusCode::NOT_FOUND, "vault not found", "VAULT_NOT_FOUND");
         }
         Err(e) => {
             log::error!("failed to fetch vault: {:?}", e);

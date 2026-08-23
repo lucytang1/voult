@@ -1,0 +1,47 @@
+import axios from "axios";
+import { teardownAccountSession } from "../auth/teardown";
+
+/**
+ * Shared HTTP client for the vault API. Credentialed requests (session
+ * cookie) are enabled via `withCredentials: true`. On a `SESSION_REQUIRED`
+ * response the session is torn down through the same centralized path as an
+ * explicit logout (closes the per-user SQLite DB, deletes this account's
+ * device records, wipes volatile state) so a dead server session can never
+ * leak one account's local data into another's. The query cache is in-memory
+ * only here; routing away from authenticated screens drops it.
+ */
+export const http = axios.create({
+  // Falls back to the same origin's /api root when served by the backend.
+  baseURL: process.env.EXPO_PUBLIC_API_URL || "/api",
+  withCredentials: true,
+});
+
+export function isSessionRequired(error: unknown): boolean {
+  return (
+    (error as { response?: { status?: number; data?: { code?: string } } })
+      ?.response?.status === 401 &&
+    (error as { response?: { data?: { code?: string } } })?.response?.data
+      ?.code === "SESSION_REQUIRED"
+  );
+}
+
+/**
+ * True when the request never got an HTTP response (server down, DNS failure,
+ * CORS/network outage). Offline is a normal state for the intent queue — sync
+ * callers use this to back off quietly instead of erroring.
+ */
+export function isNetworkError(error: unknown): boolean {
+  return !(
+    error as { response?: unknown }
+  )?.response;
+}
+
+http.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (isSessionRequired(error)) {
+      void teardownAccountSession();
+    }
+    return Promise.reject(error);
+  },
+);

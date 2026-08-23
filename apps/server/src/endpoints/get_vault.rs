@@ -1,18 +1,14 @@
-use serde::{Deserialize, Serialize};
-use actix_web::{get, http::StatusCode, web, HttpResponse};
+use actix_session::Session;
+use actix_web::{HttpResponse, get, http::StatusCode, web};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use serde::Serialize;
 
 use crate::entity::user::{self, Entity as UserEntity};
 use crate::entity::vault::{self, Entity as Vaults};
 use crate::id_codec::{uuid_from_db, uuid_to_db};
+use crate::session_auth::session_user_id;
 
 use crate::db::DbPool;
-
-#[derive(Deserialize)]
-pub struct GetVaultRequest {
-    pub email: String,
-    pub user_key: String,
-}
 
 #[derive(Serialize)]
 pub struct GetVaultResponse {
@@ -25,6 +21,9 @@ pub struct Vault {
     pub vaultiv: String,
     pub iterations: i32,
     pub version: i32,
+    pub crypto_version: i32,
+    pub vault_key_wrap: Option<String>,
+    pub vault_key_wrap_iv: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -41,29 +40,26 @@ fn error_response(status: StatusCode, error_msg: &str, code: &'static str) -> Ht
 }
 
 #[get("/get_vault")]
-pub async fn get_vault(pool: web::Data<DbPool>, payload: web::Query<GetVaultRequest>) -> HttpResponse {
-    let request = payload.into_inner();
-    if request.email.trim().is_empty() || request.user_key.trim().is_empty() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "email and user_key are required",
-            "INVALID_INPUT",
-        );
-    }
+pub async fn get_vault(pool: web::Data<DbPool>, session: Session) -> HttpResponse {
+    let user_id = match session_user_id(&session) {
+        Ok(Some(id)) => id,
+        Ok(None) | Err(_) => {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "session required",
+                "SESSION_REQUIRED",
+            );
+        }
+    };
 
     let user = match UserEntity::find()
-        .filter(user::Column::Email.eq(&request.email))
-        .filter(user::Column::UserKey.eq(&request.user_key))
+        .filter(user::Column::Id.eq(&user_id))
         .one(pool.get_ref())
         .await
     {
         Ok(Some(user)) => user,
         Ok(None) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "user not found",
-                "USER_NOT_FOUND",
-            )
+            return error_response(StatusCode::NOT_FOUND, "user not found", "USER_NOT_FOUND");
         }
         Err(e) => {
             log::error!("failed to fetch user: {:?}", e);
@@ -94,11 +90,7 @@ pub async fn get_vault(pool: web::Data<DbPool>, payload: web::Query<GetVaultRequ
     {
         Ok(Some(vault)) => vault,
         Ok(None) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "vault not found",
-                "VAULT_NOT_FOUND",
-            )
+            return error_response(StatusCode::NOT_FOUND, "vault not found", "VAULT_NOT_FOUND");
         }
         Err(e) => {
             log::error!("failed to fetch vault: {:?}", e);
@@ -116,6 +108,9 @@ pub async fn get_vault(pool: web::Data<DbPool>, payload: web::Query<GetVaultRequ
             vaultiv: vault.vaultiv,
             iterations: vault.iterations,
             version: vault.version,
+            crypto_version: vault.crypto_version,
+            vault_key_wrap: vault.vault_key_wrap,
+            vault_key_wrap_iv: vault.vault_key_wrap_iv,
         },
     };
     HttpResponse::Ok().json(response)

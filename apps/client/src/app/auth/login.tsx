@@ -1,17 +1,25 @@
 import { Link, useRouter } from "expo-router";
 import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
-import { createEncryptionKey, createLoginPayload, createAuthKey } from "../../lib/crypto/index.web";
-import { useLogIn } from "../../lib/queries/logIn/query";
+import { passwordLoginFlow } from "../../lib/auth/flows/login";
+import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { useGetCryptoParams } from "../../lib/queries/cryptoParams/query";
-import { updateEncryptionKey, updateAuthKey } from "../../lib/state";
+import {
+  setSession,
+  setVaultKey,
+  updateDecryptedVault,
+  updateVaultVersion,
+} from "../../lib/state";
 
 export default function LogIn() {
+  // Login is only for signed-out users; authenticated users are bounced
+  // to /lock (locked) or /home (unlocked).
+  useAuthGuard(["not_authenticated"]);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const getCryptoParams = useGetCryptoParams(email, false);
-  const logIn = useLogIn();
   const router = useRouter();
 
   const onContinue = async () => {
@@ -24,36 +32,23 @@ export default function LogIn() {
         }
         return;
       }
-      const payload = await createLoginPayload(
+      setSubmitting(true);
+      const result = await passwordLoginFlow(
         email,
         password,
         getCryptoParams.data.salt,
         getCryptoParams.data.iterations
       );
-
-      await logIn.mutateAsync(payload, {
-        onSuccess: async () => {
-          updateEncryptionKey(
-            await createEncryptionKey(
-              email,
-              password,
-              getCryptoParams.data.salt,
-              getCryptoParams.data.iterations
-            )
-          );
-          updateAuthKey(
-            await createAuthKey(
-              email,
-              password,
-              getCryptoParams.data.salt,
-              getCryptoParams.data.iterations
-            )
-          );
-          router.navigate("/home" as any);
-        },
-      });
+      setVaultKey(result.vaultKey);
+      setSession(result.session);
+      updateDecryptedVault(result.decryptedVault);
+      updateVaultVersion(result.version);
+      router.navigate("/home" as any);
     } catch (err) {
+      console.error("Login failed", err);
       setError(err instanceof Error ? err.message : "Failed to log in.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -87,13 +82,13 @@ export default function LogIn() {
         onPress={onContinue}
         disabled={
           getCryptoParams.isFetching ||
-          logIn.isPending ||
+          submitting ||
           !email ||
           (getCryptoParams.data?.salt ? !password : false)
         }
       >
         <Text className="text-white">
-          {getCryptoParams.isFetching || logIn.isPending
+          {getCryptoParams.isFetching || submitting
             ? "Loading..."
             : getCryptoParams.data?.salt
             ? "Log in"

@@ -1,12 +1,14 @@
-use actix_web::{http::StatusCode, post, web, HttpResponse};
-use serde::{Deserialize, Serialize};
+use actix_session::Session;
+use actix_web::{HttpResponse, http::StatusCode, post, web};
 use sea_orm::{ActiveModelTrait, Set, TransactionTrait};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::DbPool;
 use crate::entity::user::ActiveModel as UserActiveModel;
 use crate::entity::vault::ActiveModel as VaultActiveModel;
 use crate::id_codec::uuid_to_db;
+use crate::session_auth::establish_session;
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
@@ -16,6 +18,12 @@ pub struct RegisterRequest {
     pub iterations: i32,
     pub vaultiv: String,
     pub vault: String,
+    #[serde(default)]
+    pub crypto_version: Option<i32>,
+    #[serde(default)]
+    pub vault_key_wrap: Option<String>,
+    #[serde(default)]
+    pub vault_key_wrap_iv: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -49,8 +57,10 @@ fn error_response(status: StatusCode, error_msg: &str, code: &'static str) -> Ht
 #[post("/register")]
 pub async fn register(
     pool: web::Data<DbPool>,
+    session: Session,
     payload: web::Json<RegisterRequest>,
 ) -> HttpResponse {
+    //request payload check
     let request = payload.into_inner();
     if request.email.trim().is_empty()
         || request.user_key.trim().is_empty()
@@ -62,7 +72,7 @@ pub async fn register(
             "INVALID_INPUT",
         );
     }
-
+    //request extraction
     let RegisterRequest {
         email,
         user_key,
@@ -70,10 +80,15 @@ pub async fn register(
         iterations,
         vaultiv,
         vault,
+        crypto_version,
+        vault_key_wrap,
+        vault_key_wrap_iv,
     } = request;
     let user_id = Uuid::new_v4();
     let vault_id = Uuid::new_v4();
+    let crypto_version = crypto_version.unwrap_or(1);
 
+    //start transaction block
     let tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
@@ -93,6 +108,9 @@ pub async fn register(
         iterations: Set(iterations),
         vaultiv: Set(vaultiv),
         version: Set(1),
+        crypto_version: Set(crypto_version),
+        vault_key_wrap: Set(vault_key_wrap),
+        vault_key_wrap_iv: Set(vault_key_wrap_iv),
         ..Default::default()
     };
 
@@ -136,6 +154,15 @@ pub async fn register(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to create user",
             "DB_ERROR",
+        );
+    }
+
+    if let Err(e) = establish_session(&session, &inserted_user.id) {
+        log::error!("failed to establish session: {:?}", e);
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to establish session",
+            "SESSION_ERROR",
         );
     }
 

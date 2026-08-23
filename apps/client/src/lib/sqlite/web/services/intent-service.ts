@@ -13,6 +13,12 @@ export function createIntent(
   operation: "create" | "update" | "delete",
   payload: CreateIntentPayload,
 ) {
+  // Fail closed: intents must only ever be written into the open per-user
+  // database of the currently authenticated account.
+  const session = useAppStore.getState().session;
+  if (!session) {
+    throw new Error("Cannot create an intent without an active session");
+  }
   const id = uuidv4();
   const createdAt = new Date().toISOString();
   const baseVersion = useAppStore.getState().vaultVersion;

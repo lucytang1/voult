@@ -1,15 +1,15 @@
 import { useMutation } from "@tanstack/react-query";
 import { RegisterRequest, RegisterResponse } from "./api.schema";
-import axios from "axios";
+import { http } from "../http";
+
+export async function register(payload: RegisterRequest): Promise<RegisterResponse> {
+  const response = await http.post<RegisterResponse>("/register", payload);
+  return response.data;
+}
 
 export const useSignUp = () => {
     return useMutation<RegisterResponse, Error, RegisterRequest>({
-        mutationFn: async (payload) => {
-            console.log("SignUp request", payload);
-            const response = await axios.post<RegisterResponse>(`${process.env.EXPO_PUBLIC_API_URL}/register`, payload);
-            console.log("SignUp response status", response.status);
-            return response.data;
-        },
+        mutationFn: register,
         onSuccess: (data) => {
             console.log("SignUp success", data);
         },

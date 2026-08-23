@@ -120,3 +120,24 @@ In short:
   - Persist to local SQLite in the `intent` table.
   - Reflect changes immediately in in-memory decrypted state.
   - Sync to the server later via a separate process.
+
+## Local Storage Namespacing (Per-Account)
+
+All client-side persistence is namespaced by the authenticated account
+(`session.user.id`) so multiple accounts in one browser profile can never see
+each other's data, and logout prevents one account's pending intents from ever
+being applied by another:
+
+| Store | Namespace | Notes |
+|---|---|---|
+| SQLite (OPFS) | `file:voult-<userId>.db` | One database file per account (`src/lib/sqlite/web/init-db.ts`). Holds that account's `intent` log and `client_state`. Opened only after a session exists; closed on lock and logout. |
+| IndexedDB `voult` | Records keyed `user:<userId>` | `device_key` + `device_envelope` stores in `src/lib/crypto/device-key.ts`. Logout deletes only the current user's records. Legacy global `"current"` records are migrated to the logging-in user's namespace on first read. |
+| TanStack Query cache | In-memory only | Cleared on logout/401 via the centralized teardown path. |
+| Zustand store | In-memory only | Wiped on lock/logout. |
+| `sessionStorage["voult.locked"]` | Profile-global (intentional) | Locking is profile-wide semantics, not account-specific. |
+
+Teardown is centralized in `src/lib/auth/teardown.ts` and used by all exit
+paths (home logout, lock-screen logout, 401 interceptor): capture the account
+id → close the per-user SQLite handle → delete this account's device records →
+wipe volatile state → clear the query cache. Sync additionally pins the user id
+it started for and aborts mid-run if the session changes.

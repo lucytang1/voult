@@ -13,6 +13,9 @@ pub struct Model {
     pub vaultiv: String,
     pub created_at: DateTimeUtc,
     pub version: i32,
+    pub crypto_version: i32,
+    pub vault_key_wrap: Option<String>,
+    pub vault_key_wrap_iv: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

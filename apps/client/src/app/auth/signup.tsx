@@ -1,9 +1,15 @@
-import { Link } from "expo-router";
+import { Link, useRouter } from "expo-router";
 import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
-import { createSingupPayload } from "../../lib/crypto/index.web";
-import { useSignUp } from "../../lib/queries/SignUp/query";
+import { signupFlow } from "@/src/lib/auth/flows/signup";
+import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { v4 as uuidv4 } from "uuid";
+import {
+  setSession,
+  setVaultKey,
+  updateDecryptedVault,
+  updateVaultVersion,
+} from "../../lib/state";
 
 const TEST_VAULT = {
   items: [
@@ -30,21 +36,31 @@ const TEST_VAULT = {
 const TEST_VAULT_JSON = JSON.stringify(TEST_VAULT);
 
 export default function SignUp() {
+  // Signup is only for signed-out users; authenticated users are bounced
+  // to /lock (locked) or /home (unlocked).
+  useAuthGuard(["not_authenticated"]);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const signUp = useSignUp();
+  const [submitting, setSubmitting] = useState(false);
+  const router = useRouter();
 
   const onSubmit = async () => {
     setError(null);
+    setSubmitting(true);
     try {
       console.log("SignUp submit", { email });
-      const payload = await createSingupPayload(password, email, TEST_VAULT_JSON);
-      console.log("SignUp payload ready", payload);
-      await signUp.mutateAsync(payload);
+      const result = await signupFlow(email, password, TEST_VAULT_JSON);
+      setVaultKey(result.vaultKey);
+      setSession(result.session);
+      updateDecryptedVault(result.decryptedVault);
+      updateVaultVersion(result.version);
+      router.navigate("/home" as any);
     } catch (err) {
       console.error("SignUp submit failed", err);
       setError(err instanceof Error ? err.message : "Sign up failed.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -71,10 +87,10 @@ export default function SignUp() {
       <Pressable
         className="w-full rounded-md bg-blue-600 py-2 items-center"
         onPress={onSubmit}
-        disabled={signUp.isPending}
+        disabled={submitting || !email || !password}
       >
         <Text className="text-white">
-          {signUp.isPending ? "Creating..." : "Create account"}
+          {submitting ? "Creating..." : "Create account"}
         </Text>
       </Pressable>
       {error ? <Text className="text-red-400 mt-3">{error}</Text> : null}

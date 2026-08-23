@@ -4,13 +4,16 @@ import { useEffect, useState } from "react";
 import { View } from "react-native";
 import { Text } from "react-native";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
+// Debug-only: opens the dev account's database directly. Production code must
+// use the session-derived user id (see _layout bootstrap).
+const DEV_USER_ID = "00000000-0000-4000-8000-000000000000";
 
 export default function DebugPage() {
   const [clientState, setClientState] = useState<any>([])
   const [intent, setIntent] = useState<any>([])
   useEffect(() => {
     const fetchData = async () => {
-      await initSQLite();
+      await initSQLite(DEV_USER_ID);
       const clientState = await getClientStateTable()
       const intent = await fetchIntents()
       setClientState(clientState)

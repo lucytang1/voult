@@ -5,6 +5,9 @@ export type LoginRequest = {
 
 export type LoginResponse = {
     user: User;
+    salt: string;
+    iterations: number;
+    crypto_version: number;
 }
 
 type User = {

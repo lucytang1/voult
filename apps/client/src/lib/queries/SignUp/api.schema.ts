@@ -5,6 +5,9 @@ export type RegisterRequest = {
     iterations: number;
     vaultiv: string;
     vault: string;
+    crypto_version: number;
+    vault_key_wrap: string;
+    vault_key_wrap_iv: string;
 }
 
 export type RegisterResponse = {

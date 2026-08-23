@@ -7,7 +7,7 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "build:web": "expo export --platform web",
+    "build:web": "EXPO_PUBLIC_API_URL= expo export --platform web",
     "sync:sqlite-web": "mkdir -p public/sqlite && cp node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3-worker1.mjs public/sqlite/sqlite3-worker1.mjs && cp node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3-opfs-async-proxy.js public/sqlite/sqlite3-opfs-async-proxy.js && cp node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3.wasm public/sqlite/sqlite3.wasm",
     "postinstall": "patch-package"
   },
