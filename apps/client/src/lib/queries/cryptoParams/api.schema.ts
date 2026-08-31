@@ -1,5 +1,5 @@
 export type SaltRequest = {
-    email: string;
+    vault_id: string;
 }
 
 export type SaltResponse = {

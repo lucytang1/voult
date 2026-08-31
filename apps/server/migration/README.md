@@ -39,3 +39,21 @@
     ```sh
     cargo run -- status
     ```
+
+## Clean-start schema (vault-centric)
+
+The migration set is a single initial migration that creates the vault-centric
+schema: `vault` (primary identity, with `vault_verifier`), `session` (keyed by
+`vault_id`), and the Google/cloud tables all keyed by `vault_id`. There is **no
+`user`, `user_key`, or `user_vault` table** — the vault is the only identity and
+authorization boundary.
+
+This is a deliberate breaking change. The old migration history has been
+removed, so an existing development database (`apps/server/voult.db`) is
+intentionally incompatible and must be deleted and recreated:
+
+```sh
+rm apps/server/voult.db
+# The server runs Migrator::up automatically on startup.
+cargo run
+```

@@ -7,51 +7,44 @@ import {
   encrypt,
   wrapKeyBytes,
   b64,
-
+  uuid,
 } from "../../crypto/index.web";
 import { UnlockedSession, persistDeviceSecrets, derivePasswordKeys, parseVaultJson } from "../utils";
 import { register as signupRequest } from "../../queries/SignUp/query";
 
 /**
- * Signup flow:
- * 1. Generate a random vault key.
- * 2. Derive the userKey and password wrapping key.
- * 3. Generate and persist the browser device key.
+ * Signup flow — vault-scoped, no account/user:
+ * 1. Generate a client-side vault ID (stable, embedded in the encrypted doc).
+ * 2. Generate a random vault key.
+ * 3. Derive the vaultVerifier and password wrapping key.
  * 4. Encrypt the starter vault with the vault key.
- * 5. Wrap the vault key with the password wrapping key.
- * 6. Wrap the vault key with the device key.
- * 7. Send the encrypted vault and password envelope to /register.
- * 8. The server establishes the session.
- * 9. Store the device envelope locally (IndexedDB).
+ * 5. Wrap the vault key with the password wrapping key (envelope).
+ * 6. Send the encrypted vault + verifier + KDF metadata + envelope to /register.
+ * 7. The server establishes the session for this vault.
+ * 8. Store the device envelope locally (IndexedDB), namespaced by vault.
  */
 export async function signupFlow(
-  email: string,
   password: string,
   vaultJson: string,
 ): Promise<UnlockedSession> {
-  //generate a random salt for userKey and password wrapKeyBytes derivation
+  // The vault ID is generated client-side and never derived from any identity.
+  const vaultId = uuid();
   const salt = newSaltB64();
-  //generate the keys for password-based encryption
-  const { userKey, wrappingKey } = await derivePasswordKeys(password, salt, PBKDF2_ITERATIONS);
+  const { vaultVerifier, wrappingKey } = await derivePasswordKeys(password, salt, PBKDF2_ITERATIONS);
 
-  //generate a random vault key
   const vaultKeyRaw = generateVaultKeyRaw();
-  //import the random key as a CryptoKey object
   const vaultKey = await importVaultKey(vaultKeyRaw);
 
-  //encrypt the vault using the vault key
   const encryptedVault = await encrypt(vaultJson, vaultKey);
 
-  //wrapt the vault key using the wrapping key
   const { cipher: wrappedCipher, iv: wrappedIv } = await wrapKeyBytes(
     vaultKeyRaw,
     wrappingKey,
   );
 
-  //Send the signup request to the server
   const response = await signupRequest({
-    email,
-    user_key: userKey,
+    vault_id: vaultId,
+    vault_verifier: vaultVerifier,
     salt,
     iterations: PBKDF2_ITERATIONS,
     vaultiv: b64(encryptedVault.iv),
@@ -61,14 +54,12 @@ export async function signupFlow(
     vault_key_wrap_iv: b64(wrappedIv),
   });
 
-  // Persist the device secrets only after the server assigns the account id —
-  // device key + envelope are namespaced per user, so this must happen after
-  // registration (moving it here is safe: nothing above depends on it).
-  await persistDeviceSecrets(vaultKeyRaw, response.user.id);
+  // Persist the device envelope only after the server assigns the vault id.
+  await persistDeviceSecrets(vaultKeyRaw, response.vault_id);
 
   return {
     session: {
-      user: { id: response.user.id, email },
+      vaultId: response.vault_id,
       cryptoVersion: CRYPTO_VERSION,
     },
     vaultKey,
@@ -76,3 +67,5 @@ export async function signupFlow(
     version: 1,
   };
 }
+
+export async function createAccountFlow(...a:any){ throw new Error('deprecated'); }

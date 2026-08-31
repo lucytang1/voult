@@ -21,9 +21,9 @@ export default function RootLayout() {
   // useSyncTriggers();
   useEffect(() => {
     const bootstrap = async () => {
-      // SQLite is opened per-account (file:voult-<userId>.db) and only once a
+      // SQLite is opened per-vault (file:voult-<vaultId>.db) and only once a
       // session exists — never globally at startup, so pre-auth code cannot
-      // touch any account's intent log or client state.
+      // touch any vault's intent log or client state.
       // Existing-session unlock: if the session cookie is valid and the
       // browser device key + envelope exist, restore the unlocked vault
       // without requesting the master password. Skipped when the user
@@ -33,7 +33,7 @@ export default function RootLayout() {
         const lockedFlag = isLockedFlagSet();
         const unlocked = lockedFlag ? null : await unlockWithDevice();
         if (unlocked) {
-          await initSQLite(unlocked.session.user.id);
+          await initSQLite(unlocked.session.vaultId);
           setVaultKey(unlocked.vaultKey);
           setSession(unlocked.session);
           updateDecryptedVault(unlocked.decryptedVault);
@@ -43,8 +43,8 @@ export default function RootLayout() {
           // may still be valid. Restore just the session so the app enters
           // the Authenticated+Locked state and /lock accepts it.
           const sessionData = await fetchSession();
-          await initSQLite(sessionData.user.id);
-          setSession({ user: sessionData.user, cryptoVersion: CRYPTO_VERSION });
+          await initSQLite(sessionData.vault_id);
+          setSession({ vaultId: sessionData.vault_id, cryptoVersion: sessionData.crypto_version });
         }
         router.navigate((lockedFlag ? "/lock" : "/home") as any);
 

@@ -3,6 +3,7 @@ mod db;
 mod endpoints;
 mod entity;
 mod error;
+mod google;
 mod id_codec;
 mod session_auth;
 mod static_site;
@@ -23,7 +24,8 @@ use std::env;
 use std::path::Path;
 
 use endpoints::{
-    auth, get_crypto_params, get_vault, logout, register, session_status, update_vault,
+    auth, get_crypto_params, get_vault, google_endpoints, logout, register, session_status,
+    update_vault, update_vault_password, vaults,
 };
 use static_site::static_site;
 
@@ -138,7 +140,26 @@ async fn main() -> std::io::Result<()> {
                     .service(get_crypto_params::get_crypto_params)
                     .service(update_vault::update_vault)
                     .service(session_status::get_session)
-                    .service(logout::logout),
+                    .service(logout::logout)
+                    .service(update_vault_password::update_vault_password)
+                    .service(vaults::create_vault)
+                    .service(vaults::list_vaults)
+                    .service(google_endpoints::google_auth_start)
+                    .service(google_endpoints::google_oauth_callback)
+                    .service(google_endpoints::google_oauth_callback_legacy)
+                    .service(google_endpoints::google_status)
+                    .service(google_endpoints::google_disconnect)
+                    .service(google_endpoints::google_get_pending)
+                    .service(google_endpoints::google_get_binding)
+                    .service(google_endpoints::google_list_bindings)
+                    .service(google_endpoints::google_list_vaults)
+                    .service(google_endpoints::google_create_vault)
+                    .service(google_endpoints::google_read_vault)
+                    .service(google_endpoints::google_replace_vault)
+                    .service(google_endpoints::google_upsert_binding)
+                    .service(google_endpoints::google_link_pending)
+                    .service(google_endpoints::google_list_vaults_pending)
+                    .service(google_endpoints::google_delete_vault),
             )
             .service(static_site(&static_dir))
     })

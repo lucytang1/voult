@@ -1,17 +1,17 @@
 /**
- * Handle for the currently-open per-user OPFS database.
+ * Handle for the currently-open per-vault OPFS database.
  *
- * Each authenticated account gets its own SQLite file (see init-db.ts), so the
- * handle is always paired with the user id it was opened for. `sql()` fails
- * closed when no database is open — callers must not be able to write intents
- * into an account-agnostic store.
+ * Each vault gets its own SQLite file (see init-db.ts), so the handle is
+ * always paired with the vault id it was opened for. `sql()` fails closed when
+ * no database is open — callers must not be able to write intents into a
+ * vault-agnostic store.
  */
 let dbId: string | null = null;
-let currentUserId: string | null = null;
+let currentVaultId: string | null = null;
 
-export function setDb(id: string, userId: string) {
+export function setDb(id: string, vaultId: string) {
   dbId = id;
-  currentUserId = userId;
+  currentVaultId = vaultId;
 }
 
 /** Returns the open handle's id without throwing (used by closeSQLite). */
@@ -24,12 +24,12 @@ export function getDbId() {
   return dbId;
 }
 
-export function getCurrentUserId() {
-  if (!currentUserId) throw new Error("DB not initialized");
-  return currentUserId;
+export function getCurrentVaultId() {
+  if (!currentVaultId) throw new Error("DB not initialized");
+  return currentVaultId;
 }
 
 export function resetDb() {
   dbId = null;
-  currentUserId = null;
+  currentVaultId = null;
 }

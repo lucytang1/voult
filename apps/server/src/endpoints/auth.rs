@@ -5,29 +5,29 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::DbPool;
-use crate::entity::user::{self, Entity as UserEntity};
 use crate::entity::vault::{self, Entity as VaultEntity};
 use crate::id_codec::uuid_from_db;
-use crate::session_auth::establish_session;
+use crate::session_auth::establish_vault_session;
 
 #[derive(Deserialize)]
 pub struct AuthRequest {
-    pub email: String,
-    pub user_key: String,
+    // Client-generated, stable vault identity embedded in the encrypted vault.
+    pub vault_id: String,
+    // Verifier derived from the master password client-side. Authentication
+    // credential only — never the password or any key.
+    pub vault_verifier: String,
 }
 
 #[derive(Serialize)]
 pub struct AuthResponse {
-    pub user: UserResponse,
+    pub vault_id: Uuid,
     pub salt: String,
     pub iterations: i32,
     pub crypto_version: i32,
-}
-
-#[derive(Serialize)]
-pub struct UserResponse {
-    pub id: Uuid,
-    pub email: String,
+    // Encrypted envelope holding the vault key, wrapped by the master password.
+    // Returned so the client can unwrap the vault key locally after unlock.
+    pub vault_key_wrap: Option<String>,
+    pub vault_key_wrap_iv: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -50,61 +50,39 @@ pub async fn auth(
     payload: web::Json<AuthRequest>,
 ) -> HttpResponse {
     let request = payload.into_inner();
-    if request.email.trim().is_empty() || request.user_key.trim().is_empty() {
+    if request.vault_id.trim().is_empty() || request.vault_verifier.trim().is_empty() {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "email and user_key are required",
+            "vault_id and vault_verifier are required",
             "INVALID_INPUT",
         );
     }
 
-    let user = match UserEntity::find()
-        .filter(user::Column::Email.eq(&request.email))
-        .filter(user::Column::UserKey.eq(&request.user_key))
+    // A malformed vault ID is an invalid request, not an auth failure.
+    let vault_uuid = match Uuid::parse_str(&request.vault_id) {
+        Ok(u) => u,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid vault_id",
+                "INVALID_INPUT",
+            );
+        }
+    };
+
+    let vault = match VaultEntity::find()
+        .filter(vault::Column::Id.eq(vault_uuid.to_string()))
         .one(pool.get_ref())
         .await
     {
-        Ok(Some(user)) => user,
+        Ok(Some(vault)) => vault,
         Ok(None) => {
+            // Do not distinguish "no such vault" from "bad verifier" to avoid
+            // enumerating vault existence. Return the same generic error.
             return error_response(
                 StatusCode::UNAUTHORIZED,
-                "invalid email or user_key",
+                "invalid vault_id or vault_verifier",
                 "AUTH_FAILED",
-            );
-        }
-        Err(e) => {
-            log::error!("failed to fetch user: {:?}", e);
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to fetch user",
-                "DB_ERROR",
-            );
-        }
-    };
-
-    let user_id = match uuid_from_db(&user.id) {
-        Ok(id) => id,
-        Err(e) => {
-            log::error!("invalid UUID in user.id: {:?}", e);
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invalid user id in database",
-                "DATA_INTEGRITY_ERROR",
-            );
-        }
-    };
-
-    let (salt, iterations, crypto_version) = match VaultEntity::find()
-        .filter(vault::Column::Id.eq(&user.vault_id))
-        .one(pool.get_ref())
-        .await
-    {
-        Ok(Some(vault)) => (vault.salt, vault.iterations, vault.crypto_version),
-        Ok(None) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "user has no vault",
-                "DATA_INTEGRITY_ERROR",
             );
         }
         Err(e) => {
@@ -117,9 +95,17 @@ pub async fn auth(
         }
     };
 
+    if vault.vault_verifier != request.vault_verifier {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid vault_id or vault_verifier",
+            "AUTH_FAILED",
+        );
+    }
+
     // Rotate/purge any existing session before establishing the authenticated
-    // one, then store only the authenticated user ID in the session cookie.
-    if let Err(e) = establish_session(&session, &user.id) {
+    // one, then store only the authenticated vault ID in the session cookie.
+    if let Err(e) = establish_vault_session(&session, &vault.id) {
         log::error!("failed to establish session: {:?}", e);
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -129,13 +115,22 @@ pub async fn auth(
     }
 
     let response = AuthResponse {
-        user: UserResponse {
-            id: user_id,
-            email: user.email,
+        vault_id: match uuid_from_db(&vault.id) {
+            Ok(id) => id,
+            Err(e) => {
+                log::error!("invalid UUID in vault.id: {:?}", e);
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "invalid vault id in database",
+                    "DATA_INTEGRITY_ERROR",
+                );
+            }
         },
-        salt,
-        iterations,
-        crypto_version,
+        salt: vault.salt,
+        iterations: vault.iterations,
+        crypto_version: vault.crypto_version,
+        vault_key_wrap: vault.vault_key_wrap,
+        vault_key_wrap_iv: vault.vault_key_wrap_iv,
     };
 
     HttpResponse::Ok().json(response)

@@ -4,20 +4,20 @@ import { SaltResponse } from "./api.schema";
 
 
 /** Plain fetch used outside React (e.g. the /lock unlock flow). */
-export async function fetchCryptoParams(email: string): Promise<SaltResponse> {
+export async function fetchCryptoParams(vaultId: string): Promise<SaltResponse> {
   const response = await http.get<SaltResponse>("/get_crypto_params", {
-    params: { email },
+    params: { vault_id: vaultId },
   });
   return response.data;
 }
 
-export const useGetCryptoParams = (email: string, enabled: boolean) => {
+export const useGetCryptoParams = (vaultId: string, enabled: boolean) => {
   return useQuery<SaltResponse, Error>({
-    queryKey: ["cryptoParams", email],
+    queryKey: ["cryptoParams", vaultId],
     enabled,
     queryFn: async () => {
       const response = await http.get<SaltResponse>("/get_crypto_params", {
-        params: { email },
+        params: { vault_id: vaultId },
       });
       return response.data;
     },

@@ -5,21 +5,24 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::DbPool;
-use crate::entity::user::ActiveModel as UserActiveModel;
 use crate::entity::vault::ActiveModel as VaultActiveModel;
 use crate::id_codec::uuid_to_db;
-use crate::session_auth::establish_session;
+use crate::session_auth::establish_vault_session;
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
-    pub email: String,
-    pub user_key: String,
+    // Client-generated, stable vault identity embedded in the encrypted vault.
+    pub vault_id: String,
+    // Verifier derived from the master password client-side. Authentication
+    // credential only — never the password or any key.
+    pub vault_verifier: String,
     pub salt: String,
     pub iterations: i32,
     pub vaultiv: String,
     pub vault: String,
     #[serde(default)]
     pub crypto_version: Option<i32>,
+    // Encrypted envelope holding the vault key, wrapped by the master password.
     #[serde(default)]
     pub vault_key_wrap: Option<String>,
     #[serde(default)]
@@ -28,17 +31,13 @@ pub struct RegisterRequest {
 
 #[derive(Serialize)]
 pub struct RegisterResponse {
-    pub user: UserResponse,
+    pub vault_id: Uuid,
     pub vault: String,
     pub iterations: i32,
     pub vaultiv: String,
     pub salt: String,
-}
-
-#[derive(Serialize)]
-pub struct UserResponse {
-    pub id: Uuid,
-    pub email: String,
+    pub vault_key_wrap: Option<String>,
+    pub vault_key_wrap_iv: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -60,89 +59,77 @@ pub async fn register(
     session: Session,
     payload: web::Json<RegisterRequest>,
 ) -> HttpResponse {
-    //request payload check
     let request = payload.into_inner();
-    if request.email.trim().is_empty()
-        || request.user_key.trim().is_empty()
+    if request.vault_id.trim().is_empty()
+        || request.vault_verifier.trim().is_empty()
         || request.salt.trim().is_empty()
     {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "email and user_key and salt are required",
+            "vault_id, vault_verifier and salt are required",
             "INVALID_INPUT",
         );
     }
-    //request extraction
-    let RegisterRequest {
-        email,
-        user_key,
-        salt,
-        iterations,
-        vaultiv,
-        vault,
-        crypto_version,
-        vault_key_wrap,
-        vault_key_wrap_iv,
-    } = request;
-    let user_id = Uuid::new_v4();
-    let vault_id = Uuid::new_v4();
-    let crypto_version = crypto_version.unwrap_or(1);
 
-    //start transaction block
+    // The vault ID must be a well-formed UUID the client generated.
+    let vault_uuid = match Uuid::parse_str(&request.vault_id) {
+        Ok(u) => u,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid vault_id",
+                "INVALID_INPUT",
+            );
+        }
+    };
+
+    let crypto_version = request.crypto_version.unwrap_or(1);
+
     let tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
             log::error!("failed to create transaction: {:?}", e);
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to create user",
+                "failed to create vault",
                 "DB_ERROR",
             );
         }
     };
 
     let new_vault = VaultActiveModel {
-        id: Set(uuid_to_db(vault_id)),
-        vault: Set(vault),
-        salt: Set(salt),
-        iterations: Set(iterations),
-        vaultiv: Set(vaultiv),
+        id: Set(uuid_to_db(vault_uuid)),
+        vault: Set(request.vault),
+        salt: Set(request.salt),
+        iterations: Set(request.iterations),
+        vaultiv: Set(request.vaultiv),
+        vault_verifier: Set(request.vault_verifier),
         version: Set(1),
         crypto_version: Set(crypto_version),
-        vault_key_wrap: Set(vault_key_wrap),
-        vault_key_wrap_iv: Set(vault_key_wrap_iv),
+        vault_key_wrap: Set(request.vault_key_wrap),
+        vault_key_wrap_iv: Set(request.vault_key_wrap_iv),
         ..Default::default()
     };
 
     let inserted_vault = match new_vault.insert(&tx).await {
         Ok(inserted) => inserted,
         Err(e) => {
+            // A duplicate vault_id (unique primary key) is a client conflict,
+            // not a server error.
+            if matches!(e, sea_orm::DbErr::Exec(_)) {
+                log::warn!("vault registration conflict: {:?}", e);
+                let _ = tx.rollback().await;
+                return error_response(
+                    StatusCode::CONFLICT,
+                    "vault already exists",
+                    "VAULT_EXISTS",
+                );
+            }
             log::error!("failed to create vault: {:?}", e);
             let _ = tx.rollback().await;
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to create user",
-                "DB_ERROR",
-            );
-        }
-    };
-
-    let new_user = UserActiveModel {
-        id: Set(uuid_to_db(user_id)),
-        email: Set(email),
-        user_key: Set(user_key),
-        vault_id: Set(inserted_vault.id.clone()),
-        ..Default::default()
-    };
-
-    let inserted_user = match new_user.insert(&tx).await {
-        Ok(inserted) => inserted,
-        Err(e) => {
-            log::error!("failed to create user: {:?}", e);
-            let _ = tx.rollback().await;
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to create user",
+                "failed to create vault",
                 "DB_ERROR",
             );
         }
@@ -152,12 +139,13 @@ pub async fn register(
         log::error!("failed to commit transaction: {:?}", e);
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to create user",
+            "failed to create vault",
             "DB_ERROR",
         );
     }
 
-    if let Err(e) = establish_session(&session, &inserted_user.id) {
+    // Establish a vault-scoped session for the newly created vault.
+    if let Err(e) = establish_vault_session(&session, &inserted_vault.id) {
         log::error!("failed to establish session: {:?}", e);
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -166,15 +154,26 @@ pub async fn register(
         );
     }
 
+    let vault_id = match Uuid::parse_str(&inserted_vault.id) {
+        Ok(id) => id,
+        Err(e) => {
+            log::error!("invalid UUID in inserted vault.id: {:?}", e);
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid vault id in database",
+                "DATA_INTEGRITY_ERROR",
+            );
+        }
+    };
+
     let response = RegisterResponse {
-        user: UserResponse {
-            id: user_id,
-            email: inserted_user.email,
-        },
+        vault_id,
         vault: inserted_vault.vault,
         salt: inserted_vault.salt,
         iterations: inserted_vault.iterations,
         vaultiv: inserted_vault.vaultiv,
+        vault_key_wrap: inserted_vault.vault_key_wrap,
+        vault_key_wrap_iv: inserted_vault.vault_key_wrap_iv,
     };
 
     HttpResponse::Created().json(response)

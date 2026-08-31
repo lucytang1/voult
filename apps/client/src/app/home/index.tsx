@@ -1,4 +1,4 @@
-import { useAppStore, updateDecryptedVault, addVaultItem, updateVaultItem, deleteVaultItem, lockVault } from "@/src/lib/state";
+import { useAppStore, updateDecryptedVault, addVaultItem, updateVaultItem, deleteVaultItem, lockVaultStorage as lockVaultState } from "@/src/lib/state";
 import type { LockMetadata } from "@/src/lib/state/type";
 import { useEffect, useState, useMemo } from "react";
 import { Pressable, Text, TextInput, View, ScrollView, Modal } from "react-native";
@@ -13,20 +13,20 @@ import { createIntent } from "@/src/lib/sqlite/web/services/intent-service";
 import { syncScheduler } from "../../lib/sync/sync-scheduler";
 import { getOrCreateDeviceKey } from "../../lib/crypto/device-key";
 import { logout } from "../../lib/queries/logout/query";
-import { teardownAccountSession, lockAccountStorage } from "@/src/lib/auth/teardown";
+import { teardownVaultSession, lockVaultStorage } from "@/src/lib/auth/teardown";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { useRouter } from "expo-router";
 import { v4 as uuidv4 } from "uuid";
 
-// Device ids are cached per account — a shared single value could attribute
-// one account's intents to another after an account switch.
+// Device ids are cached per vault — a shared single value could attribute
+// one vault's intents to another after a vault switch.
 const cachedDeviceIds: Record<string, string> = {};
-async function resolveDeviceId(userId: string) {
-  if (!cachedDeviceIds[userId]) {
-    const device = await getOrCreateDeviceKey(userId);
-    cachedDeviceIds[userId] = device.device_id;
+async function resolveDeviceId(vaultId: string) {
+  if (!cachedDeviceIds[vaultId]) {
+    const device = await getOrCreateDeviceKey(vaultId);
+    cachedDeviceIds[vaultId] = device.device_id;
   }
-  return cachedDeviceIds[userId];
+  return cachedDeviceIds[vaultId];
 }
 
 type TimeGroup = "Today" | "Last week" | "More than a month";
@@ -84,7 +84,7 @@ export default function Home() {
     const vault = getVault.data?.vault;
     try {
       const { fetchCryptoParams } = await import("../../lib/queries/cryptoParams/query");
-      const params = await fetchCryptoParams(session!.user.email);
+      const params = await fetchCryptoParams(session!.vaultId);
       if (vault?.vault_key_wrap && vault?.vault_key_wrap_iv) {
         metadata = {
           salt: params.salt,
@@ -97,11 +97,11 @@ export default function Home() {
       // Non-fatal: unlock will fall back to fetching these from the server.
       console.warn("Failed to capture lock metadata", e);
     }
-    lockVault(metadata);
+    lockVaultState(metadata);
     queryClient.removeQueries({ queryKey: ["vault"] });
-    // Release this account's SQLite handle while locked; its intents stay
-    // durable on the account's own OPFS file.
-    await lockAccountStorage();
+    // Release this vault's SQLite handle while locked; its intents stay
+    // durable on the vault's own OPFS file.
+    await lockVaultStorage();
     router.replace("/lock" as any);
   };
 
@@ -111,10 +111,10 @@ export default function Home() {
     } catch (error) {
       console.error("Logout failed", error);
     }
-    // Centralized teardown: closes the per-user DB, deletes only this
-    // account's device records, wipes session state and the query cache. No
-    // pending intents from this account can be considered for the next one.
-    await teardownAccountSession(queryClient);
+    // Centralized teardown: closes this vault's DB, deletes only this vault's
+    // device records, wipes session state and the query cache. No pending
+    // intents from this vault can be considered for the next one.
+    await teardownVaultSession(queryClient);
     router.replace("/" as any);
   };
 
@@ -125,7 +125,7 @@ export default function Home() {
     const intent: CreateIntentPayload = {
       payload: b64(cipher),
       payloadIv: b64(iv),
-      deviceId: await resolveDeviceId(session!.user.id),
+      deviceId: await resolveDeviceId(session!.vaultId),
     }
     const { result, rows } = await createIntent("create", intent);
     if (result) {
@@ -153,7 +153,7 @@ export default function Home() {
     const intent: CreateIntentPayload = {
       payload: b64(cipher),
       payloadIv: b64(iv),
-      deviceId: await resolveDeviceId(session!.user.id),
+      deviceId: await resolveDeviceId(session!.vaultId),
     }
     const { result } = await createIntent("update", intent);
     if (result) {
@@ -169,7 +169,7 @@ export default function Home() {
     const intent: CreateIntentPayload = {
       payload: b64(cipher),
       payloadIv: b64(iv),
-      deviceId: await resolveDeviceId(session!.user.id),
+      deviceId: await resolveDeviceId(session!.vaultId),
     }
     const { result } = await createIntent("delete", intent);
     if (result) {
@@ -282,7 +282,7 @@ export default function Home() {
         {/* User Info */}
         <View className="border-t border-[#2a2a4a] px-4 py-3">
           <Text className="text-white text-sm truncate">
-            {session?.user.email || "user@example.com"}
+            {session?.vaultId ? `Vault ${session.vaultId.slice(0, 8)}…` : ""}
           </Text>
           <Text className="text-gray-400 text-xs">Free</Text>
         </View>

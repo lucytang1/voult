@@ -1,6 +1,6 @@
 export type RegisterRequest = {
-    email: string;
-    user_key: string;
+    vault_id: string;
+    vault_verifier: string;
     salt: string;
     iterations: number;
     vaultiv: string;
@@ -11,14 +11,11 @@ export type RegisterRequest = {
 }
 
 export type RegisterResponse = {
-    user: User;
+    vault_id: string;
     vault: string;
     salt: string;
     iterations: number;
     vaultiv: string;
-}
-
-type User = {
-    id: string;
-    email: string;
+    vault_key_wrap: string | null;
+    vault_key_wrap_iv: string | null;
 }

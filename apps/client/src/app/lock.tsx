@@ -4,7 +4,7 @@ import { Pressable, Text, TextInput, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAppStore } from "@/src/lib/state";
 import { unlockWithPassword } from "@/src/lib/auth/flows";
-import { teardownAccountSession } from "@/src/lib/auth/teardown";
+import { teardownVaultSession } from "@/src/lib/auth/teardown";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { logout } from "@/src/lib/queries/logout/query";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
@@ -31,7 +31,7 @@ export default function Lock() {
       await unlockWithPassword(password);
       // Reopen this account's per-user database (closed when the vault was
       // locked) so intents/sync can resume.
-      if (session?.user.id) await initSQLite(session.user.id);
+      if (session?.vaultId) await initSQLite(session.vaultId);
       setPassword("");
       router.replace("/home" as any);
     } catch (err) {
@@ -49,8 +49,8 @@ export default function Lock() {
       console.error("Logout failed", error);
     }
     // Same centralized teardown as the home-screen logout so pending intents
-    // and device secrets can never leak across accounts.
-    await teardownAccountSession(queryClient);
+    // and device secrets can never leak across vaults.
+    await teardownVaultSession(queryClient);
     router.replace("/" as any);
   };
 
@@ -58,7 +58,7 @@ export default function Lock() {
     <View className="flex-1 items-center justify-center bg-black px-6">
       <Text className="text-white text-xl mb-1">Voult is locked</Text>
       <Text className="text-gray-400 text-sm mb-6">
-        {session?.user.email ?? ""}
+        {session?.vaultId ? `Vault ${session.vaultId.slice(0, 8)}…` : ""}
       </Text>
       <TextInput
         className="w-full rounded-md bg-white px-3 py-2 mb-4"

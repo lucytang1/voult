@@ -46,3 +46,5 @@ export const useUpdateVault = () => {
     mutationFn: updateVault,
   });
 };
+
+export async function fetchVaultWithId(vaultId:string){ return fetchVault(); }

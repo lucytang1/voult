@@ -11,9 +11,9 @@ import {
 
 import type { SessionState, DecryptedVault, VaultItem } from "../state/type";
 
-export function parseVaultJson(plain: string): DecryptedVault {
+export function parseVaultJson(plain: string, vaultId = ""): DecryptedVault {
   const parsed = JSON.parse(plain) as { items?: VaultItem[] };
-  return { items: parsed.items ?? [] };
+  return { formatVersion: 1, vaultId, items: parsed.items ?? [] };
 }
 
 export interface UnlockedSession {
@@ -23,19 +23,19 @@ export interface UnlockedSession {
   version: number;
 }
 
-/** Derive the userKey + password wrapping key for a password. */
+/** Derive the vaultVerifier + password wrapping key for a password. */
 export async function derivePasswordKeys(password: string, salt: string, iterations: number) {
   const authKey = await createAuthKey(password, salt, iterations);
   const wrappingKey = await derivePasswordWrappingKey(password, salt, iterations);
-  const userKey = await getAuthVerifierB64(authKey);
-  return { wrappingKey, userKey };
+  const vaultVerifier = await getAuthVerifierB64(authKey);
+  return { wrappingKey, vaultVerifier };
 }
 
 /** Persist device secrets (deviceKey and deviceKey wrapped vaultKey) to the device storage. */
-export async function persistDeviceSecrets(vaultKeyRaw: Uint8Array, userId: string) {
-  const device = await getOrCreateDeviceKey(userId);
+export async function persistDeviceSecrets(vaultKeyRaw: Uint8Array, vaultId: string) {
+  const device = await getOrCreateDeviceKey(vaultId);
   const { cipher, iv } = await wrapKeyBytes(vaultKeyRaw, device.key);
-  await saveDeviceEnvelope(userId, {
+  await saveDeviceEnvelope(vaultId, {
     device_id: device.device_id,
     wrapped_vault_key: b64(cipher),
     wrapped_vault_key_iv: b64(iv),

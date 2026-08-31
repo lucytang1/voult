@@ -7,7 +7,9 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub session_id: String,
-    pub user_id: String,
+    // The authenticated vault that owns this session. The cookie stores only
+    // this ID — never keys, envelopes, or vault data.
+    pub vault_id: String,
     pub created_at: DateTimeUtc,
     pub expires_at: DateTimeUtc,
 }
@@ -15,18 +17,18 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::user::Entity",
-        from = "Column::UserId",
-        to = "super::user::Column::Id",
+        belongs_to = "super::vault::Entity",
+        from = "Column::VaultId",
+        to = "super::vault::Column::Id",
         on_update = "Cascade",
         on_delete = "Cascade"
     )]
-    User,
+    Vault,
 }
 
-impl Related<super::user::Entity> for Entity {
+impl Related<super::vault::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::User.def()
+        Relation::Vault.def()
     }
 }
 
