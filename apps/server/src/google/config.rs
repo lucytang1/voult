@@ -20,8 +20,29 @@ impl GoogleConfig {
             .unwrap_or_else(|_| "http://localhost:8080/api/google/oauth/callback".to_string());
         let scope = env::var("GOOGLE_DRIVE_SCOPE")
             .unwrap_or_else(|_| "https://www.googleapis.com/auth/drive.appdata".to_string());
-        let post_auth_redirect = env::var("GOOGLE_POST_AUTH_REDIRECT")
-            .unwrap_or_else(|_| "http://localhost:8081/vault".to_string());
+        let post_auth_redirect = env::var("GOOGLE_POST_AUTH_REDIRECT").unwrap_or_else(|_| {
+            // In bundled mode the frontend is served from :8080 same-origin;
+            // :8081 is only the Expo dev server. Prefer :8080 when not overridden.
+            // If STATIC_DIR resolves to a bundle, use :8080, otherwise keep dev default.
+            // We infer via env presence: if running bundled, STATIC_DIR will be Resources/dist
+            let is_bundled = env::var("STATIC_DIR")
+                .map(|v| v.contains("Resources/dist"))
+                .unwrap_or_else(|_| {
+                    // No explicit STATIC_DIR → check if bundled Resources/dist exists relative to exe
+                    if let Ok(exe) = env::current_exe() {
+                        if let Some(dir) = exe.parent() {
+                            return dir.join("../Resources/dist/index.html").exists()
+                                || dir.join("../../Resources/dist/index.html").exists();
+                        }
+                    }
+                    false
+                });
+            if is_bundled {
+                "http://localhost:8080/vault".to_string()
+            } else {
+                "http://localhost:8081/vault".to_string()
+            }
+        });
         Some(Self {
             client_id,
             client_secret,

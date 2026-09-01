@@ -5,15 +5,14 @@ import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { startGoogleAuth, redirectToGoogleAuth } from "@/src/lib/google/api";
 
 /**
- * Landing / first-run entry (Flow C).
+ * Landing / first-run entry (Case 1: no session).
  *
- * No email is ever collected. A brand-new user (no session, no locally-known
- * vault) chooses between:
- *   - Create a new vault locally (generates a vault id on-device), or
- *   - Import an existing vault from Google Drive (starts the OAuth pending
- *     flow; the vault is later unlocked by vault id + master password — no
- *     email field is shown).
- * A secondary "Restore existing vault" link covers the paste-a-vault-id case.
+ * When no session is present the user chooses exactly two options:
+ *   1) Create new vault locally -> enter master password -> vault created
+ *      (can later enable cloud sync from Settings/Home).
+ *   2) Use Cloud sync -> Google OAuth -> list Drive vaults -> select vault
+ *      -> enter master password -> decrypt & download locally.
+ * No vault-id input is ever shown.
  */
 export default function Landing() {
   // Landing is only for signed-out users; locked users go to /lock,
@@ -53,7 +52,7 @@ export default function Landing() {
 
       <Pressable
         className="w-full rounded-xl bg-purple-600 py-4 items-center mb-4"
-        onPress={() => router.push("/vault/create" as any)}
+        onPress={() => router.push("/auth/signup" as any)}
       >
         <Text className="text-white font-medium text-lg">Create new vault</Text>
         <Text className="text-purple-200 text-xs mt-1">Stays on this device until you enable sync</Text>
@@ -81,10 +80,6 @@ export default function Landing() {
       </Pressable>
 
       {googleError && <Text className="text-red-400 text-sm mb-4">{googleError}</Text>}
-
-      <Pressable className="mt-2" onPress={() => router.push("/auth/login" as any)}>
-        <Text className="text-blue-400 text-sm">Restore an existing vault by vault id</Text>
-      </Pressable>
     </View>
   );
 }

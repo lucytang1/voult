@@ -93,14 +93,12 @@ export default function SignUp() {
 
       <Link href="/" asChild>
         <Pressable className="mt-4">
-          <Text className="text-blue-400">Back to home</Text>
+          <Text className="text-blue-400">Back</Text>
         </Pressable>
       </Link>
-      <Link href={"/auth/login" as any} asChild>
-        <Pressable className="mt-2">
-          <Text className="text-blue-400">Restore an existing vault?</Text>
-        </Pressable>
-      </Link>
+      <Text className="text-gray-500 text-xs mt-4 text-center">
+        Already have a Drive backup? Go back and use "Continue with Google Drive" to restore it — no vault id needed.
+      </Text>
     </View>
   );
 }

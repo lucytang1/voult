@@ -21,37 +21,59 @@ export default function RootLayout() {
   // useSyncTriggers();
   useEffect(() => {
     const bootstrap = async () => {
-      // SQLite is opened per-vault (file:voult-<vaultId>.db) and only once a
-      // session exists — never globally at startup, so pre-auth code cannot
-      // touch any vault's intent log or client state.
-      // Existing-session unlock: if the session cookie is valid and the
-      // browser device key + envelope exist, restore the unlocked vault
-      // without requesting the master password. Skipped when the user
-      // explicitly locked the vault (sessionStorage flag) so a reload can't
-      // silently re-unlock — they must go through /lock instead.
+      // Case 2: session present -> restore app using session and if locked unlock via master password.
+      // Case 1: no session -> stay on landing ("/") which offers two options (create locally or cloud sync).
+      // SQLite is opened per-vault only once a session exists.
+
+      // Skip auto-restore when handling Google OAuth callback with pending state —
+      // the vault chooser at /vault handles that UX.
+      if (typeof window !== "undefined" && window.location.search.includes("google_pending_state")) {
+        return;
+      }
+
       try {
         const lockedFlag = isLockedFlagSet();
-        const unlocked = lockedFlag ? null : await unlockWithDevice();
-        if (unlocked) {
-          await initSQLite(unlocked.session.vaultId);
-          setVaultKey(unlocked.vaultKey);
-          setSession(unlocked.session);
-          updateDecryptedVault(unlocked.decryptedVault);
-          updateVaultVersion(unlocked.version);
-        } else if (lockedFlag) {
-          // Locked after a reload: in-memory session is gone but the cookie
-          // may still be valid. Restore just the session so the app enters
-          // the Authenticated+Locked state and /lock accepts it.
-          const sessionData = await fetchSession();
+
+        // Probe whether a session cookie exists at all.
+        let sessionData: Awaited<ReturnType<typeof fetchSession>> | null = null;
+        try {
+          sessionData = await fetchSession();
+        } catch {
+          // No valid session -> stay on landing for Case 1.
+          console.log("No session to restore — showing landing");
+          return;
+        }
+
+        if (lockedFlag) {
+          // Locked after a reload: restore just the session so /lock can accept it.
           await initSQLite(sessionData.vault_id);
           setSession({ vaultId: sessionData.vault_id, cryptoVersion: sessionData.crypto_version });
+          router.navigate("/lock" as any);
+          return;
         }
-        router.navigate((lockedFlag ? "/lock" : "/home") as any);
 
+        // Not locked -> try silent device unlock (no password).
+        try {
+          const unlocked = await unlockWithDevice();
+          if (unlocked) {
+            await initSQLite(unlocked.session.vaultId);
+            setVaultKey(unlocked.vaultKey);
+            setSession(unlocked.session);
+            updateDecryptedVault(unlocked.decryptedVault);
+            updateVaultVersion(unlocked.version);
+            router.navigate("/home" as any);
+            return;
+          }
+        } catch (e) {
+          console.log("Device unlock failed, falling back to password unlock", e);
+        }
+
+        // Session exists but device unlock unavailable -> need master password.
+        await initSQLite(sessionData.vault_id);
+        setSession({ vaultId: sessionData.vault_id, cryptoVersion: sessionData.crypto_version });
+        router.navigate("/lock" as any);
       } catch (e) {
-        // No valid session, missing device key/envelope, or network error —
-        // stay on the landing/login screen.
-        console.log("No session to restore", e);
+        console.log("Bootstrap error", e);
       }
     };
     bootstrap();

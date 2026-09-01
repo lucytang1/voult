@@ -74,6 +74,14 @@ export async function listGoogleVaultsPending(state: string): Promise<VaultDescr
   return res.data.vaults;
 }
 
+export async function readGoogleVaultPending(state: string, fileId: string): Promise<{ package: string; remote_revision: string; file_id: string }> {
+  const res = await http.get<{ package: string; remote_revision: string; file_id: string }>(
+    "/google/vaults/pending/read",
+    { params: { state, file_id: fileId } }
+  );
+  return res.data;
+}
+
 export async function linkPendingGoogleToken(state: string): Promise<{ linked: boolean }> {
   const res = await http.post<{ linked: boolean }>("/google/link-pending", { state });
   return res.data;
