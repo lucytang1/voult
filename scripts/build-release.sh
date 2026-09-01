@@ -151,6 +151,21 @@ fi
 # PkgInfo (optional, for Finder)
 echo "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
+# Ad-hoc code sign so Gatekeeper doesn't report "damaged" for unsigned builds.
+# Without any signature, macOS 13+ with quarantine treats the bundle as damaged
+# instead of showing the normal "unidentified developer" dialog.
+# `codesign -` is an ad-hoc signature (no Apple ID / not notarized) — just enough
+# to make `spctl`/`Gatekeeper` allow "Move to Bin" → `xattr -cr` workflow, and
+# `codesign --verify` passes. Testers still need to right-click Open or clear
+# quarantine on first launch, but they won't get the "damaged" error.
+if command -v codesign >/dev/null 2>&1; then
+  echo "Ad-hoc signing $APP_BUNDLE ..."
+  codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 || echo "WARNING: codesign failed (non-fatal)"
+  echo "codesign verify: $(codesign --verify --verbose "$APP_BUNDLE" 2>&1 || true)"
+else
+  echo "WARNING: codesign not found — bundle will be unsigned and may show 'damaged' on download"
+fi
+
 echo "Staged bundle:"
 find "$APP_BUNDLE" -maxdepth 4 -print | head -n 40
 ls -lh "$APP_BUNDLE/Contents/MacOS/"
