@@ -46,7 +46,8 @@ const loadItemsFromResponse = async (
 
 //updates the vault state with the server snapshot
 const adoptServerSnapshot = async (items: VaultItem[], version: number) => {
-  updateDecryptedVault({ items });
+  const vaultId = useAppStore.getState().session?.vaultId ?? "";
+  updateDecryptedVault({ formatVersion: 1, vaultId, items });
   updateVaultVersion(version);
   await upsertVaultVersion(version);
 };
@@ -62,16 +63,16 @@ export async function sync() {
     return;
   }
 
-  // Pin the account this sync run belongs to. If the session changes
-  // mid-flight (logout, account switch, server-forced 401), abort instead of
-  // uploading or resolving another account's intents.
-  const syncUserId = session.user.id;
+  // Pin the vault this sync run belongs to. If the session changes mid-flight
+  // (logout, vault switch, server-forced 401), abort instead of uploading or
+  // resolving another vault's intents.
+  const syncVaultId = session.vaultId;
   const sessionChanged = () =>
-    useAppStore.getState().session?.user.id !== syncUserId;
+    useAppStore.getState().session?.vaultId !== syncVaultId;
 
   for (let attempt = 1; attempt <= MAX_SYNC_RETRIES; attempt++) {
     if (sessionChanged()) {
-      console.warn("Sync aborted: session changed mid-run", { userId: syncUserId });
+      console.warn("Sync aborted: session changed mid-run", { vaultId: syncVaultId });
       return;
     }
     // Server unreachable is a normal offline state, not an error: pending
@@ -125,7 +126,7 @@ export async function sync() {
       vaultKey,
     );
     if (sessionChanged()) {
-      console.warn("Sync aborted before push: session changed mid-run", { userId: syncUserId });
+      console.warn("Sync aborted before push: session changed mid-run", { vaultId: syncVaultId });
       return;
     }
     let response: Awaited<ReturnType<typeof updateVault>>;
@@ -153,7 +154,7 @@ export async function sync() {
     // Success: adopt the server's stored vault, advance the base version,
     // and mark the merged intents synced.
     if (sessionChanged()) {
-      console.warn("Sync aborted after push: session changed mid-run", { userId: syncUserId });
+      console.warn("Sync aborted after push: session changed mid-run", { vaultId: syncVaultId });
       return;
     }
     const syncedItems = await loadItemsFromResponse(response, vaultKey);

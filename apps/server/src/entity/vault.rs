@@ -11,6 +11,10 @@ pub struct Model {
     pub salt: String,
     pub iterations: i32,
     pub vaultiv: String,
+    // Verifier derived from the master password client-side. It is an
+    // authentication credential only — never the password, wrapping key, or
+    // vault key. The server uses it solely to confirm a correct unlock.
+    pub vault_verifier: String,
     pub created_at: DateTimeUtc,
     pub version: i32,
     pub crypto_version: i32,
@@ -19,15 +23,6 @@ pub struct Model {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_one = "super::user::Entity")]
-    User,
-}
-
-impl Related<super::user::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::User.def()
-    }
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

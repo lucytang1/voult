@@ -4,10 +4,8 @@ use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 
-use crate::entity::user::{self, Entity as User};
 use crate::entity::vault::{self, Entity as Vault};
-use crate::id_codec::{uuid_from_db, uuid_to_db};
-use crate::session_auth::session_user_id;
+use crate::session_auth::session_vault_id;
 
 use crate::db::DbPool;
 
@@ -54,7 +52,7 @@ pub async fn update_vault(
     session: Session,
     payload: web::Json<UpdateVaultRequest>,
 ) -> HttpResponse {
-    let user_id = match session_user_id(&session) {
+    let vault_id = match session_vault_id(&session) {
         Ok(Some(id)) => id,
         Ok(None) | Err(_) => {
             return error_response(
@@ -67,39 +65,8 @@ pub async fn update_vault(
 
     let request = payload.into_inner();
 
-    let user = match User::find()
-        .filter(user::Column::Id.eq(&user_id))
-        .one(pool.get_ref())
-        .await
-    {
-        Ok(Some(user)) => user,
-        Ok(None) => {
-            return error_response(StatusCode::NOT_FOUND, "user not found", "USER_NOT_FOUND");
-        }
-        Err(e) => {
-            log::error!("failed to fetch user: {:?}", e);
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to fetch user",
-                "DB_ERROR",
-            );
-        }
-    };
-
-    let vault_id = match uuid_from_db(&user.vault_id) {
-        Ok(id) => id,
-        Err(e) => {
-            log::error!("invalid UUID in user.vault_id: {:?}", e);
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invalid vault id in database",
-                "DATA_INTEGRITY_ERROR",
-            );
-        }
-    };
-
     let vault = match Vault::find()
-        .filter(vault::Column::Id.eq(uuid_to_db(vault_id)))
+        .filter(vault::Column::Id.eq(&vault_id))
         .one(pool.get_ref())
         .await
     {
@@ -147,7 +114,7 @@ pub async fn update_vault(
             vault::Column::Version,
             Expr::col(vault::Column::Version).add(1),
         )
-        .filter(vault::Column::Id.eq(uuid_to_db(vault_id)))
+        .filter(vault::Column::Id.eq(&vault_id))
         .filter(vault::Column::Version.eq(request.version as i32))
         .exec(pool.get_ref())
         .await;

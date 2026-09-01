@@ -14,17 +14,35 @@ export type VaultItem = z.infer<typeof VaultItemSchema>;
 // two devices editing different fields of the same entry both survive a merge.
 
 
+export const VAULT_DOCUMENT_FORMAT_VERSION = 1;
+
 export interface DecryptedVault {
+    formatVersion: number;
+    vaultId: string;
     items: VaultItem[];
 }
 
+/**
+ * The active session, scoped to a single vault. There is no account/user object
+ * — `vaultId` is the only identity and the session cookie carries only it.
+ */
 export interface SessionState {
-  user: {
-    id: string;
-    email: string;
-  };
-  cryptoVersion: number;
+    vaultId: string;
+    cryptoVersion: number;
 }
+
+/** The portable encrypted object stored by a cloud provider in later phases. */
+export interface VoultPackage {
+  packageFormatVersion: number;
+  vaultId: string;
+  logicalRevision: number;
+  cryptoVersion: number;
+  cryptoParameters: { salt: string; iterations: number };
+  snapshot: { ciphertext: string; iv: string };
+  passwordKeyEnvelope: { wrappedVaultKey: string; iv: string };
+}
+
+
 
 /**
  * Material needed to re-derive the vault key locally when unlocking after a

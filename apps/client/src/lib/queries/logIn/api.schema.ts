@@ -1,16 +1,13 @@
 export type LoginRequest = {
-    email: string;
-    user_key: string;
+    vault_id: string;
+    vault_verifier: string;
 }
 
 export type LoginResponse = {
-    user: User;
+    vault_id: string;
     salt: string;
     iterations: number;
     crypto_version: number;
-}
-
-type User = {
-    id: string;
-    email: string;
+    vault_key_wrap: string | null;
+    vault_key_wrap_iv: string | null;
 }

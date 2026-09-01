@@ -39,6 +39,48 @@ export const getAuthState = (): AuthState => {
   return isLocked ? "locked" : "unlocked";
 };
 
+const updateDecryptedVault = (decryptedVault: DecryptedVault) =>
+  useAppStore.setState({ decryptedVault });
+
+const addVaultItem = (item: CreateVaultItem) =>
+  useAppStore.setState((state) => ({
+    decryptedVault: {
+      formatVersion: state.decryptedVault?.formatVersion ?? 1,
+      vaultId: state.decryptedVault?.vaultId ?? state.session?.vaultId ?? "",
+      items: state.decryptedVault
+        ? [...state.decryptedVault.items, item]
+        : [item],
+    },
+  }));
+
+const updateVaultItem = (
+  updateditem: UpdateVaultItem,
+) =>
+  useAppStore.setState((state) => ({
+    decryptedVault: {
+      formatVersion: state.decryptedVault?.formatVersion ?? 1,
+      vaultId: state.decryptedVault?.vaultId ?? state.session?.vaultId ?? "",
+      items:
+        state.decryptedVault?.items.map((item) =>
+          item.id === updateditem.id ? { ...item, ...updateditem.fields} : item,
+        ) ?? [],
+    },
+  }));
+
+const deleteVaultItem = (deleteitem: DeleteVaultItem) =>
+  useAppStore.setState((state) => ({
+    decryptedVault: {
+      formatVersion: state.decryptedVault?.formatVersion ?? 1,
+      vaultId: state.decryptedVault?.vaultId ?? state.session?.vaultId ?? "",
+      items:
+        state.decryptedVault?.items.filter(
+          (item) => !(item.id === deleteitem.id),
+        ) ?? [],
+    },
+  }));
+
+// --- Lifecycle helpers (vault-native names) ------------------------------
+
 /**
  * Lock must survive page reloads: in-memory state is lost on refresh, and
  * unlockWithDevice() would otherwise silently re-unlock the vault. A
@@ -73,13 +115,13 @@ export function isLockedFlagSet(): boolean {
  * Locking clears the vault key, auth key, decrypted vault, and cached unlock
  * metadata while retaining the session cookie, vault version (so pending sync
  * intents keep a valid base_version), device key, and envelope. The metadata
- * captured here lets /lock re-derive the vault key from the master password
+ * captured here lets unlock re-derive the vault key from the master password
  * entirely client-side.
  *
  * Note: clearing TanStack Query's ["vault"] cache (ciphertext) is done by the
  * caller where the query client is available.
  */
-const lockVault = (metadata: LockMetadata | null = null) => {
+const lockVaultStorage = (metadata: LockMetadata | null = null) => {
   persistLockedFlag();
   useAppStore.setState({
     vaultKey: null,
@@ -107,40 +149,6 @@ const clearSessionState = () => {
   });
 };
 
-const updateDecryptedVault = (decryptedVault: DecryptedVault) =>
-  useAppStore.setState({ decryptedVault });
-
-const addVaultItem = (item: CreateVaultItem) =>
-  useAppStore.setState((state) => ({
-    decryptedVault: {
-      items: state.decryptedVault
-        ? [...state.decryptedVault.items, item]
-        : [item],
-    },
-  }));
-
-const updateVaultItem = (
-  updateditem: UpdateVaultItem,
-) =>
-  useAppStore.setState((state) => ({
-    decryptedVault: {
-      items:
-        state.decryptedVault?.items.map((item) =>
-          item.id === updateditem.id ? { ...item, ...updateditem.fields} : item,
-        ) ?? [],
-    },
-  }));
-
-const deleteVaultItem = (deleteitem: DeleteVaultItem) =>
-  useAppStore.setState((state) => ({
-    decryptedVault: {
-      items:
-        state.decryptedVault?.items.filter(
-          (item) => !(item.id === deleteitem.id),
-        ) ?? [],
-    },
-  }));
-
 export {
   useAppStore,
   setVaultKey,
@@ -149,9 +157,11 @@ export {
   updateDecryptedVault,
   updateVaultVersion,
   setSyncStatus,
-  lockVault,
+  lockVaultStorage,
   clearSessionState,
   addVaultItem,
   updateVaultItem,
   deleteVaultItem,
 };
+export const setVaultState = (s: any) => useAppStore.setState({ vaultState: s } as any);
+export const setVaultMode = (m: any) => useAppStore.setState({ vaultMode: m } as any);

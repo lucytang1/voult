@@ -34,6 +34,19 @@ export function newSaltB64() {
   return b64(generateSalt());
 }
 
+/** Generates a stable, client-side vault UUID (embedded in the encrypted doc). */
+export function uuid(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  // Fallback for environments without crypto.randomUUID.
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 export function b64(bytes: Uint8Array) {
     return btoa(String.fromCharCode(...bytes));
 }
@@ -144,7 +157,7 @@ export async function computeAuthVerifier(authKey: CryptoKey) {
     return new Uint8Array(sig); // 32 bytes
 }
 
-/** Returns base64 auth verifier string for API auth (e.g. get_vault user_key). */
+/** Returns base64 auth verifier string for API auth (vault_verifier). */
 export async function getAuthVerifierB64(authKey: CryptoKey): Promise<string> {
   const verifier = await computeAuthVerifier(authKey);
   return b64(verifier);
@@ -247,17 +260,4 @@ export async function createAuthKey(masterPassword: string, salt: string, iterat
   const rawAuthBytes = await hkdfExpand(rootKey, HKDF_INFO_AUTH, 32);
   const authKey = await makeAuthKey(rawAuthBytes);
   return authKey;
-}
-
-export async function createLoginPayload(email: string, masterPassword: string, salt: string, iterations: number) {
-    const saltPwdBytes = fromB64(salt);
-    const rootKey = await deriveRootKey(masterPassword, saltPwdBytes, iterations);
-    const authEncBytes = await hkdfExpand(rootKey, HKDF_INFO_AUTH, 32);
-    const authKey = await makeAuthKey(authEncBytes);
-    const authVerifier = await computeAuthVerifier(authKey);
-
-    return {
-        email: email,
-        user_key: b64(authVerifier), // send to server for comparison
-    };
 }

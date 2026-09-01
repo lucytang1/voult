@@ -3,13 +3,12 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 
 use crate::db::DbPool;
-use crate::entity::user::{self, Entity as UserEntity};
 use crate::entity::vault::{self, Entity as Vaults};
-use crate::id_codec::{uuid_from_db, uuid_to_db};
 
 #[derive(Deserialize)]
 pub struct GetCryptoParamsRequest {
-    pub email: String,
+    // Vault identity the client wants KDF params for, before unlocking.
+    pub vault_id: String,
 }
 
 #[derive(Serialize)]
@@ -37,52 +36,29 @@ pub async fn get_crypto_params(
     payload: web::Query<GetCryptoParamsRequest>,
 ) -> HttpResponse {
     let request = payload.into_inner();
-    if request.email.trim().is_empty() {
+    if request.vault_id.trim().is_empty() {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "email is required",
+            "vault_id is required",
+            "INVALID_INPUT",
+        );
+    }
+    if uuid::Uuid::parse_str(&request.vault_id).is_err() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid vault_id",
             "INVALID_INPUT",
         );
     }
 
-    let user = match UserEntity::find()
-        .filter(user::Column::Email.eq(&request.email))
-        .one(pool.get_ref())
-        .await
-    {
-        Ok(Some(user)) => user,
-        Ok(None) => {
-            return error_response(StatusCode::NOT_FOUND, "user not found", "USER_NOT_FOUND");
-        }
-        Err(e) => {
-            log::error!("failed to fetch user: {:?}", e);
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to fetch user",
-                "DB_ERROR",
-            );
-        }
-    };
-
-    let vault_id = match uuid_from_db(&user.vault_id) {
-        Ok(id) => id,
-        Err(e) => {
-            log::error!("invalid UUID in user.vault_id: {:?}", e);
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invalid vault id in database",
-                "DATA_INTEGRITY_ERROR",
-            );
-        }
-    };
-
     let vault = match Vaults::find()
-        .filter(vault::Column::Id.eq(uuid_to_db(vault_id)))
+        .filter(vault::Column::Id.eq(&request.vault_id))
         .one(pool.get_ref())
         .await
     {
         Ok(Some(vault)) => vault,
         Ok(None) => {
+            // Do not reveal vault existence before auth; return generic error.
             return error_response(StatusCode::NOT_FOUND, "vault not found", "VAULT_NOT_FOUND");
         }
         Err(e) => {

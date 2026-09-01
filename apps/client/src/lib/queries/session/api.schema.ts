@@ -1,8 +1,5 @@
 export type SessionResponse = {
   authenticated: boolean;
-  user: {
-    id: string;
-    email: string;
-  };
+  vault_id: string;
   crypto_version: number;
 }
