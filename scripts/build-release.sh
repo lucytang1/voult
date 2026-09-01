@@ -108,6 +108,24 @@ if [[ ! -s "$APP_BUNDLE/Contents/Resources/google.env" ]] && [[ -n "${GOOGLE_CLI
     [[ -n "${CORS_ORIGINS:-}" ]] && echo "CORS_ORIGINS=${CORS_ORIGINS}"
   } > "$APP_BUNDLE/Contents/Resources/google.env"
 fi
+# Normalize redirect URI: ensure the new canonical endpoint is present.
+# Google Console must have this exact URI in "Authorized redirect URIs".
+# We force GOOGLE_OAUTH_REDIRECT_URI to the non-legacy path so error 400
+# redirect_uri_mismatch doesn't happen if console only has /api/google/...
+if [[ -f "$APP_BUNDLE/Contents/Resources/google.env" ]]; then
+  if ! grep -q '^GOOGLE_OAUTH_REDIRECT_URI=' "$APP_BUNDLE/Contents/Resources/google.env"; then
+    # If only legacy GOOGLE_REDIRECT_URI exists, promote it to canonical name
+    if grep -q '^GOOGLE_REDIRECT_URI=' "$APP_BUNDLE/Contents/Resources/google.env"; then
+      echo "GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8080/api/google/oauth/callback" >> "$APP_BUNDLE/Contents/Resources/google.env"
+    else
+      echo "GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8080/api/google/oauth/callback" >> "$APP_BUNDLE/Contents/Resources/google.env"
+    fi
+  fi
+  # Also ensure legacy is present for backwards compat (server accepts both)
+  if ! grep -q '^GOOGLE_REDIRECT_URI=' "$APP_BUNDLE/Contents/Resources/google.env"; then
+    echo "GOOGLE_REDIRECT_URI=http://localhost:8080/api/google/oauth/callback" >> "$APP_BUNDLE/Contents/Resources/google.env"
+  fi
+fi
 if [[ -s "$APP_BUNDLE/Contents/Resources/google.env" ]]; then
   echo "Bundled google.env:"
   sed 's/SECRET=.*/SECRET=***redacted***/' "$APP_BUNDLE/Contents/Resources/google.env" | head -n 20
