@@ -25,4 +25,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Voult-aarch64
-          path: build/Voult-aarch64.*
+          path: |
+            build/Voult-aarch64.dmg
+            build/Voult-aarch64.tar.gz
+          if-no-files-found: error
+          compression-level: 0
