@@ -4,11 +4,12 @@ import { teardownVaultSession } from "../auth/teardown";
 /**
  * Shared HTTP client for the vault API. Credentialed requests (session
  * cookie) are enabled via `withCredentials: true`. On a `SESSION_REQUIRED`
- * response the session is torn down through the same centralized path as an
- * explicit logout (closes this vault's SQLite DB, deletes this vault's device
- * records, wipes volatile state) so a dead server session can never leak one
- * vault's local data into another's. The query cache is in-memory only here;
- * routing away from authenticated screens drops it.
+ * response the session is torn down (closes this vault's SQLite DB, deletes
+ * this vault's device records, wipes volatile state) so a dead server session
+ * can never leak one vault's local data into another's. The query cache is
+ * in-memory only here; routing away from authenticated screens drops it.
+ * There is no explicit logout — this is the only path back to
+ * not_authenticated besides manual cookie removal.
  */
 export const http = axios.create({
   // Falls back to the same origin's /api root when served by the backend.

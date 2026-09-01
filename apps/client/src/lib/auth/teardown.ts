@@ -4,16 +4,19 @@ import { closeSQLite } from "../sqlite/web/init-db";
 import { deleteDeviceKey } from "../crypto/device-key";
 
 /**
- * Single teardown path for every way a session can end (explicit logout from
- * home or the lock screen, and server-forced 401). Ordering matters:
+ * Central teardown path for server-forced session expiry (401
+ * SESSION_REQUIRED). Ordering matters:
  *
  * 1. Capture the vault id BEFORE any state is wiped.
  * 2. Close this vault's SQLite database so no further intent/state writes can
  *    land after teardown begins — pending intents stay durable on that vault's
  *    own OPFS file for its next unlock.
- * 3. Delete only this vault's device key + envelope records (full logout);
- *    other vaults' records in the same browser profile are untouched.
+ * 3. Delete only this vault's device key + envelope records for the expired
+ *    session; other vaults' records in the same browser profile are untouched.
  * 4. Wipe volatile session state and (when available) the query cache.
+ *
+ * There is no explicit logout action — authenticated states are locked /
+ * unlocked, and unauthenticated is reached only via session expiry or removal.
  */
 export async function teardownVaultSession(queryClient?: QueryClient) {
   const vaultId = useAppStore.getState().session?.vaultId ?? null;
@@ -23,7 +26,7 @@ export async function teardownVaultSession(queryClient?: QueryClient) {
     try {
       await deleteDeviceKey(vaultId);
     } catch (e) {
-      console.error("Failed to delete device secrets on logout", e);
+      console.error("Failed to delete device secrets on session expiry", e);
     }
   }
 

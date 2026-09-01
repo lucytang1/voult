@@ -29,10 +29,10 @@ const setSyncStatus = (isSyncing: boolean) =>
 
 // --- Auth state machine --------------------------------------------------
 //
-// The app has three states derived from (session, isLocked):
+// The app has two top-level states:
 //   not_authenticated — no session cookie / session cleared
-//   locked            — session alive but keys + decrypted vault wiped
-//   unlocked          — normal operation
+//   authenticated     — session alive, subdivided into locked / unlocked
+// Derived as three values for routing: not_authenticated | locked | unlocked.
 export const getAuthState = (): AuthState => {
   const { session, isLocked } = useAppStore.getState();
   if (!session) return "not_authenticated";
@@ -133,8 +133,9 @@ const lockVaultStorage = (metadata: LockMetadata | null = null) => {
 };
 
 /**
- * Logout clears volatile keys and session metadata. The device key and
- * envelope are handled by the caller per policy (revoke + delete on logout).
+ * Clears volatile keys and session metadata when the session expires or is
+ * otherwise invalidated (401 SESSION_REQUIRED). The device key and envelope
+ * deletion is handled by the caller (teardown path).
  */
 const clearSessionState = () => {
   clearLockedFlag();

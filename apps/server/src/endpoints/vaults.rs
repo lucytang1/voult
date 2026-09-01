@@ -41,7 +41,7 @@ pub async fn create_vault(pool: web::Data<DbPool>, session: Session, payload: we
     };
     let cv = req.crypto_version.unwrap_or(2);
     let am = vault::ActiveModel { id: Set(uuid_to_db(vault_uuid)), vault: Set(req.vault), salt: Set(req.salt), iterations: Set(req.iterations), vaultiv: Set(req.vaultiv), vault_verifier: Set(req.vault_verifier.unwrap_or_default()), version: Set(1), crypto_version: Set(cv), vault_key_wrap: Set(req.vault_key_wrap), vault_key_wrap_iv: Set(req.vault_key_wrap_iv), ..Default::default() };
-    let inserted = match am.insert(pool.get_ref()).await { Ok(v) => v, Err(e) => { log::error!("{:?}", e); return err(StatusCode::INTERNAL_SERVER_ERROR, "failed to create vault", "DB_ERROR"); } };
+    let inserted = match am.insert(pool.get_ref()).await { Ok(v) => v, Err(e) => { let s = format!("{e:?}"); if s.contains("UNIQUE constraint failed") || s.contains("unique constraint") || s.contains("1555") { log::warn!("vault create conflict: {:?}", e); return err(StatusCode::CONFLICT, "vault already exists", "VAULT_EXISTS"); } log::error!("failed to create vault: {:?}", e); return err(StatusCode::INTERNAL_SERVER_ERROR, "failed to create vault", "DB_ERROR"); } };
     let vid = Uuid::parse_str(&inserted.id).unwrap_or(vault_uuid);
     HttpResponse::Created().json(CreateVaultResponse { vault_id: vid, vault: inserted.vault, vaultiv: inserted.vaultiv, salt: inserted.salt, iterations: inserted.iterations, version: inserted.version, crypto_version: inserted.crypto_version })
 }

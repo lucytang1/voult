@@ -22,6 +22,9 @@ const START_ITEM_ID: &str = "start_item";
 const STATUS_ITEM_ID: &str = "status_item";
 const QUIT_ITEM_ID: &str = "quit_item";
 
+mod config;
+use config::Environment;
+
 /// Address the server is expected to listen on. The launcher only needs to
 /// know "is something listening" — a raw TCP connect is enough for that and
 /// keeps the launcher decoupled from the API itself.
@@ -193,10 +196,14 @@ impl Launcher {
             _ => {}
         }
 
-        // Auto-open browser once when server becomes reachable
+        // Auto-open browser once when server becomes reachable (prod only).
         if transitioned_to_running && !self.has_auto_opened {
             self.has_auto_opened = true;
-            Self::open_browser();
+            if Environment::from_env().is_dev() {
+                info_log("Dev mode (VOULT_ENV=development): auto-open disabled");
+            } else {
+                Self::open_browser();
+            }
         }
     }
 
@@ -285,11 +292,19 @@ impl Launcher {
                 (Stdio::inherit(), Stdio::inherit())
             };
 
-            let result = Command::new(&bin)
-                .stdin(Stdio::null())
-                .stdout(stdout)
-                .stderr(stderr)
-                .spawn();
+            let mut cmd = Command::new(&bin);
+            cmd.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
+            // In dev, run the server with CWD = apps/server so a relative
+            // DATABASE_URL resolves to apps/server/voult.db even when launcher
+            // CWD != server.
+            if Environment::from_env().is_dev() {
+                if let Ok(dir) = Self::server_directory() {
+                    if dir.exists() {
+                        cmd.current_dir(dir);
+                    }
+                }
+            }
+            let result = cmd.spawn();
 
             match result {
                 Ok(server) => {
@@ -436,9 +451,20 @@ impl ApplicationHandler<UserEvent> for Launcher {
         }
 
         // Auto-start the server on launch so double-clicking the app
-        // immediately makes http://localhost:8080 usable. If something is
-        // already listening on :8080 we detect it via the health probe and
-        // show "Running elsewhere" instead.
+        // immediately makes http://localhost:8080 usable.
+        // Dev skips auto-start so launcher/server can be tested independently.
+        if Environment::from_env().is_dev() {
+            info_log("Dev mode (VOULT_ENV=development): auto-start disabled — use \"Start Server\" in the tray menu");
+            if self.is_port_open() {
+                // Still reflect current port state immediately without the
+                // 2s probe delay, but don't auto-open the browser in dev.
+                self.last_health_probe = Instant::now() - HEALTH_PROBE_INTERVAL;
+                self.refresh_state();
+                self.update_menu();
+            }
+            return;
+        }
+
         if self.child.is_none() && !self.is_port_open() {
             self.start_server();
         } else if self.is_port_open() {
@@ -446,7 +472,7 @@ impl ApplicationHandler<UserEvent> for Launcher {
             self.last_health_probe = Instant::now() - HEALTH_PROBE_INTERVAL;
             self.refresh_state();
             self.update_menu();
-            // If we detected a foreign server, still auto-open browser
+            // If we detected a foreign server, still auto-open browser (prod only)
             if matches!(self.state, ServerState::RunningElsewhere { .. }) && !self.has_auto_opened {
                 self.has_auto_opened = true;
                 Self::open_browser();
@@ -497,6 +523,11 @@ impl ApplicationHandler<UserEvent> for Launcher {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    config::load_dotenv();
+    if Environment::from_env().is_dev() {
+        eprintln!("[launcher] VOULT_ENV=development detected (dev mode)");
+    }
+
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 

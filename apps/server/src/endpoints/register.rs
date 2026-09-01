@@ -115,9 +115,24 @@ pub async fn register(
         Ok(inserted) => inserted,
         Err(e) => {
             // A duplicate vault_id (unique primary key) is a client conflict,
-            // not a server error.
-            if matches!(e, sea_orm::DbErr::Exec(_)) {
+            // not a server error. SeaORM surfaces sqlite UNIQUE as Query or Exec
+            // depending on driver version – check both and fall back to string.
+            let err_str = format!("{e:?}");
+            let is_unique = err_str.contains("UNIQUE constraint failed")
+                || err_str.contains("unique constraint")
+                || err_str.contains("1555");
+            if matches!(e, sea_orm::DbErr::Exec(_) | sea_orm::DbErr::Query(_)) && is_unique {
                 log::warn!("vault registration conflict: {:?}", e);
+                let _ = tx.rollback().await;
+                return error_response(
+                    StatusCode::CONFLICT,
+                    "vault already exists",
+                    "VAULT_EXISTS",
+                );
+            }
+            // Also treat any Exec/Query with unique substring as conflict even if above missed
+            if is_unique {
+                log::warn!("vault registration conflict (unique): {:?}", e);
                 let _ = tx.rollback().await;
                 return error_response(
                     StatusCode::CONFLICT,

@@ -18,7 +18,6 @@ use actix_web::middleware::DefaultHeaders;
 use actix_web::middleware::Logger;
 use actix_web::{App, HttpServer, web};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use dotenvy::dotenv;
 use env_logger::Env;
 use migration::{Migrator, MigratorTrait};
 use rand::RngCore;
@@ -28,49 +27,23 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use endpoints::{
-    auth, get_crypto_params, get_vault, google_endpoints, logout, register, session_status,
+    auth, get_crypto_params, get_vault, google_endpoints, register, session_status,
     update_vault, update_vault_password, vaults,
 };
 use static_site::static_site;
 
-/// Resolve the Voult data directory: `~/Library/Application Support/Voult` on macOS,
-/// `XDG_DATA_HOME/voult` on Linux, etc. via `dirs::data_dir()`.
+mod config;
+use config::Environment;
+
 fn voult_data_dir() -> PathBuf {
-    if let Some(dir) = dirs::data_dir() {
-        dir.join("Voult")
-    } else {
-        // Fallback to current dir if no data dir (should not happen on macOS)
-        PathBuf::from("voult_data")
-    }
-}
-
-/// Resolve DATABASE_URL: env override wins, otherwise use the per-install
-/// file at `~/Library/Application Support/Voult/voult.db` (created with `?mode=rwc`).
-fn resolve_database_url() -> String {
-    if let Ok(url) = env::var("DATABASE_URL") {
-        if !url.trim().is_empty() {
-            return url;
-        }
-    }
-
-    let data_dir = voult_data_dir();
-    if let Err(e) = fs::create_dir_all(&data_dir) {
-        log::warn!("Could not create Voult data directory {}: {}", data_dir.display(), e);
-    } else {
-        log::info!("Using Voult data directory: {}", data_dir.display());
-    }
-    let db_path = data_dir.join("voult.db");
-    // Use sqlite:// URL with mode=rwc so the file is created on first launch
-    format!("sqlite://{}?mode=rwc", db_path.display())
+    config::voult_data_dir()
 }
 
 /// Resolve STATIC_DIR: env override wins, otherwise probe bundle-adjacent
 /// locations (for Voult.app) then dev fallback.
 fn resolve_static_dir() -> String {
-    if let Ok(dir) = env::var("STATIC_DIR") {
-        if !dir.trim().is_empty() {
-            return dir;
-        }
+    if let Some(dir) = config::optional_env(config::ENV_STATIC_DIR) {
+        return dir;
     }
 
     // Candidate 1: relative to current exe (covers Voult.app/Contents/MacOS/voult-server → ../Resources/dist)
@@ -98,13 +71,17 @@ fn resolve_static_dir() -> String {
 /// Resolve session cookie key: env wins, otherwise per-install file at
 /// `~/Library/Application Support/Voult/session.key` (generated once, 0600).
 fn resolve_session_cookie_key() -> String {
-    if let Ok(key) = env::var("SESSION_COOKIE_KEY") {
+    if let Some(key) = config::optional_env(config::ENV_SESSION_COOKIE_KEY) {
         if key.len() >= 64 {
             return key;
         }
-        if !key.trim().is_empty() {
-            log::warn!("SESSION_COOKIE_KEY from env is <64 chars, ignoring and using/generating per-install key");
-        }
+        // Concrete validation: throw is handled by panic in caller if <64, but here
+        // we treat too-short as misconfig and fall back with warn (strict would panic)
+        log::warn!(
+            "{} from env is <64 chars (got {}), ignoring and using per-install key",
+            config::ENV_SESSION_COOKIE_KEY,
+            key.len()
+        );
     }
 
     let data_dir = voult_data_dir();
@@ -142,52 +119,19 @@ fn resolve_session_cookie_key() -> String {
     key
 }
 
-/// Try to load .env from bundled Resources and Application Support locations
-/// in addition to CWD. This makes the DMG build work without requiring the
-/// tester to create a .env file. GOOGLE_CLIENT_ID/SECRET are read from these.
-fn load_bundled_env() {
-    // 1. CWD .env via dotenvy (dev mode) — already handled by dotenv().ok() caller
-    // 2. Try exe-relative Resources/.env and Resources/google.env
-    if let Ok(exe) = env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for rel in ["../Resources/.env", "../../Resources/.env", "Resources/.env"] {
-                let p = dir.join(rel);
-                if p.exists() {
-                    // Use from_path to not override already-set env (keep CWD/.env priority if already loaded)
-                    let _ = dotenvy::from_path(&p);
-                    // Use eprintln because logger not yet init at call site (caller prints)
-                    eprintln!("[voult] Loaded bundled env from {}", p.display());
-                    break;
-                }
-            }
-            // Also try google-specific file
-            for rel in ["../Resources/google.env", "../../Resources/google.env"] {
-                let p = dir.join(rel);
-                if p.exists() {
-                    let _ = dotenvy::from_path(&p);
-                    eprintln!("[voult] Loaded bundled google env from {}", p.display());
-                    break;
-                }
-            }
-        }
-    }
-    // 3. Try ~/Library/Application Support/Voult/.env (user overrides)
-    let data_dir = voult_data_dir();
-    let user_env = data_dir.join(".env");
-    if user_env.exists() {
-        let _ = dotenvy::from_path(&user_env);
-        eprintln!("[voult] Loaded user env from {}", user_env.display());
-    }
-}
-
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Load from CWD first (dev), then bundled Resources, then Application Support
-    dotenv().ok();
-    load_bundled_env();
+    config::load_dotenv();
     env_logger::init_from_env(Env::default().default_filter_or("info"));
 
-    let database_url = resolve_database_url();
+    let env = Environment::from_env();
+    log::info!(
+        "VOULT_ENV={} (is_dev: {})",
+        env::var(config::ENV_VOULT_ENV).unwrap_or_else(|_| "(unset, defaulting to production)".to_string()),
+        env.is_dev()
+    );
+
+    let database_url = config::database_url(env);
     log::info!("DATABASE_URL resolved to {}", database_url);
 
     // Session cookie signing/encryption secret. Must be at least 64 bytes for
@@ -227,14 +171,14 @@ async fn main() -> std::io::Result<()> {
 
     // Credentialed requests (cookies) require explicit origins — never pair
     // `allow_any_origin()` with cookies.
-    let cors_origins: Vec<String> = env::var("CORS_ORIGINS")
+    let cors_origins: Vec<String> = config::optional_env(config::ENV_CORS_ORIGINS)
         .map(|v| {
             v.split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect()
         })
-        .unwrap_or_else(|_| {
+        .unwrap_or_else(|| {
             vec![
                 "http://localhost:8081".to_string(),
                 "http://127.0.0.1:8081".to_string(),
@@ -293,7 +237,6 @@ async fn main() -> std::io::Result<()> {
                     .service(get_crypto_params::get_crypto_params)
                     .service(update_vault::update_vault)
                     .service(session_status::get_session)
-                    .service(logout::logout)
                     .service(update_vault_password::update_vault_password)
                     .service(vaults::create_vault)
                     .service(vaults::list_vaults)

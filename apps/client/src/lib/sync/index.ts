@@ -64,7 +64,7 @@ export async function sync() {
   }
 
   // Pin the vault this sync run belongs to. If the session changes mid-flight
-  // (logout, vault switch, server-forced 401), abort instead of uploading or
+  // (vault switch, server-forced 401), abort instead of uploading or
   // resolving another vault's intents.
   const syncVaultId = session.vaultId;
   const sessionChanged = () =>

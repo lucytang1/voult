@@ -3,6 +3,7 @@ import type { LockMetadata } from "@/src/lib/state/type";
 import { useEffect, useState, useMemo } from "react";
 import { Pressable, Text, TextInput, View, ScrollView, Modal } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
+import { Shield, Lock as LockIcon, RefreshCw, Search, Pencil, Trash2, Mail, KeyRound, Eye, Globe, Zap, Clock, CalendarPlus } from "lucide-react";
 import { decrypt, encrypt } from "../../lib/crypto/index.web";
 import { useGetVault } from "../../lib/queries/vault/query";
 import type { DecryptedVault, VaultItem } from "../../lib/state/type";
@@ -12,8 +13,7 @@ import { b64 } from "../../lib/crypto/index.web";
 import { createIntent } from "@/src/lib/sqlite/web/services/intent-service";
 import { syncScheduler } from "../../lib/sync/sync-scheduler";
 import { getOrCreateDeviceKey } from "../../lib/crypto/device-key";
-import { logout } from "../../lib/queries/logout/query";
-import { teardownVaultSession, lockVaultStorage } from "@/src/lib/auth/teardown";
+import { lockVaultStorage } from "@/src/lib/auth/teardown";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { useRouter } from "expo-router";
 import { v4 as uuidv4 } from "uuid";
@@ -112,19 +112,6 @@ export default function Home() {
     // durable on the vault's own OPFS file.
     await lockVaultStorage();
     router.replace("/lock" as any);
-  };
-
-  const handleLogout = async () => {
-    try {
-      await logout();
-    } catch (error) {
-      console.error("Logout failed", error);
-    }
-    // Centralized teardown: closes this vault's DB, deletes only this vault's
-    // device records, wipes session state and the query cache. No pending
-    // intents from this vault can be considered for the next one.
-    await teardownVaultSession(queryClient);
-    router.replace("/" as any);
   };
 
   const handleCreate = async (site: string, username: string, password: string) => {
@@ -303,11 +290,9 @@ export default function Home() {
       {/* Left Sidebar - Vaults */}
       <View className="w-56 bg-[#16162a] border-r border-[#2a2a4a] flex-col">
         {/* Logo */}
-        <View className="px-4 py-4 border-b border-[#2a2a4a]">
-          <Text className="text-lg font-bold text-white flex items-center">
-            <Text className="text-purple-400 mr-2">●</Text>
-            Voult
-          </Text>
+        <View className="px-4 py-4 border-b border-[#2a2a4a] flex-row items-center">
+          <Shield size={20} color="#a78bfa" style={{ marginRight: 8 }} />
+          <Text className="text-lg font-bold text-white">Voult</Text>
         </View>
 
         {/* Vaults Header */}
@@ -321,7 +306,7 @@ export default function Home() {
         {/* Vault Items */}
         <View className="px-2">
           <Pressable className="flex-row items-center px-3 py-2 rounded-lg bg-[#2a2a4a]">
-            <Text className="text-white mr-3 text-lg">◇</Text>
+            <Shield size={16} color="#fff" style={{ marginRight: 12 }} />
             <View className="flex-1">
               <Text className="text-white text-sm font-medium">All items</Text>
               <Text className="text-gray-400 text-xs">{decryptedVault?.items?.length || 0} items</Text>
@@ -335,7 +320,7 @@ export default function Home() {
             className="flex-row items-center px-3 py-2 rounded-lg hover:bg-[#2a2a4a]"
             onPress={handleLock}
           >
-            <Text className="text-gray-400 mr-3">🔒</Text>
+            <LockIcon size={16} color="#9ca3af" style={{ marginRight: 12 }} />
             <Text className="text-gray-300 text-sm">Lock Voult</Text>
           </Pressable>
           <Pressable
@@ -343,15 +328,8 @@ export default function Home() {
             disabled={isSyncing}
             onPress={() => syncScheduler.requestSync("forced")}
           >
-            <Text className="text-gray-400 mr-3">🔄</Text>
+            <RefreshCw size={16} color="#9ca3af" style={{ marginRight: 12 }} />
             <Text className="text-gray-300 text-sm">{isSyncing ? "Syncing..." : "Sync"}</Text>
-          </Pressable>
-          <Pressable
-            className="flex-row items-center px-3 py-2 rounded-lg hover:bg-[#2a2a4a]"
-            onPress={handleLogout}
-          >
-            <Text className="text-gray-400 mr-3">⏻</Text>
-            <Text className="text-gray-300 text-sm">Log out</Text>
           </Pressable>
         </View>
 
@@ -409,7 +387,7 @@ export default function Home() {
         {/* Search Bar */}
         <View className="px-4 py-3 border-b border-[#2a2a4a]">
           <View className="flex-row items-center bg-[#2a2a4a] rounded-lg px-3 py-2">
-            <Text className="text-gray-400 mr-2">🔍</Text>
+            <Search size={16} color="#9ca3af" style={{ marginRight: 8 }} />
             <TextInput
               className="flex-1 text-white"
               placeholder="Search in all items..."
@@ -497,14 +475,14 @@ export default function Home() {
                     setShowEditModal(true);
                   }}
                 >
-                  <Text className="text-white text-sm mr-1">✏️</Text>
+                  <Pencil size={14} color="#fff" style={{ marginRight: 4 }} />
                   <Text className="text-white text-sm">Edit</Text>
                 </Pressable>
                 <Pressable
-                  className="px-3 py-1.5 bg-red-600/20 rounded-lg"
+                  className="px-3 py-1.5 bg-red-600/20 rounded-lg items-center justify-center"
                   onPress={() => setShowDeleteConfirm(true)}
                 >
-                  <Text className="text-red-400 text-sm">🗑️</Text>
+                  <Trash2 size={16} color="#f87171" />
                 </Pressable>
               </View>
             </View>
@@ -513,9 +491,10 @@ export default function Home() {
             <ScrollView className="flex-1 px-6 py-4">
               {/* Email */}
               <View className="mb-4">
-                <Text className="text-gray-400 text-xs mb-1 flex-row items-center">
-                  <Text className="mr-1">✉️</Text> Email
-                </Text>
+                <View className="flex-row items-center mb-1">
+                  <Mail size={12} color="#9ca3af" style={{ marginRight: 4 }} />
+                  <Text className="text-gray-400 text-xs">Email</Text>
+                </View>
                 <View className="bg-[#2a2a4a] rounded-lg px-4 py-3">
                   <Text className="text-white">{selectedItem.username}</Text>
                 </View>
@@ -523,9 +502,10 @@ export default function Home() {
 
               {/* Password */}
               <View className="mb-4">
-                <Text className="text-gray-400 text-xs mb-1 flex-row items-center">
-                  <Text className="mr-1">🔑</Text> Password
-                </Text>
+                <View className="flex-row items-center mb-1">
+                  <KeyRound size={12} color="#9ca3af" style={{ marginRight: 4 }} />
+                  <Text className="text-gray-400 text-xs">Password</Text>
+                </View>
                 <View className="bg-[#2a2a4a] rounded-lg px-4 py-3 flex-row items-center justify-between">
                   <Text className="text-white">••••••••••••</Text>
                   <View className="flex-row items-center">
@@ -533,7 +513,7 @@ export default function Home() {
                       <Text className="text-yellow-400 text-xs">Weak</Text>
                     </View>
                     <Pressable>
-                      <Text className="text-gray-400">👁️</Text>
+                      <Eye size={16} color="#9ca3af" />
                     </Pressable>
                   </View>
                 </View>
@@ -541,9 +521,10 @@ export default function Home() {
 
               {/* Websites */}
               <View className="mb-4">
-                <Text className="text-gray-400 text-xs mb-1 flex-row items-center">
-                  <Text className="mr-1">🌐</Text> Websites
-                </Text>
+                <View className="flex-row items-center mb-1">
+                  <Globe size={12} color="#9ca3af" style={{ marginRight: 4 }} />
+                  <Text className="text-gray-400 text-xs">Websites</Text>
+                </View>
                 <View className="bg-[#2a2a4a] rounded-lg px-4 py-3">
                   <Text className="text-purple-400">https://{selectedItem.site}</Text>
                 </View>
@@ -552,21 +533,24 @@ export default function Home() {
               {/* Metadata */}
               <View className="border-t border-[#2a2a4a] pt-4 mt-4">
                 <View className="mb-3">
-                  <Text className="text-gray-400 text-xs flex-row items-center">
-                    <Text className="mr-1">⚡</Text> Last autofill
-                  </Text>
+                  <View className="flex-row items-center">
+                    <Zap size={12} color="#9ca3af" style={{ marginRight: 4 }} />
+                    <Text className="text-gray-400 text-xs">Last autofill</Text>
+                  </View>
                   <Text className="text-gray-300 text-sm">Today at {new Date().getHours()}:{String(new Date().getMinutes()).padStart(2, '0')}</Text>
                 </View>
                 <View className="mb-3">
-                  <Text className="text-gray-400 text-xs flex-row items-center">
-                    <Text className="mr-1">✏️</Text> Last modified
-                  </Text>
+                  <View className="flex-row items-center">
+                    <Pencil size={12} color="#9ca3af" style={{ marginRight: 4 }} />
+                    <Text className="text-gray-400 text-xs">Last modified</Text>
+                  </View>
                   <Text className="text-gray-300 text-sm">Just now</Text>
                 </View>
                 <View>
-                  <Text className="text-gray-400 text-xs flex-row items-center">
-                    <Text className="mr-1">🆕</Text> Created
-                  </Text>
+                  <View className="flex-row items-center">
+                    <CalendarPlus size={12} color="#9ca3af" style={{ marginRight: 4 }} />
+                    <Text className="text-gray-400 text-xs">Created</Text>
+                  </View>
                   <Text className="text-gray-300 text-sm">Just now</Text>
                 </View>
               </View>

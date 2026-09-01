@@ -166,9 +166,9 @@ export async function saveDeviceEnvelope(
 }
 
 /**
- * Deletes only this vault's local device key and wrapped envelope (used on
- * logout of this vault). Other vaults' records are left untouched so they can
- * still auto-unlock later.
+ * Deletes only this vault's local device key and wrapped envelope (used when
+ * the session for this vault expires). Other vaults' records are left untouched
+ * so they can still auto-unlock later.
  */
 export async function deleteDeviceKey(vaultId: string): Promise<void> {
   if (typeof indexedDB === "undefined") return;
