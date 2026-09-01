@@ -17,6 +17,8 @@ import { teardownVaultSession, lockVaultStorage } from "@/src/lib/auth/teardown"
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { useRouter } from "expo-router";
 import { v4 as uuidv4 } from "uuid";
+import { getGoogleStatus, getGoogleBinding, disconnectGoogle } from "@/src/lib/google/api";
+import { enableGoogleDriveForVault } from "@/src/lib/google/enableSync";
 
 // Device ids are cached per vault — a shared single value could attribute
 // one vault's intents to another after a vault switch.
@@ -70,8 +72,15 @@ export default function Home() {
   const [editUsername, setEditUsername] = useState("");
   const [editPassword, setEditPassword] = useState("");
 
+  // Google Drive status (restored: previously lost after flow refactor)
+  const [googleStatus, setGoogleStatus] = useState<{ connected: boolean; email?: string } | null>(null);
+  const [googleBinding, setGoogleBinding] = useState<{ drive_file_id?: string; remote_revision?: string } | null>(null);
+  const [googleConfigured, setGoogleConfigured] = useState<boolean | null>(null);
+  const [googleActionLoading, setGoogleActionLoading] = useState(false);
+  const [googleError, setGoogleError] = useState<string | null>(null);
+
   // Home requires the unlocked state; the guard bounces
-  // locked users to /lock and signed-out users to /auth/login.
+  // locked users to /lock and signed-out users to / (landing).
   useAuthGuard(["unlocked"]);
 
   /**
@@ -184,6 +193,73 @@ export default function Home() {
     enabled: !!vaultKey && !isLocked && !!session,
   });
 
+  // Fetch Google Drive status + binding whenever vault changes
+  const refreshGoogle = async () => {
+    if (!session?.vaultId) return;
+    setGoogleError(null);
+    try {
+      const status = await getGoogleStatus();
+      setGoogleStatus({ connected: status.connected, email: status.email });
+      setGoogleConfigured(true);
+      try {
+        const binding = await getGoogleBinding(session.vaultId);
+        setGoogleBinding({ drive_file_id: binding.drive_file_id, remote_revision: binding.remote_revision });
+      } catch (e: any) {
+        if (e?.response?.status === 404 || e?.response?.data?.code === "BINDING_NOT_FOUND") {
+          setGoogleBinding(null);
+        } else {
+          // keep previous
+        }
+      }
+    } catch (e: any) {
+      const code = e?.response?.data?.code as string | undefined;
+      if (code === "GOOGLE_NOT_CONFIGURED") {
+        setGoogleConfigured(false);
+        setGoogleStatus(null);
+      } else {
+        setGoogleConfigured(true);
+        setGoogleStatus({ connected: false });
+      }
+      setGoogleBinding(null);
+    }
+  };
+
+  useEffect(() => {
+    refreshGoogle();
+  }, [session?.vaultId]);
+
+  const handleEnableGoogleDrive = async () => {
+    if (!session?.vaultId) return;
+    setGoogleActionLoading(true);
+    setGoogleError(null);
+    try {
+      await enableGoogleDriveForVault(session.vaultId);
+      await refreshGoogle();
+    } catch (e: any) {
+      const msg = e?.response?.data?.error_msg || e?.message || "Failed to enable Google Drive";
+      if (msg.includes("Redirecting")) {
+        // OAuth redirect already started
+        return;
+      }
+      setGoogleError(msg);
+    } finally {
+      setGoogleActionLoading(false);
+    }
+  };
+
+  const handleDisconnectGoogle = async () => {
+    setGoogleActionLoading(true);
+    setGoogleError(null);
+    try {
+      await disconnectGoogle();
+      await refreshGoogle();
+    } catch (e: any) {
+      setGoogleError(e?.response?.data?.error_msg || e?.message || "Failed to disconnect");
+    } finally {
+      setGoogleActionLoading(false);
+    }
+  };
+
   const vaultData = getVault.data?.vault;
   useEffect(() => {
     if (!vaultData || !vaultKey) return;
@@ -277,6 +353,46 @@ export default function Home() {
             <Text className="text-gray-400 mr-3">⏻</Text>
             <Text className="text-gray-300 text-sm">Log out</Text>
           </Pressable>
+        </View>
+
+        {/* Google Drive Status – restored */}
+        <View className="border-t border-[#2a2a4a] px-3 py-3 bg-[#1e1e36]/50">
+          <Text className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Google Drive</Text>
+          {googleConfigured === false ? (
+            <Text className="text-gray-500 text-xs">Not configured on server. Set GOOGLE_CLIENT_ID/SECRET in .env</Text>
+          ) : googleStatus?.connected && googleBinding?.drive_file_id ? (
+            <View>
+              <View className="flex-row items-center mb-1">
+                <View className="w-2 h-2 rounded-full bg-green-500 mr-2" />
+                <Text className="text-green-400 text-xs font-medium">Sync enabled</Text>
+              </View>
+              <Text className="text-gray-300 text-xs" numberOfLines={1}>{googleStatus.email || "Connected"}</Text>
+              <Text className="text-gray-500 text-xs mt-1" numberOfLines={1}>File: {googleBinding.drive_file_id.slice(0, 16)}…</Text>
+              {googleBinding.remote_revision && <Text className="text-gray-500 text-xs">Rev: {googleBinding.remote_revision.slice(0, 8)}</Text>}
+              <Pressable className="mt-2 px-2 py-1 rounded bg-[#2a2a4a] items-center" onPress={handleDisconnectGoogle} disabled={googleActionLoading}>
+                <Text className="text-gray-400 text-xs">{googleActionLoading ? "Working…" : "Disconnect"}</Text>
+              </Pressable>
+            </View>
+          ) : googleStatus?.connected && !googleBinding?.drive_file_id ? (
+            <View>
+              <View className="flex-row items-center mb-1">
+                <View className="w-2 h-2 rounded-full bg-yellow-500 mr-2" />
+                <Text className="text-yellow-400 text-xs">Connected — not backed up</Text>
+              </View>
+              <Text className="text-gray-400 text-xs mb-2" numberOfLines={1}>{googleStatus.email}</Text>
+              <Pressable className="w-full rounded bg-purple-600 py-2 items-center" onPress={handleEnableGoogleDrive} disabled={googleActionLoading}>
+                <Text className="text-white text-xs font-medium">{googleActionLoading ? "Enabling…" : "Enable sync"}</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View>
+              <Text className="text-gray-500 text-xs mb-2">Not connected</Text>
+              <Pressable className="w-full rounded bg-[#2a2a4a] border border-[#3a3a5a] py-2 items-center" onPress={handleEnableGoogleDrive} disabled={googleActionLoading}>
+                <Text className="text-white text-xs font-medium">{googleActionLoading ? "Connecting…" : "Connect Google Drive"}</Text>
+              </Pressable>
+            </View>
+          )}
+          {googleError && <Text className="text-red-400 text-xs mt-2">{googleError}</Text>}
         </View>
 
         {/* User Info */}

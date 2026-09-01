@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Pressable, Text, TextInput, View, Switch } from "react-native";
 import { useRouter } from "expo-router";
-import { useAppStore, setSession, setVaultKey, updateDecryptedVault, updateVaultVersion } from "@/src/lib/state";
+import { setSession, setVaultKey, updateDecryptedVault, updateVaultVersion } from "@/src/lib/state";
 import { createVaultFlow } from "@/src/lib/vault/create";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services/client-state-service";
@@ -10,12 +10,12 @@ import { getGoogleStatus } from "@/src/lib/google/api";
 import { enableGoogleDriveForVault } from "@/src/lib/google/enableSync";
 
 /**
- * Create new local vault without cloud sync (§6.1)
- * UI: signed in -> Create new vault -> enter/confirm master password -> creating -> unlocked, local_only
- * Must state vault exists only on this device until Google Drive is enabled.
+ * Create new local vault — Case 1 main entry (no session) and also for
+ * already-authenticated users who want an additional vault.
+ * Flow: enter master password -> vault created locally (can enable Drive later).
+ * No vault-id input. Accessible without a session.
  */
 export default function CreateVault() {
-  const session = useAppStore((s) => s.session);
   const router = useRouter();
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -42,11 +42,6 @@ export default function CreateVault() {
         }
       });
   }, []);
-
-  if (!session) {
-    router.replace("/auth/login" as any);
-    return null;
-  }
 
   const canSubmit = password.length >= 8 && password === confirm && !creating;
 

@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14   # arm64, needed for hdiutil + arm binary
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Build Voult.app + DMG
+        run: ./scripts/build-release.sh
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          # optional: GOOGLE_REDIRECT_URI, GOOGLE_DRIVE_SCOPE, etc.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Voult-aarch64
+          path: build/Voult-aarch64.*

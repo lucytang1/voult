@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io,
     net::TcpStream,
     path::PathBuf,
@@ -69,6 +70,9 @@ struct Launcher {
     child: Option<Child>,
     next_poll: Instant,
     last_health_probe: Instant,
+    /// Whether we have already auto-opened the browser this launcher session.
+    /// Reset on stop so next start re-opens.
+    has_auto_opened: bool,
 }
 
 impl Launcher {
@@ -82,6 +86,7 @@ impl Launcher {
             child: None,
             next_poll: Instant::now(),
             last_health_probe: Instant::now(),
+            has_auto_opened: false,
         }
     }
 
@@ -157,6 +162,7 @@ impl Launcher {
         self.last_health_probe = Instant::now();
         let port_open = self.is_port_open();
 
+        let mut transitioned_to_running = false;
         match (&self.state, port_open) {
             // Process alive, port now bound → genuinely serving.
             (ServerState::Starting, true) => {
@@ -164,6 +170,7 @@ impl Launcher {
                 self.state = ServerState::Running {
                     pid: pid.unwrap_or(0),
                 };
+                transitioned_to_running = true;
             }
             // Port closed again after being open (server restarting?) — drop
             // back to Starting while our child is still alive.
@@ -185,7 +192,49 @@ impl Launcher {
             }
             _ => {}
         }
+
+        // Auto-open browser once when server becomes reachable
+        if transitioned_to_running && !self.has_auto_opened {
+            self.has_auto_opened = true;
+            Self::open_browser();
+        }
     }
+
+    /// Best-effort open of http://localhost:8080 in the default browser.
+    fn open_browser() {
+        let url = "http://localhost:8080";
+        info_log(&format!("Opening browser at {url}"));
+        // `open` crate handles macOS `open` correctly; fallback to Command.
+        if open::that(url).is_err() {
+            let _ = Command::new("open").arg(url).stdin(Stdio::null()).spawn();
+        }
+    }
+
+    /// Resolve the server binary path for both bundled (.app) and dev (`cargo run`) modes.
+    fn resolve_server_binary() -> Option<PathBuf> {
+        // 1. Bundled: sibling in Contents/MacOS (Voult launcher next to voult-server)
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let sibling = dir.join("voult-server");
+                if sibling.exists() {
+                    return Some(sibling);
+                }
+                let resources_alt = dir.join("../Resources/voult-server");
+                if resources_alt.exists() {
+                    return Some(resources_alt);
+                }
+                // When running via `cargo run` in dev, exe is target/debug/launcher,
+                // check for target/debug/pass-manager or apps/server/target
+                let dev_bin = dir.join("pass-manager");
+                if dev_bin.exists() {
+                    return Some(dev_bin);
+                }
+            }
+        }
+        // 2. Dev fallback: will use `cargo run`
+        None
+    }
+
     fn server_directory() -> io::Result<PathBuf> {
         let launcher_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         launcher_directory
@@ -194,11 +243,73 @@ impl Launcher {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "repository root not found"))
     }
 
+    fn log_file_path() -> Option<PathBuf> {
+        // ~/Library/Logs/Voult/server.log
+        let home = std::env::var("HOME").ok()?;
+        let dir = PathBuf::from(home).join("Library/Logs/Voult");
+        let _ = fs::create_dir_all(&dir);
+        Some(dir.join("server.log"))
+    }
+
     fn start_server(&mut self) {
         if matches!(self.state, ServerState::RunningElsewhere { .. }) || self.child.is_some() {
             return;
         }
 
+        // Prefer direct binary if bundled; fallback to `cargo run` for dev.
+        if let Some(bin) = Self::resolve_server_binary() {
+            info_log(&format!("Starting bundled server at {}", bin.display()));
+            // Prepare log file
+            let log_path = Self::log_file_path();
+            let (stdout, stderr) = if let Some(ref p) = log_path {
+                match fs::OpenOptions::new().create(true).append(true).open(p) {
+                    Ok(f) => {
+                        let s1 = f.try_clone().ok();
+                        let s2 = f.try_clone().ok();
+                        let to_stdio = |opt: Option<fs::File>| {
+                            opt.map(|file| Stdio::from(file)).unwrap_or_else(Stdio::null)
+                        };
+                        // We need two handles; if clone fails, inherit for visibility
+                        if s1.is_some() && s2.is_some() {
+                            (to_stdio(s1), to_stdio(s2))
+                        } else {
+                            (Stdio::inherit(), Stdio::inherit())
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Could not open log file {}: {e}", p.display());
+                        (Stdio::inherit(), Stdio::inherit())
+                    }
+                }
+            } else {
+                (Stdio::inherit(), Stdio::inherit())
+            };
+
+            let result = Command::new(&bin)
+                .stdin(Stdio::null())
+                .stdout(stdout)
+                .stderr(stderr)
+                .spawn();
+
+            match result {
+                Ok(server) => {
+                    info_log(&format!("Started server process (pid {})", server.id()));
+                    self.child = Some(server);
+                    self.state = ServerState::Starting;
+                    self.last_health_probe =
+                        Instant::now() - HEALTH_PROBE_INTERVAL + Duration::from_millis(250);
+                }
+                Err(error) => {
+                    eprintln!("Could not start server binary {}: {error}", bin.display());
+                    self.state = ServerState::Crashed {
+                        reason: format!("failed to spawn: {error}"),
+                    };
+                }
+            }
+            return;
+        }
+
+        // Dev fallback: cargo run
         let server_directory = match Self::server_directory() {
             Ok(directory) => directory,
             Err(error) => {
@@ -245,6 +356,7 @@ impl Launcher {
             let _ = server.wait();
         }
         self.state = ServerState::Stopped;
+        self.has_auto_opened = false;
         self.update_menu();
     }
 
@@ -320,6 +432,25 @@ impl ApplicationHandler<UserEvent> for Launcher {
         if let Err(error) = self.build_tray() {
             eprintln!("Could not create Voult menu bar item: {error}");
             event_loop.exit();
+            return;
+        }
+
+        // Auto-start the server on launch so double-clicking the app
+        // immediately makes http://localhost:8080 usable. If something is
+        // already listening on :8080 we detect it via the health probe and
+        // show "Running elsewhere" instead.
+        if self.child.is_none() && !self.is_port_open() {
+            self.start_server();
+        } else if self.is_port_open() {
+            // Refresh immediately so "Running elsewhere" shows without 2s delay
+            self.last_health_probe = Instant::now() - HEALTH_PROBE_INTERVAL;
+            self.refresh_state();
+            self.update_menu();
+            // If we detected a foreign server, still auto-open browser
+            if matches!(self.state, ServerState::RunningElsewhere { .. }) && !self.has_auto_opened {
+                self.has_auto_opened = true;
+                Self::open_browser();
+            }
         }
     }
 

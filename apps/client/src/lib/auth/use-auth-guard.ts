@@ -8,7 +8,7 @@ import type { AuthState } from "../state/type";
  * (not_authenticated / locked / unlocked). Each page declares the states it
  * may render in; on mismatch the user is redirected to the canonical page:
  *
- *   not_authenticated -> /auth/login
+ *   not_authenticated -> /    (landing: choose create locally or cloud sync)
  *   locked            -> /lock
  *   unlocked          -> /home
  */
@@ -30,7 +30,7 @@ export function useAuthGuard(allowed: AuthState[]) {
         ? "/home"
         : state === "locked"
           ? "/lock"
-          : "/auth/login";
+          : "/";
     router.replace(target as any);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);

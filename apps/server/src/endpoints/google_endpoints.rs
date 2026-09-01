@@ -1032,6 +1032,48 @@ pub async fn google_list_vaults_pending(
     }
 }
 
+#[derive(Deserialize)]
+pub struct PendingReadQuery {
+    pub state: String,
+    pub file_id: String,
+}
+
+#[get("/google/vaults/pending/read")]
+pub async fn google_read_vault_pending(
+    pool: web::Data<DbPool>,
+    query: web::Query<PendingReadQuery>,
+) -> HttpResponse {
+    let pending = match crate::entity::google_pending_token::Entity::find_by_id(query.state.clone())
+        .one(pool.get_ref())
+        .await
+    {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return provider_error_response(
+                ProviderErrorKind::AuthRequired,
+                "pending Google auth not found or expired",
+            );
+        }
+        Err(e) => {
+            log::error!("failed to fetch pending token: {:?}", e);
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error_msg":"db error","code":"DB_ERROR"}));
+        }
+    };
+    let access_token = pending.access_token.clone();
+    match crate::google::drive::read_vault(&access_token, &query.file_id).await {
+        Ok((bytes, revision)) => {
+            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+            HttpResponse::Ok().json(serde_json::json!({
+                "package": b64,
+                "remote_revision": revision,
+                "file_id": query.file_id
+            }))
+        }
+        Err((kind, msg)) => provider_error_response(kind, &msg),
+    }
+}
+
 #[post("/google/vaults/delete")]
 pub async fn google_delete_vault(
     pool: web::Data<DbPool>,

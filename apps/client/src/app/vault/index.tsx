@@ -49,11 +49,11 @@ export default function VaultChooser() {
     || (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("google_pending_state") || undefined : undefined);
   const isGoogleCallback = !!pendingState || !!params.google_connected || !!params.google_error;
 
-  // Redirect unauthenticated users, but allow both pending (new vault) and
-  // normal (existing vault) Google callbacks to restore/use their session.
+  // Allow pending Google callback without session (Case 1 cloud sync).
+  // Otherwise unauthenticated users belong on landing "/" — not vault-id login.
   useEffect(() => {
     if (!session && !isGoogleCallback) {
-      router.replace("/auth/login" as any);
+      router.replace("/" as any);
     }
   }, [session, isGoogleCallback]);
 
@@ -215,12 +215,13 @@ export default function VaultChooser() {
       setGoogleImporting(true);
       setGoogleImportError(null);
       try {
-        // Import the Drive-backed vault: derive the session locally from the
-        // vault id + master password, then link the pending Google token.
+        // Case 1 (no session): vault may only exist on Drive — fetch package
+        // via pending token, verify password locally, register on this server.
         const result = await importVaultFromGoogle({
           vaultId: googleImportTarget.vault_id,
           fileId: googleImportTarget.file_id,
           masterPassword: googleImportPassword,
+          pendingState,
         });
         setVaultKey(result.vaultKey);
         setSession(result.session);
@@ -234,15 +235,26 @@ export default function VaultChooser() {
         } catch (e) {
           console.warn("Failed to link pending Google token", e);
         }
+        // Persist Drive binding so future sync uses GoogleRemote.
+        try {
+          const { http } = await import("@/src/lib/queries/http");
+          await http.post("/google/binding", {
+            vault_id: googleImportTarget.vault_id,
+            drive_file_id: googleImportTarget.file_id,
+          });
+        } catch (e) {
+          console.warn("Failed to persist Drive binding after import", e);
+        }
         setGoogleImportTarget(null);
         setShowGoogleList(false);
         router.replace("/home" as any);
         return;
       } catch (e: any) {
-        if (e?.message?.includes("Incorrect")) {
-          setGoogleImportError("Incorrect master password – existing vault untouched.");
+        const msg = e?.response?.data?.error_msg || e?.message || "Failed to import vault (pending flow)";
+        if (msg.includes("Incorrect") || msg.includes("vault not found")) {
+          setGoogleImportError("Incorrect master password or vault not found – existing vault untouched.");
         } else {
-          setGoogleImportError(e?.message || "Failed to import vault (pending flow)");
+          setGoogleImportError(msg);
         }
         setGoogleImporting(false);
         return;
@@ -258,6 +270,7 @@ export default function VaultChooser() {
         vaultId: googleImportTarget.vault_id,
         fileId: googleImportTarget.file_id,
         masterPassword: googleImportPassword,
+        pendingState: pendingState || undefined,
       });
       setVaultKey(result.vaultKey);
       setSession(result.session);

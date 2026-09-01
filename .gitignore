@@ -1,2 +1,7 @@
 **/target
 .env
+/build
+voult.db
+*.dmg
+*.tar.gz
+plans

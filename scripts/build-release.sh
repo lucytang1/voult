@@ -87,20 +87,33 @@ cp -R "$ROOT/apps/client/dist/"* "$APP_BUNDLE/Contents/Resources/dist/"
 # Google OAuth config — bundle GOOGLE_* vars so testers get working Drive sync
 # without needing a .env. We copy only GOOGLE_* (and related) from apps/server/.env,
 # stripping DATABASE_URL/SESSION_COOKIE_KEY so the per-install logic in main.rs still wins.
+# On CI (GitHub Actions) where .env file isn't committed, we also accept env vars
+# GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET directly (set as GitHub Secrets).
+rm -f "$APP_BUNDLE/Contents/Resources/google.env"
 if [[ -f "$ROOT/apps/server/.env" ]]; then
   echo "Bundling Google OAuth config from apps/server/.env → Resources/google.env"
   grep -E '^GOOGLE_' "$ROOT/apps/server/.env" > "$APP_BUNDLE/Contents/Resources/google.env" || true
-  # Also support CORS override if present for prod bundling
   grep -E '^CORS_ORIGINS=' "$ROOT/apps/server/.env" >> "$APP_BUNDLE/Contents/Resources/google.env" 2>/dev/null || true
-  if [[ -s "$APP_BUNDLE/Contents/Resources/google.env" ]]; then
-    echo "Bundled google.env:"
-    sed 's/SECRET=.*/SECRET=***redacted***/' "$APP_BUNDLE/Contents/Resources/google.env" | head -n 20
-  else
-    echo "WARNING: apps/server/.env exists but no GOOGLE_* vars found — Drive will be GOOGLE_NOT_CONFIGURED"
-    rm -f "$APP_BUNDLE/Contents/Resources/google.env"
-  fi
+fi
+# Fallback: generate from environment (CI) if file missing or incomplete
+if [[ ! -s "$APP_BUNDLE/Contents/Resources/google.env" ]] && [[ -n "${GOOGLE_CLIENT_ID:-}" ]] && [[ -n "${GOOGLE_CLIENT_SECRET:-}" ]]; then
+  echo "Bundling Google OAuth config from environment → Resources/google.env"
+  {
+    echo "GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}"
+    echo "GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}"
+    [[ -n "${GOOGLE_REDIRECT_URI:-}" ]] && echo "GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}"
+    [[ -n "${GOOGLE_OAUTH_REDIRECT_URI:-}" ]] && echo "GOOGLE_OAUTH_REDIRECT_URI=${GOOGLE_OAUTH_REDIRECT_URI}"
+    [[ -n "${GOOGLE_DRIVE_SCOPE:-}" ]] && echo "GOOGLE_DRIVE_SCOPE=${GOOGLE_DRIVE_SCOPE}"
+    [[ -n "${GOOGLE_POST_AUTH_REDIRECT:-}" ]] && echo "GOOGLE_POST_AUTH_REDIRECT=${GOOGLE_POST_AUTH_REDIRECT}"
+    [[ -n "${CORS_ORIGINS:-}" ]] && echo "CORS_ORIGINS=${CORS_ORIGINS}"
+  } > "$APP_BUNDLE/Contents/Resources/google.env"
+fi
+if [[ -s "$APP_BUNDLE/Contents/Resources/google.env" ]]; then
+  echo "Bundled google.env:"
+  sed 's/SECRET=.*/SECRET=***redacted***/' "$APP_BUNDLE/Contents/Resources/google.env" | head -n 20
 else
-  echo "WARNING: apps/server/.env not found — Drive will be GOOGLE_NOT_CONFIGURED. Create apps/server/.env with GOOGLE_CLIENT_ID/SECRET first."
+  echo "WARNING: No Google OAuth config found (neither apps/server/.env nor GOOGLE_CLIENT_ID env) — Drive will be GOOGLE_NOT_CONFIGURED"
+  rm -f "$APP_BUNDLE/Contents/Resources/google.env"
 fi
 # Also copy as .env for server dotenv fallback (filtered to avoid DB override)
 if [[ -f "$APP_BUNDLE/Contents/Resources/google.env" ]]; then
