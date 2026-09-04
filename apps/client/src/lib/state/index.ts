@@ -8,6 +8,7 @@ const useAppStore = create<AppState>()((set) => ({
   session: null,
   decryptedVault: null,
   vaultVersion: null,
+  lockEpoch: null,
   isLocked: true,
   isSyncing: false,
   lockMetadata: null,
@@ -26,6 +27,15 @@ const updateVaultVersion = (vaultVersion: number) =>
   useAppStore.setState({ vaultVersion });
 const setSyncStatus = (isSyncing: boolean) =>
   useAppStore.setState({ isSyncing });
+/**
+ * Last server `lock_epoch` this client has converged to. Set on unlock (from
+ * the pre-unlock GET /session) and on every observed session; advanced by the
+ * POST /lock response on our own lock. Deliberately NOT cleared by
+ * lockVaultStorage — a lock must remember the epoch it just published so a
+ * stale poll can't resurrect keys. Cleared only with the session itself.
+ */
+const updateLockEpoch = (lockEpoch: number) =>
+  useAppStore.setState({ lockEpoch });
 
 // --- Auth state machine --------------------------------------------------
 //
@@ -145,6 +155,7 @@ const clearSessionState = () => {
     session: null,
     decryptedVault: null,
     vaultVersion: null,
+    lockEpoch: null,
     isLocked: true,
     lockMetadata: null,
   });
@@ -158,6 +169,7 @@ export {
   updateDecryptedVault,
   updateVaultVersion,
   setSyncStatus,
+  updateLockEpoch,
   lockVaultStorage,
   clearSessionState,
   addVaultItem,

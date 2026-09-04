@@ -5,6 +5,7 @@ import {
 } from "../../crypto/index.web";
 import { derivePasswordKeys, persistDeviceSecrets, UnlockedSession, parseVaultJson } from "../utils";
 import { login } from "../../queries/logIn/query";
+import { fetchSession } from "../../queries/session/query";
 import { fetchVault } from "../../queries/vault/query";
 
 /**
@@ -49,6 +50,15 @@ export async function passwordLoginFlow(
   await persistDeviceSecrets(vaultKeyRaw, vaultId);
 
   const plain = await decrypt(vault.vault, vault.vaultiv, vaultKey);
+  // Record the server lock epoch at unlock time so a peer's later lock
+  // (epoch bump) is detectable. Best-effort: a fresh vault is at epoch 0.
+  let lockEpoch = 0;
+  try {
+    const session = await fetchSession();
+    lockEpoch = session.lock_epoch ?? 0;
+  } catch {
+    // Offline/legacy server — unlock still valid; sync check converges later.
+  }
   return {
     session: {
       vaultId,
@@ -57,5 +67,6 @@ export async function passwordLoginFlow(
     vaultKey,
     decryptedVault: parseVaultJson(plain),
     version: vault.version,
+    lockEpoch,
   };
 }

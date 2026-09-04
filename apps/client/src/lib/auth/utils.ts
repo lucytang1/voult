@@ -21,6 +21,9 @@ export interface UnlockedSession {
   vaultKey: CryptoKey;
   decryptedVault: DecryptedVault;
   version: number;
+  // Server lock_epoch observed at unlock time. Consumers store it via
+  // updateLockEpoch so the session-sync check can detect a peer's later lock.
+  lockEpoch: number;
 }
 
 /** Derive the vaultVerifier + password wrapping key for a password. */

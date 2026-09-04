@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Pressable, Text, TextInput, View, Switch } from "react-native";
 import { useRouter } from "expo-router";
-import { setSession, setVaultKey, updateDecryptedVault, updateVaultVersion } from "@/src/lib/state";
+import { setSession, setVaultKey, updateDecryptedVault, updateLockEpoch, updateVaultVersion } from "@/src/lib/state";
 import { createVaultFlow } from "@/src/lib/vault/create";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services/client-state-service";
@@ -65,6 +65,7 @@ export default function CreateVault() {
       // /home has a valid session + database.
       setVaultKey(created.vaultKey);
       setSession(created.session);
+      updateLockEpoch(created.lockEpoch);
       updateDecryptedVault(created.decryptedVault);
       updateVaultVersion(created.version);
       await initSQLite(vaultId);

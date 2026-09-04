@@ -1,30 +1,8 @@
-export type VaultResponse = {
-    vault: {
-        vault: string;
-        vaultiv: string;
-        iterations: number;
-        version: number;
-        crypto_version: number;
-        vault_key_wrap: string | null;
-        vault_key_wrap_iv: string | null;
-    }
-}
-
-export type UpdateVaultRequest = {
-  vault: string;
-  vaultiv: string;
-  version: number;
-  crypto_version?: number;
-  vault_key_wrap?: string;
-  vault_key_wrap_iv?: string;
-};
-
-export type UpdateVaultResponse = {
-  vault: string;
-  vaultiv: string;
-  iterations: number;
-  version: number;
-  crypto_version: number;
-  vault_key_wrap: string | null;
-  vault_key_wrap_iv: string | null;
-};
+// Re-exported from @voult/vault-core (single source of truth shared with the
+// MV3 extension). Canonical API shapes live in
+// packages/vault-core/src/schema.ts.
+export type {
+  VaultResponse,
+  UpdateVaultRequest,
+  UpdateVaultResponse,
+} from "@voult/vault-core";
