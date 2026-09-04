@@ -14,6 +14,10 @@ pub struct SessionResponse {
     pub authenticated: bool,
     pub vault_id: String,
     pub crypto_version: i32,
+    // Global lock signal for web ↔ extension consistency (see POST /api/lock).
+    // Clients persist the last epoch they saw and wipe local keys when the
+    // server reports a newer one. Monotonic, non-sensitive.
+    pub lock_epoch: i32,
 }
 
 /// Validates the session cookie and returns the authenticated vault and its
@@ -62,5 +66,6 @@ pub async fn get_session(pool: web::Data<DbPool>, session: Session) -> HttpRespo
         authenticated: true,
         vault_id: vault.id,
         crypto_version: vault.crypto_version,
+        lock_epoch: vault.lock_epoch,
     })
 }

@@ -1,0 +1,26 @@
+{
+  "name": "voult-extension",
+  "version": "0.1.0",
+  "description": "Voult Chrome (MV3) extension: offer to save logins, suggest + fill on login pages. Vite + React popup, vanilla TS service worker + content scripts, crypto/merge shared via @voult/vault-core.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build:core": "npm --prefix ../../packages/vault-core run build",
+    "dev": "vite build --watch",
+    "build": "npm run build:core && tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@voult/vault-core": "file:../../packages/vault-core",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.0",
+    "@types/node": "^26.4.1",
+    "@types/react": "~19.2.10",
+    "@types/react-dom": "^19.2.0",
+    "typescript": "~5.9.2",
+    "vite": "^7.0.0"
+  }
+}

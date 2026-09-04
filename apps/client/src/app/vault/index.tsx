@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Pressable, Text, View, ScrollView, Modal, ActivityIndicator, TextInput } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
-import { useAppStore, setSession, setVaultKey, updateDecryptedVault, updateVaultVersion } from "@/src/lib/state";
+import { useQueryClient } from "@tanstack/react-query";
+import { useAppStore, setSession, setVaultKey, updateDecryptedVault, updateLockEpoch, updateVaultVersion } from "@/src/lib/state";
 import { listVaults, VaultSummary } from "@/src/lib/queries/vaults/query";
 import { openVaultFlow, requiresSwitchConfirmation } from "@/src/lib/vault/open";
 import { getGoogleStatus, startGoogleAuth, redirectToGoogleAuth, listGoogleVaults, disconnectGoogle, listGoogleVaultsPending, linkPendingGoogleToken } from "@/src/lib/google/api";
@@ -24,6 +25,7 @@ import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services
 export default function VaultChooser() {
   const session = useAppStore((s) => s.session);
   const router = useRouter();
+  const queryClient = useQueryClient();
 
   const [vaults, setVaults] = useState<VaultSummary[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -62,7 +64,10 @@ export default function VaultChooser() {
   useEffect(() => {
     if (session || !params.google_connected || pendingState) return;
     fetchSession()
-      .then((s) => setSession({ vaultId: s.vault_id, cryptoVersion: s.crypto_version }))
+      .then((s) => {
+        setSession({ vaultId: s.vault_id, cryptoVersion: s.crypto_version });
+        updateLockEpoch(s.lock_epoch ?? 0);
+      })
       .catch((e) => setError(e instanceof Error ? e.message : "Google sign-in session could not be restored"));
   }, [session, params.google_connected, pendingState]);
 
@@ -129,14 +134,27 @@ export default function VaultChooser() {
     setSwitching(true);
     setSwitchError(null);
     try {
+      const previousVaultId = session?.vaultId ?? null;
       const result = await openVaultFlow({ vaultId: target.vault_id, masterPassword: password });
+      // Single-vault invariant: opening a different vault abandons the old
+      // one's in-memory state and ciphertext cache (its device records and
+      // OPFS file stay namespaced for its next unlock). initSQLite releases
+      // the old handle before opening the new file.
+      queryClient.removeQueries({ queryKey: ["vault"] });
       setVaultKey(result.vaultKey);
       setSession(result.session);
+      updateLockEpoch(result.lockEpoch);
       updateDecryptedVault(result.decryptedVault);
       updateVaultVersion(result.version);
       await initSQLite(target.vault_id);
       await upsertVaultId(target.vault_id);
       await upsertVaultVersion(result.version);
+      if (previousVaultId && previousVaultId !== target.vault_id) {
+        // Tell other tabs to converge to the new vault (they re-check the
+        // cookie authoritatively on receipt).
+        const { postSessionEvent } = await import("@/src/lib/sync/session-channel");
+        postSessionEvent("vault-switch", previousVaultId, null);
+      }
       setSwitchTarget(null);
       router.replace("/home" as any);
     } catch (e) {
@@ -225,6 +243,7 @@ export default function VaultChooser() {
         });
         setVaultKey(result.vaultKey);
         setSession(result.session);
+        updateLockEpoch(result.lockEpoch);
         updateDecryptedVault(result.decryptedVault);
         updateVaultVersion(result.version);
         await initSQLite(googleImportTarget.vault_id);
@@ -274,6 +293,7 @@ export default function VaultChooser() {
       });
       setVaultKey(result.vaultKey);
       setSession(result.session);
+      updateLockEpoch(result.lockEpoch);
       updateDecryptedVault(result.decryptedVault);
       updateVaultVersion(result.version);
       await initSQLite(googleImportTarget.vault_id);

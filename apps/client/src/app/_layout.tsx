@@ -2,12 +2,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Slot } from "expo-router";
 import "../../global.css";
 import { initSQLite } from "../lib/sqlite/web/init-db";
-import { useSyncTriggers } from "../lib/sync/use-sync-triggers";
+import { useSessionSync } from "../lib/sync/use-session-sync";
 import { useEffect, useState } from "react";
 import {
   setSession,
   setVaultKey,
   updateDecryptedVault,
+  updateLockEpoch,
   updateVaultVersion,
   isLockedFlagSet,
 } from "../lib/state";
@@ -18,7 +19,10 @@ const queryClient = new QueryClient();
 import { router } from 'expo-router';
 
 export default function RootLayout() {
-  // useSyncTriggers();
+  // Cross-surface consistency: check-on-use session sync (focus/visible) +
+  // same-origin BroadcastChannel. No interval poller — the extension converges
+  // via its own popup-open / pre-fill / alarm-tick checks (see plan).
+  useSessionSync(queryClient);
   useEffect(() => {
     const bootstrap = async () => {
       // Case 2: session present -> restore app using session and if locked unlock via master password.
@@ -48,6 +52,7 @@ export default function RootLayout() {
           // Locked after a reload: restore just the session so /lock can accept it.
           await initSQLite(sessionData.vault_id);
           setSession({ vaultId: sessionData.vault_id, cryptoVersion: sessionData.crypto_version });
+          updateLockEpoch(sessionData.lock_epoch ?? 0);
           router.navigate("/lock" as any);
           return;
         }
@@ -59,6 +64,7 @@ export default function RootLayout() {
             await initSQLite(unlocked.session.vaultId);
             setVaultKey(unlocked.vaultKey);
             setSession(unlocked.session);
+            updateLockEpoch(unlocked.lockEpoch);
             updateDecryptedVault(unlocked.decryptedVault);
             updateVaultVersion(unlocked.version);
             router.navigate("/home" as any);
@@ -71,6 +77,7 @@ export default function RootLayout() {
         // Session exists but device unlock unavailable -> need master password.
         await initSQLite(sessionData.vault_id);
         setSession({ vaultId: sessionData.vault_id, cryptoVersion: sessionData.crypto_version });
+        updateLockEpoch(sessionData.lock_epoch ?? 0);
         router.navigate("/lock" as any);
       } catch (e) {
         console.log("Bootstrap error", e);

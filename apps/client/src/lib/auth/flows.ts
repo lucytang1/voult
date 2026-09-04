@@ -31,6 +31,8 @@ export interface UnlockedSession {
   vaultKey: CryptoKey;
   decryptedVault: DecryptedVault;
   version: number;
+  // Server lock_epoch observed at unlock time (see POST /api/lock).
+  lockEpoch: number;
 }
 
 function parseVaultJson(plain: string, vaultId: string): DecryptedVault {
@@ -101,6 +103,7 @@ export async function unlockWithDevice(): Promise<UnlockedSession | null> {
     vaultKey,
     decryptedVault: parseVaultJson(plain, vaultId),
     version: vault.version,
+    lockEpoch: sessionData.lock_epoch ?? 0,
   };
 }
 

@@ -56,6 +56,23 @@ When the user asks to "create a plan", "make a plan", "plan this", or otherwise 
 - The Markdown file should contain the complete plan.
 - Don't just transcribe the user's instructions into a plan: research the relevant code first, think through the approach, and proactively suggest alternatives or better ways to accomplish the goal (including trade-offs) before finalizing the plan.
 
+### Plan Style
+
+The taste every plan should aim for:
+
+- Research-first: read the code and docs the plan touches (`architecture.md`, `conflict-resolution.md`, roadmap) before writing. Cite evidence as `file:line` so claims are checkable.
+- Alternatives with verdicts: name the approaches considered, give each an honest trade-off, and recommend one explicitly. Rejected options stay in the plan with the reason (prevents re-litigation).
+- Concrete over abstract: a files-to-touch index (new / edit / do-not-touch), exact endpoint/payload shapes, and real function/module names — never "update the backend accordingly".
+- Trust-boundary aware: state what the change must NOT break (zero-knowledge invariants, session semantics, per-vault namespacing) and call out new attack surface with mitigations.
+- No compat baggage by default: this project has no releases — change schemas in place, no version fields, no migrations, no legacy fallbacks, unless the user explicitly asks for backward compatibility.
+- No new dependencies without justification: prefer owning small, auditable scripts over unmaintained third-party packages, especially on security-sensitive paths.
+- End with open questions: decisions deferred, each with a due-by milestone.
+
+### Phases
+
+Break implementation into ordered phases (`M0` foundations/pipeline first, then feature slices, hardening/store-readiness last). Each phase states its scope plus acceptance criteria concrete enough to verify by hand (what to click, what to observe, what must fail cleanly). Phases are the agent's execution order — each one must leave the tree working.
+
+
 ## Docs
 
 - `apps/client/architecture.md` — canonical vault-centric schemas and login/add-item flows plus per-vault storage table (SQLite OPFS + IndexedDB + Zustand + lock flag). `apps/client/conflict-resolution.md` — merge policy.

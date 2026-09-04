@@ -17,6 +17,7 @@ import { lockVaultStorage } from "@/src/lib/auth/teardown";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { useRouter } from "expo-router";
 import { v4 as uuidv4 } from "uuid";
+import { canonicalizeOrigin } from "@voult/vault-core";
 import { getGoogleStatus, getGoogleBinding, disconnectGoogle } from "@/src/lib/google/api";
 import { enableGoogleDriveForVault } from "@/src/lib/google/enableSync";
 
@@ -84,9 +85,12 @@ export default function Home() {
   useAuthGuard(["unlocked"]);
 
   /**
-   * Lock: wipe decrypted material + vault ciphertext from the query cache,
-   * keep the session. Capture unlock metadata (salt/iterations/wrapped key)
-   * first so /lock can re-derive the key locally without round-trips.
+   * Lock: publish the global lock first (POST /lock bumps lock_epoch so the
+   * extension converges on its next check), then wipe decrypted material +
+   * vault ciphertext from the query cache, keeping the session. Capture unlock
+   * metadata (salt/iterations/wrapped key) first so /lock can re-derive the
+   * key locally without round-trips. The server push is best-effort: local
+   * lock always happens, even offline.
    */
   const handleLock = async () => {
     let metadata: LockMetadata | null = null;
@@ -106,6 +110,18 @@ export default function Home() {
       // Non-fatal: unlock will fall back to fetching these from the server.
       console.warn("Failed to capture lock metadata", e);
     }
+    // Publish the lock for other surfaces (extension) before wiping locally.
+    // Best-effort: an offline lock still locks this tab and converges later.
+    try {
+      const { postLock } = await import("../../lib/queries/session/query");
+      const { updateLockEpoch } = await import("../../lib/state");
+      const { postSessionEvent } = await import("../../lib/sync/session-channel");
+      const { lock_epoch } = await postLock();
+      updateLockEpoch(lock_epoch);
+      postSessionEvent("locked", session!.vaultId, lock_epoch);
+    } catch (e) {
+      console.warn("Failed to publish lock, locked locally only", e);
+    }
     lockVaultState(metadata);
     queryClient.removeQueries({ queryKey: ["vault"] });
     // Release this vault's SQLite handle while locked; its intents stay
@@ -116,19 +132,28 @@ export default function Home() {
 
   const handleCreate = async (site: string, username: string, password: string) => {
     if (!vaultKey) return;
-    const itemWithId: CreateVaultItem = { id: uuidv4(), site, username, password };
+    // Best-effort origin binding for future autofill matching: when the site
+    // field parses as an origin, store it; otherwise leave origin unset (the
+    // M1 form will capture it explicitly). Never let a parse failure block save.
+    let origin: string | undefined;
+    try {
+      origin = canonicalizeOrigin(site);
+    } catch {
+      origin = undefined;
+    }
+    const itemWithId: CreateVaultItem = { id: uuidv4(), site, username, password, origin };
     const { cipher, iv } = await encrypt(JSON.stringify(itemWithId), vaultKey);
     const intent: CreateIntentPayload = {
       payload: b64(cipher),
       payloadIv: b64(iv),
       deviceId: await resolveDeviceId(session!.vaultId),
     }
-    const { result, rows } = await createIntent("create", intent);
+    const { result } = await createIntent("create", intent);
     if (result) {
       addVaultItem(itemWithId);
       syncScheduler.requestSync("intent-created");
     }
-    console.log("createIntent ", result, rows);
+    // No result logging: rows carry ciphertext.
     setShowAddModal(false);
     setNewSite("");
     setNewUsername("");
@@ -254,7 +279,7 @@ export default function Home() {
       .then((plain) => {
         const parsed = JSON.parse(plain) as DecryptedVault;
         updateDecryptedVault(parsed);
-        console.log("decryptedVault", parsed);
+        // Never log the decrypted vault: it holds plaintext passwords.
       })
       .catch((err) => console.error("Failed to decrypt vault", err));
   }, [vaultData, vaultKey]);
