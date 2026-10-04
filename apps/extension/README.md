@@ -47,6 +47,9 @@ cd apps/extension && npm install && npm run build
   iframes never filled; `http` pages show insecure markers.
 - Fill via dropdown click, `Ctrl/Cmd+Shift+L`, and popup Fill all dispatch
   framework-compatible input events; never auto-submits.
+- OAuth markers: dropdown rows read "Continue with X" (never fill);
+  `FILL_CREDENTIAL` for an OAuth id is refused by the worker; popup shows an
+  SSO badge, hides Pass, disables Fill.
 
 ## M2 manual matrix (offer to save)
 
@@ -58,6 +61,27 @@ cd apps/extension && npm install && npm run build
   on disk); flushes on the next online save trigger.
 - Concurrent web-app + extension edits → `409` retry, per-field LWW, no
   resurrection of web-deleted items, no lost fields.
+
+## M2-OAuth manual matrix (sign-in memory)
+
+Test page needs two SSO buttons (Google + GitHub hrefs or text) on an
+`https` origin with a password form beside them.
+- Click "Continue with Google" → complete the IdP dance and return to the
+  app (usually a page with no SSO buttons, e.g. `/dashboard`) → one "Signed
+  in with Google?" banner; Save creates a passwordless marker (verify in web
+  app: green "Continue with Google" detail, no password block).
+- Dismiss / abort (never return) / timeout (>10 min) / locked vault → no
+  write, no error.
+- "Never for this site" → no further OAuth prompts on that origin.
+- Second visit to the login page → "Continue with Google" suggestion row;
+  no password prompt for that marker.
+- Suggestion on SSO/email-only pages (no password field): focusing the email
+  field offers stored OAuth markers, and the popup shows a "Sign in with X"
+  button for this site; pressing it closes the popup and focuses the site's
+  own SSO button. Voult never clicks it.
+- Typing a password instead after clicking SSO → normal password save flow;
+  stale SSO click is dropped.
+- Providers: repeat with GitHub/Apple/Microsoft/custom text variants.
 
 ## M3 notes
 

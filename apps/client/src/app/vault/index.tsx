@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 import { Pressable, Text, View, ScrollView, Modal, ActivityIndicator, TextInput } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft } from "lucide-react";
 import { useAppStore, setSession, setVaultKey, updateDecryptedVault, updateLockEpoch, updateVaultVersion } from "@/src/lib/state";
 import { listVaults, VaultSummary } from "@/src/lib/queries/vaults/query";
 import { openVaultFlow, requiresSwitchConfirmation } from "@/src/lib/vault/open";
-import { getGoogleStatus, startGoogleAuth, redirectToGoogleAuth, listGoogleVaults, disconnectGoogle, listGoogleVaultsPending, linkPendingGoogleToken } from "@/src/lib/google/api";
+import { getGoogleStatus, listGoogleVaults, listGoogleVaultsPending } from "@/src/lib/google/api";
+import { GoogleDriveIcon } from "../../../assets/images/GoogleDriveIcon";
 import type { VaultDescriptor } from "@/src/lib/google/api";
 import { importVaultFromGoogle } from "@/src/lib/vault/import";
 import { fetchSession } from "@/src/lib/queries/session/query";
@@ -14,10 +16,13 @@ import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services
 
 /**
  * Vault Chooser (vault-centric).
- * Shown when no vault is currently open. Lists:
- * - Create new vault (local-only)
- * - Start from Google Drive
+ * Shown when no vault is currently open. Lists, in order:
+ * - Google Drive vaults (auto-listed: the user arrives here via
+ *   "Continue with Google Drive", so no intermediate sign-in button)
  * - Existing local vaults/bindings (from GET /vaults, which is session-scoped)
+ *
+ * Vault creation lives on the landing page ("/") only. The back arrow
+ * returns to "/" (landing) — never to the OAuth screen.
  *
  * All identity is the vault id; no email/account is collected. Switching warns
  * before discarding the currently-open vault's in-memory state.
@@ -41,7 +46,6 @@ export default function VaultChooser() {
   const [googleVaults, setGoogleVaults] = useState<VaultDescriptor[] | null>(null);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [googleError, setGoogleError] = useState<string | null>(null);
-  const [showGoogleList, setShowGoogleList] = useState(false);
   const [googleImportTarget, setGoogleImportTarget] = useState<VaultDescriptor | null>(null);
   const [googleImportPassword, setGoogleImportPassword] = useState("");
   const [googleImportError, setGoogleImportError] = useState<string | null>(null);
@@ -93,15 +97,13 @@ export default function VaultChooser() {
 
   // Handle pending Google auth (unified flow for new vault without local session)
   useEffect(() => {
-    if (pendingState && !showGoogleList) {
-      setShowGoogleList(true);
-      setGoogleLoading(true);
-      listGoogleVaultsPending(pendingState)
-        .then((v) => { setGoogleVaults(v); setGoogleError(null); })
-        .catch((e: any) => { setGoogleError(e?.response?.data?.error_msg || e?.message || "Failed to list Drive vaults (pending)"); })
-        .finally(() => setGoogleLoading(false));
-    }
-  }, [pendingState, showGoogleList]);
+    if (!pendingState) return;
+    setGoogleLoading(true);
+    listGoogleVaultsPending(pendingState)
+      .then((v) => { setGoogleVaults(v); setGoogleError(null); })
+      .catch((e: any) => { setGoogleError(e?.response?.data?.error_msg || e?.message || "Failed to list Drive vaults (pending)"); })
+      .finally(() => setGoogleLoading(false));
+  }, [pendingState]);
 
   useEffect(() => {
     refreshGoogleStatus();
@@ -109,6 +111,21 @@ export default function VaultChooser() {
       refreshGoogleStatus();
     }
   }, []);
+
+  // The chooser is reached via "Continue with Google Drive", so Drive vaults
+  // are listed directly — no intermediate sign-in button. Fetch them as soon
+  // as the session-based connection is confirmed (the pending OAuth flow
+  // above covers the no-session case).
+  useEffect(() => {
+    if (pendingState || !googleStatus?.connected) return;
+    let cancelled = false;
+    setGoogleLoading(true);
+    listGoogleVaults()
+      .then((v) => { if (!cancelled) { setGoogleVaults(v); setGoogleError(null); } })
+      .catch((e: any) => { if (!cancelled) setGoogleError(e?.response?.data?.error_msg || e?.message || "Failed to list Drive vaults"); })
+      .finally(() => { if (!cancelled) setGoogleLoading(false); });
+    return () => { cancelled = true; };
+  }, [googleStatus?.connected, pendingState]);
 
   useEffect(() => {
     if (!session) return;
@@ -165,57 +182,6 @@ export default function VaultChooser() {
     }
   };
 
-  const handleGoogleAction = async () => {
-    setGoogleError(null);
-    try {
-      const status = await refreshGoogleStatus();
-      if (!status?.connected) {
-        const { startGoogleAuthPublic } = await import("@/src/lib/google/api");
-        if (!session) {
-          router.replace("/" as any);
-          return;
-        }
-        const { auth_url } = await startGoogleAuth();
-        redirectToGoogleAuth(auth_url);
-        return;
-      }
-      setShowGoogleList(true);
-      setGoogleLoading(true);
-      const vaults = await listGoogleVaults();
-      setGoogleVaults(vaults);
-      setGoogleError(null);
-    } catch (e: any) {
-      const msg = e?.response?.data?.error_msg || e?.message || "Google Drive error";
-      const code = e?.response?.data?.code as string | undefined;
-      if (code === "GOOGLE_NOT_CONFIGURED") {
-        setGoogleConfigured(false);
-        setGoogleError("Google Drive not configured. See .env.example");
-      } else if (code === "PROVIDER_AUTH_REQUIRED") {
-        try {
-          const { auth_url } = await startGoogleAuth();
-          redirectToGoogleAuth(auth_url);
-        } catch (e2: any) {
-          setGoogleError(e2?.response?.data?.error_msg || "Failed to start Google auth");
-        }
-      } else {
-        setGoogleError(msg);
-      }
-    } finally {
-      setGoogleLoading(false);
-    }
-  };
-
-  const handleGoogleDisconnect = async () => {
-    try {
-      await disconnectGoogle();
-      await refreshGoogleStatus();
-      setGoogleVaults(null);
-      setShowGoogleList(false);
-    } catch (e: any) {
-      setGoogleError(e?.response?.data?.error_msg || "Failed to disconnect");
-    }
-  };
-
   const handleGoogleVaultSelect = (gv: VaultDescriptor) => {
     setGoogleImportTarget(gv);
     setGoogleImportPassword("");
@@ -265,7 +231,6 @@ export default function VaultChooser() {
           console.warn("Failed to persist Drive binding after import", e);
         }
         setGoogleImportTarget(null);
-        setShowGoogleList(false);
         router.replace("/home" as any);
         return;
       } catch (e: any) {
@@ -300,7 +265,6 @@ export default function VaultChooser() {
       await upsertVaultId(googleImportTarget.vault_id);
       await upsertVaultVersion(result.version);
       setGoogleImportTarget(null);
-      setShowGoogleList(false);
       router.replace("/home" as any);
     } catch (e: any) {
       if (e?.message?.includes("Incorrect")) {
@@ -326,99 +290,78 @@ export default function VaultChooser() {
     );
   }
 
+  const driveCount = googleVaults?.length ?? 0;
+  const localCount = vaults?.length ?? 0;
+
   return (
-    <View className="flex-1 bg-black px-6 py-8">
-      <Text className="text-white text-2xl font-bold mb-2">Choose a vault</Text>
-      <Text className="text-gray-400 text-sm mb-6">
-        {vaults?.length ?? 0} vault{vaults?.length === 1 ? "" : "s"} on this device
-      </Text>
-
-      {/* Actions */}
-      <View className="space-y-3 mb-6">
-        <Pressable
-          className="w-full rounded-lg bg-purple-600 py-3 items-center"
-          onPress={() => router.push("/vault/create" as any)}
-        >
-          <Text className="text-white font-medium">Create new vault</Text>
-          <Text className="text-purple-200 text-xs mt-1">Exists only on this device until you enable sync</Text>
-        </Pressable>
-
-        <Pressable
-          className={`w-full rounded-lg py-3 items-center border ${googleConfigured === false ? "bg-[#1e1e36] border-[#2a2a4a] opacity-60" : "bg-[#2a2a4a] border-[#3a3a5a]"}`}
-          onPress={handleGoogleAction}
-          disabled={googleConfigured === false}
-        >
-          <Text className={googleConfigured === false ? "text-gray-500 font-medium" : "text-white font-medium"}>
-            {googleStatus?.connected ? `Google Drive: ${googleStatus.email || "connected"} • View vaults` : "Start from Google Drive"}
-          </Text>
-          <Text className="text-gray-400 text-xs mt-1">
-            {googleConfigured === false
-              ? "Not configured – see .env.example"
-              : googleStatus?.connected
-              ? "List encrypted vaults from your Google Drive appDataFolder"
-              : "Sign in to Google to access cloud vaults"}
-          </Text>
-        </Pressable>
-        {googleStatus?.connected && (
+    <View className="flex-1 bg-black px-6 py-8 items-center">
+      {/* Header — back arrow returns to landing ("/"), never to OAuth */}
+      <View className="w-full max-w-[880px]">
+        <View className="flex-row items-center gap-3">
           <Pressable
-            className="w-full rounded-lg bg-[#1e1e36] py-2 items-center border border-[#2a2a4a]"
-            onPress={handleGoogleDisconnect}
+            accessibilityLabel="Back to landing"
+            accessibilityRole="button"
+            className="h-8 w-8 items-center justify-center"
+            onPress={() => router.replace("/" as any)}
           >
-            <Text className="text-gray-400 text-xs">Disconnect Google Drive ({googleStatus.email})</Text>
+            <ArrowLeft size={24} color="#E5E7EB" />
           </Pressable>
-        )}
-        {params.google_connected && (
-          <View className="bg-green-900/20 border border-green-800 rounded-lg p-3">
-            <Text className="text-green-400 text-xs">Google Drive connected. You can now start from Drive or enable sync for a local vault.</Text>
-          </View>
+          <Text className="text-white text-2xl font-bold">Choose a vault</Text>
+        </View>
+        <Text className="text-gray-400 text-sm mb-6 ml-11 mt-2">
+          {driveCount} from Drive · {localCount} on this device
+        </Text>
+      </View>
+
+      {/* Google Drive vaults — listed directly, no sign-in button */}
+      <View className="w-full max-w-[880px] bg-[#1a1a2e] rounded-xl p-5 mb-6 border border-[#2a2a4a]">
+        <View className="flex-row items-center gap-2.5">
+          <GoogleDriveIcon width={20} height={19} />
+          <Text className="text-white text-[15px] font-semibold">Google Drive vaults</Text>
+        </View>
+        {googleConfigured === false && (
+          <Text className="text-gray-500 text-xs mt-2">Not configured – see .env.example</Text>
         )}
         {params.google_error && (
-          <View className="bg-red-900/20 border border-red-800 rounded-lg p-3">
+          <View className="bg-red-900/20 border border-red-800 rounded-lg p-3 mt-3">
             <Text className="text-red-400 text-xs">Google error: {params.google_error}</Text>
             {params.google_error_detail && <Text className="text-red-300 text-xs mt-1">Details: {params.google_error_detail}</Text>}
           </View>
         )}
         {googleError && (
-          <View className="bg-red-900/20 border border-red-800 rounded-lg p-3">
+          <View className="bg-red-900/20 border border-red-800 rounded-lg p-3 mt-3">
             <Text className="text-red-400 text-xs">{googleError}</Text>
           </View>
         )}
-        {showGoogleList && (
-          <View className="bg-[#1e1e36] rounded-lg p-4 border border-[#2a2a4a]">
-            <Text className="text-white text-sm font-medium mb-2">Google Drive vaults ({googleVaults?.length ?? 0}) – tap to import</Text>
-            <Text className="text-gray-500 text-xs mb-2">Each is voult-vault-&lt;vault_id&gt;.json in appDataFolder – encrypted, not plaintext.</Text>
-            {googleLoading ? (
-              <ActivityIndicator color="#fff" />
-            ) : googleVaults && googleVaults.length > 0 ? (
-              googleVaults.map((gv) => (
-                <Pressable key={gv.file_id} className="bg-[#2a2a4a] rounded-lg p-3 mb-2 border border-transparent active:border-purple-600" onPress={() => handleGoogleVaultSelect(gv)}>
-                  <Text className="text-white text-sm">Vault {gv.vault_id.slice(0, 8)}… – {gv.name}</Text>
-                  <Text className="text-gray-400 text-xs">{gv.modified_time ? new Date(gv.modified_time).toLocaleDateString() : ""} • {gv.size ? `${gv.size} bytes` : ""} • Rev {(gv.head_revision_id || gv.version || "").slice(0, 8)}</Text>
-                  <Text className="text-gray-500 text-xs mt-1">File: {gv.file_id.slice(0, 12)}… • Tap to download & enter master password to import</Text>
-                </Pressable>
-              ))
-            ) : (
-              <Text className="text-gray-400 text-xs">No Voult vaults found in this Google account.</Text>
-            )}
-            <Pressable className="mt-3" onPress={() => setShowGoogleList(false)}>
-              <Text className="text-purple-400 text-xs">Close</Text>
-            </Pressable>
-          </View>
-        )}
+        <View className="mt-3.5">
+          {googleLoading ? (
+            <ActivityIndicator color="#fff" />
+          ) : googleVaults && googleVaults.length > 0 ? (
+            googleVaults.map((gv) => (
+              <Pressable key={gv.file_id} className="bg-[#23233f] rounded-[10px] p-4 mb-2 border border-[#3a3a5a] active:border-purple-600" onPress={() => handleGoogleVaultSelect(gv)}>
+                <Text className="text-white text-sm font-semibold">Vault {gv.vault_id.slice(0, 8)}… — {gv.name}</Text>
+                <Text className="text-gray-400 text-xs mt-1">{gv.modified_time ? new Date(gv.modified_time).toLocaleDateString() : ""} • {gv.size ? `${gv.size} bytes` : ""} • Rev {(gv.head_revision_id || gv.version || "").slice(0, 8)}</Text>
+                <Text className="text-purple-300 text-xs mt-1.5">Tap to download & enter master password to import</Text>
+              </Pressable>
+            ))
+          ) : (
+            !googleLoading && <Text className="text-gray-400 text-xs">No Voult vaults found in this Google account.</Text>
+          )}
+        </View>
       </View>
 
-      {/* Vault list */}
+      {/* Local vaults */}
       {loading ? (
-        <View className="flex-1 items-center justify-center py-12">
+        <View className="w-full max-w-[880px] items-center justify-center py-12">
           <ActivityIndicator color="#fff" />
           <Text className="text-gray-400 mt-2">Loading vaults…</Text>
         </View>
       ) : error ? (
-        <View className="bg-red-900/20 border border-red-800 rounded-lg p-4">
+        <View className="w-full max-w-[880px] bg-red-900/20 border border-red-800 rounded-lg p-4">
           <Text className="text-red-400">{error}</Text>
         </View>
       ) : session && vaults && vaults.length > 0 ? (
-        <ScrollView className="flex-1">
+        <ScrollView className="flex-1 w-full max-w-[880px]">
           <Text className="text-gray-400 text-xs uppercase tracking-wider mb-2">Existing local vaults</Text>
           {vaults.map((v) => (
             <Pressable
@@ -447,7 +390,7 @@ export default function VaultChooser() {
           ))}
         </ScrollView>
       ) : session ? (
-        <View className="bg-[#1e1e36] rounded-lg p-6 items-center border border-[#2a2a4a]">
+        <View className="w-full max-w-[880px] bg-[#1e1e36] rounded-lg p-6 items-center border border-[#2a2a4a]">
           <Text className="text-gray-400 text-center">No vaults on this device yet.</Text>
           <Text className="text-gray-500 text-xs text-center mt-2">Create your first vault to start saving logins.</Text>
         </View>

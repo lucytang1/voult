@@ -10,11 +10,37 @@
 
 import * as z from "zod";
 
+// OAuth sign-in memory: one VaultItem holds every way to sign into a site —
+// an optional stored password plus zero or more "Continue with X" providers.
+// A login with both is a single item with multiple sign-in options (never two
+// items for the same site); passwordless SSO-only items simply omit password.
+export const SsoProviderSchema = z.enum(["google", "github", "apple", "microsoft", "custom"]);
+export type SsoProvider = z.infer<typeof SsoProviderSchema>;
+
+// IdP host fragment → provider. Used by the extension's DOM detection
+// (href to an IdP is the highest-confidence signal); kept here so web +
+// extension can't drift. Substring match on the link hostname.
+export const OAUTH_IDP_HOSTS: Record<string, SsoProvider> = {
+  "accounts.google.com": "google",
+  "github.com": "github",
+  "appleid.apple.com": "apple",
+  "login.microsoftonline.com": "microsoft",
+};
+
 export const VaultItemSchema = z.object({
   id: z.uuid(),
   site: z.string(),
-  username: z.string(),
-  password: z.string(),
+  // Optional: SSO-only items often have no visible email (user confirmed
+  // "Signed in with Google" without typing anything). Consumers must use
+  // `item.username ?? ""`.
+  username: z.string().optional(),
+  // Optional: absent for SSO-only items (no secret exists). An item may carry
+  // both a password and ssoProviders — that is one login with two ways in.
+  password: z.string().optional(),
+  // "Continue with X" providers linked to this login. Empty (default) means
+  // password-only. Passwords are never stored for OAuth — just the provider
+  // + origin so clients can answer "how did I sign up here?".
+  ssoProviders: z.array(SsoProviderSchema).default([]),
   // Canonical origin captured at save time (scheme + host [+ non-default port]).
   // Optional during the M0 transition: the web add-item form does not capture
   // it yet (M1 wires it); extension writers always set it. Items without an
@@ -69,6 +95,7 @@ export const UpdateVaultItemSchema = z.object({
     site: z.string().optional(),
     username: z.string().optional(),
     password: z.string().optional(),
+    ssoProviders: z.array(SsoProviderSchema).optional(),
     origin: z.string().optional(),
     urls: z.array(z.string()).optional(),
   }),

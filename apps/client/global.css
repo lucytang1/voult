@@ -25,6 +25,17 @@ html, body, #root {
 }
 
 @theme {
-    /* Colors */
+    /* Landing (Paper "01 Landing - /") */
+    --color-ground: #000000;
+    --color-rail: #101018;
+    --color-panel: #1A1A2E;
+    --color-card: #1E1E36;
+    --color-border: #2A2A4A;
+    --color-border-strong: #3A3A5A;
+    --color-accent: #7C3AED;
+    --color-accent-soft: #E9D5FF;
+    --color-muted: #9CA3AF;
+    --color-faint: #6B7280;
 
+    --font-app: Inter, system-ui, sans-serif;
 }

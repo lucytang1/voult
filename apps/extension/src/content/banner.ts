@@ -111,3 +111,70 @@ export function showSaveBanner(
 export function dismissSaveBanner(): void {
   teardown();
 }
+
+/**
+ * OAuth variant: "Signed in with Google?" — no secret exists to display, just
+ * the provider the user clicked plus the site. Same one-banner-at-a-time and
+ * dismiss-default semantics as the password banner.
+ */
+export function showOAuthSaveBanner(
+  providerLabel: string,
+  origin: string,
+  cb: BannerCallbacks,
+): void {
+  teardown();
+  currentCb = cb;
+
+  host = document.createElement("div");
+  const shadow = host.attachShadow({ mode: "closed" });
+  const style = document.createElement("style");
+  style.textContent = STYLE;
+  shadow.appendChild(style);
+
+  const box = document.createElement("div");
+  box.className = "voult-banner";
+  const title = document.createElement("div");
+  title.className = "voult-title";
+  title.textContent = `Signed in with ${providerLabel}?`;
+  const sub = document.createElement("div");
+  sub.className = "voult-sub";
+  sub.textContent = `Save "Continue with ${providerLabel}" for ${origin}`;
+  const actions = document.createElement("div");
+  actions.className = "voult-actions";
+
+  const confirm = document.createElement("button");
+  confirm.className = "voult-primary";
+  confirm.textContent = "Save";
+  confirm.addEventListener("click", () => {
+    const fns = currentCb;
+    teardown();
+    fns?.onConfirm();
+  });
+
+  const never = document.createElement("button");
+  never.className = "voult-ghost";
+  never.textContent = "Never for this site";
+  never.addEventListener("click", () => {
+    const fns = currentCb;
+    teardown();
+    fns?.onNever();
+  });
+
+  const dismiss = document.createElement("button");
+  dismiss.className = "voult-ghost";
+  dismiss.textContent = "Dismiss";
+  dismiss.addEventListener("click", () => {
+    const fns = currentCb;
+    teardown();
+    fns?.onDismiss();
+  });
+
+  actions.appendChild(confirm);
+  actions.appendChild(never);
+  actions.appendChild(dismiss);
+  box.appendChild(title);
+  box.appendChild(sub);
+  box.appendChild(actions);
+  shadow.appendChild(box);
+  document.documentElement.appendChild(host);
+}

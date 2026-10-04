@@ -31,6 +31,7 @@ import {
   unwrapKeyBytes,
   uuid,
   wrapKeyBytes,
+  type SsoProvider,
   type VaultItem,
 } from "@voult/vault-core";
 import {
@@ -61,7 +62,7 @@ import {
   setLocalValue,
   setSessionValue,
 } from "../lib/storage";
-import type { LoginMatch, PopupState, Rank, SavePrompt } from "../lib/messaging";
+import type { LoginMatch, PopupState, Rank, SavePrompt, OAuthSavePrompt } from "../lib/messaging";
 
 const SERVER_URL_KEY = "voult.serverUrl";
 const LOCK_TIMEOUT_KEY = "voult.lockTimeoutMinutes";
@@ -358,6 +359,7 @@ export async function lock(): Promise<void> {
   version = null;
   vaultId = null;
   pendingSave = null;
+  pendingOAuth = null;
   await setSessionValue(LOCKED_FLAG_KEY, 1);
   await chrome.alarms.clear(AUTOLOCK_ALARM);
   console.info("[voult] locked");
@@ -431,12 +433,16 @@ export function queryLogins(pageOrigin: string): LoginMatch[] {
     .map((item) => {
       const rank = rankOf(item, canonical);
       if (!rank) return null;
+      const providers = item.ssoProviders ?? [];
       const m: LoginMatch = {
         id: item.id,
-        username: item.username,
+        username: item.username ?? "",
         label: item.site || item.origin || canonical,
         origin: item.origin ?? canonical,
         rank,
+        // One item carries every sign-in option: password fill and/or SSO.
+        hasPassword: !!item.password,
+        ssoProviders: providers,
       };
       return m;
     })
@@ -450,7 +456,29 @@ export function credentialForFill(id: string): { username: string; password: str
   touch();
   const item = items.find((i) => i.id === id);
   if (!item) throw new Error("Login not found.");
-  return { username: item.username, password: item.password };
+  // SSO-only items hold no secret — they inform, never fill. Items carrying
+  // both a password and SSO providers fill the password; the content script
+  // shows "Continue with X" rows alongside and never calls fill for
+  // passwordless picks. This is the worker-side backstop (also blocks a
+  // compromised renderer asking for a passwordless id directly).
+  if (!item.password) {
+    throw new Error("This login uses Continue-with-SSO — no password to fill.");
+  }
+  return { username: item.username ?? "", password: item.password };
+}
+
+/**
+ * SSO providers when an id names a passwordless login, else null. Lets the
+ * worker answer FILL_CREDENTIAL with a highlight directive instead of a
+ * secret — the content script scrolls to the site's own SSO button. Items
+ * that also store a password fill normally, so this returns null for them.
+ */
+export function oauthProviderForFill(id: string): SsoProvider[] | null {
+  if (!isUnlocked()) return null;
+  const item = items.find((i) => i.id === id);
+  if (!item || item.password) return null;
+  const providers = item.ssoProviders ?? [];
+  return providers.length > 0 ? providers : null;
 }
 
 // --- Popup state ---------------------------------------------------------------
@@ -661,12 +689,7 @@ export async function pushSave(
   origin: string,
   mode: "save" | "update",
 ): Promise<SaveResult> {
-  const key = currentVaultKey();
-  const id = currentVaultId();
-  if (!key || !id) throw new Error("Vault is locked.");
-  const serverUrl = await getServerUrl();
-  const pinId = id;
-  const sessionChanged = () => currentVaultId() !== pinId || currentVaultKey() !== key;
+  if (!isUnlocked()) throw new Error("Vault is locked.");
 
   const op =
     mode === "save"
@@ -677,6 +700,7 @@ export async function pushSave(
             site: siteLabelForOrigin(origin),
             username,
             password,
+            ssoProviders: [],
             origin,
           },
         }
@@ -687,6 +711,26 @@ export async function pushSave(
           }
           return { operation: "update", payload: { id: existing.id, fields: { password } } };
         })();
+
+  return pushSingleIntent(op, () => setPendingSave({ username, password, origin, mode }));
+}
+
+/**
+ * Shared read-modify-CAS-write for one confirmed intent (password or OAuth).
+ * `onOffline` stashes the in-memory retry candidate when the network is down
+ * (plaintext never touches disk); callers clear their pending state on success
+ * via the returned `saved` flag. Bounded retries; aborts on session change.
+ */
+async function pushSingleIntent(
+  op: { operation: string; payload: unknown },
+  onOffline: () => void,
+): Promise<SaveResult> {
+  const key = currentVaultKey();
+  const id = currentVaultId();
+  if (!key || !id) throw new Error("Vault is locked.");
+  const serverUrl = await getServerUrl();
+  const pinId = id;
+  const sessionChanged = () => currentVaultId() !== pinId || currentVaultKey() !== key;
 
   const enc = await encrypt(JSON.stringify(op.payload), key);
   const intent = {
@@ -709,7 +753,7 @@ export async function pushSave(
       serverVersion = vaultData.vault.version;
     } catch (e) {
       if (isNetworkError(e)) {
-        setPendingSave({ username, password, origin, mode });
+        onOffline();
         return { saved: false, offline: true };
       }
       throw e;
@@ -736,7 +780,7 @@ export async function pushSave(
       return { saved: true, offline: false };
     } catch (e) {
       if (isNetworkError(e)) {
-        setPendingSave({ username, password, origin, mode });
+        onOffline();
         return { saved: false, offline: true };
       }
       if (isVersionConflict(e)) {
@@ -748,6 +792,142 @@ export async function pushSave(
       throw e;
     }
   }
-  setPendingSave({ username, password, origin, mode });
+  onOffline();
   return { saved: false, offline: false };
+}
+
+// --- OAuth sign-in memory ------------------------------------------------------
+//
+// Tracks one in-flight "Continue with X" click (memory only, never persisted)
+// and decides whether a later page state on the same origin looks like the
+// user came back from the IdP. A prompt is only ever a suggestion — the save
+// happens on explicit banner confirm via pushSaveOAuth(), reusing the same
+// CAS path as password saves. No OAuth secret ever exists to store; the
+// provider is linked onto the site's login alongside any password.
+
+export interface PendingOAuth {
+  provider: SsoProvider;
+  sourceOrigin: string;
+  tabId?: number;
+  /** Wall-clock of the click; compared against OAUTH_WINDOW_MS. */
+  at: number;
+}
+
+/** Click→return window. Longer than any real IdP dance; short enough that a
+ *  stale click can't nag across sessions (lock() also clears it). */
+const OAUTH_WINDOW_MS = 10 * 60 * 1000;
+
+let pendingOAuth: PendingOAuth | null = null;
+
+/** Record a click on an SSO button. New clicks overwrite (single slot). */
+export function recordOAuthClick(provider: SsoProvider, sourceOrigin: string, tabId?: number): void {
+  try {
+    sourceOrigin = originOfUrl(sourceOrigin);
+  } catch {
+    return;
+  }
+  pendingOAuth = { provider, sourceOrigin, tabId, at: Date.now() };
+  touch();
+}
+
+export function clearPendingOAuth(): void {
+  pendingOAuth = null;
+}
+
+/** Drop a stale click for one origin (e.g. the user typed a password instead). */
+export function clearPendingOAuthFor(origin: string): void {
+  if (pendingOAuth && pendingOAuth.sourceOrigin === origin) pendingOAuth = null;
+}
+
+/** Paths that still look like "choosing how to sign in". */
+const LOGIN_PATH_RE = /\/(login|signin|sign-in|auth|oauth|authorize)/i;
+
+/**
+ * Decides whether a page state (reported by the content script on SSO pages)
+ * deserves a "Signed in with X?" prompt. Returns prompt:false while the user
+ * still looks mid-choice (login form present on a login-ish path) so we never
+ * nag before the dance finishes. Clears the pending click once it resolves
+ * (saved-elsewhere, never-listed, expired) so one click prompts at most once.
+ */
+export async function evaluateOAuthPageState(
+  offers: SsoProvider[],
+  hasLoginForm: boolean,
+  path: string,
+  pageOrigin: string,
+): Promise<OAuthSavePrompt> {
+  void offers;
+  if (!isUnlocked() || !pendingOAuth) return { prompt: false };
+  let canonical: string;
+  try {
+    canonical = originOfUrl(pageOrigin);
+  } catch {
+    return { prompt: false };
+  }
+  const pending = pendingOAuth;
+  if (pending.sourceOrigin !== canonical) return { prompt: false };
+  if (Date.now() - pending.at > OAUTH_WINDOW_MS) {
+    pendingOAuth = null;
+    return { prompt: false };
+  }
+  if (await isNeverOrigin(canonical)) {
+    pendingOAuth = null;
+    return { prompt: false };
+  }
+  touch();
+  // Still choosing (form + login path both present) → wait, keep pending.
+  if (hasLoginForm && LOGIN_PATH_RE.test(path)) return { prompt: false };
+  // Already remembered → no prompt. One item holds every sign-in option for
+  // a site, so a provider counts as remembered when any same-origin item
+  // already lists it (password and SSO coexist on that item).
+  if (items.some((i) => i.origin === canonical && (i.ssoProviders ?? []).includes(pending.provider))) {
+    pendingOAuth = null;
+    return { prompt: false };
+  }
+  pendingOAuth = null;
+  return { prompt: true, provider: pending.provider, origin: canonical };
+}
+
+/**
+ * Saves a confirmed SSO sign-in (no secret — provider linked onto the site's
+ * login) via the shared CAS push. When a same-origin item already exists the
+ * provider is merged into it (one item, multiple sign-in options); otherwise
+ * a new passwordless item is created. Throws when locked or when the provider
+ * appeared meanwhile.
+ */
+export async function pushSaveOAuth(provider: SsoProvider, origin: string): Promise<SaveResult> {
+  if (!isUnlocked()) throw new Error("Vault is locked.");
+  let canonical: string;
+  try {
+    canonical = originOfUrl(origin);
+  } catch {
+    throw new Error("Unknown site origin.");
+  }
+  if (items.some((i) => i.origin === canonical && (i.ssoProviders ?? []).includes(provider))) {
+    throw new Error("Already saved for this site.");
+  }
+  // Merge into the site's existing login so email+password and SSO stay one
+  // item; only SSO-only-first-seen sites create a fresh passwordless item.
+  const existing = items.find((i) => i.origin === canonical);
+  const op = existing
+    ? {
+        operation: "update",
+        payload: {
+          id: existing.id,
+          fields: {
+            ssoProviders: [...(existing.ssoProviders ?? []), provider],
+          },
+        },
+      }
+    : {
+        operation: "create",
+        payload: {
+          id: uuid(),
+          site: siteLabelForOrigin(canonical),
+          ssoProviders: [provider],
+          origin: canonical,
+        },
+      };
+  const res = await pushSingleIntent(op, () => undefined);
+  if (res.saved) console.info("[voult] oauth login saved");
+  return res;
 }

@@ -18,6 +18,7 @@ import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { useRouter } from "expo-router";
 import { v4 as uuidv4 } from "uuid";
 import { canonicalizeOrigin } from "@voult/vault-core";
+import type { SsoProvider } from "@voult/vault-core";
 import { getGoogleStatus, getGoogleBinding, disconnectGoogle } from "@/src/lib/google/api";
 import { enableGoogleDriveForVault } from "@/src/lib/google/enableSync";
 
@@ -50,6 +51,20 @@ function getSiteIcon(site: string): string {
   return site.charAt(0).toUpperCase();
 }
 
+// Short label for an SSO provider ("Google", "GitHub", …). Duplicated from
+// the extension's messaging helper (client must not import extension code).
+function ssoLabel(p?: SsoProvider): string {
+  switch (p) {
+    case "google": return "Google";
+    case "github": return "GitHub";
+    case "apple": return "Apple";
+    case "microsoft": return "Microsoft";
+    default: return "SSO";
+  }
+}
+
+const SSO_PROVIDERS: SsoProvider[] = ["google", "github", "apple", "microsoft", "custom"];
+
 export default function Home() {
   const vaultKey = useAppStore((state) => state.vaultKey);
   const session = useAppStore((state) => state.session);
@@ -67,11 +82,15 @@ export default function Home() {
   const [newSite, setNewSite] = useState("");
   const [newUsername, setNewUsername] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  // "Continue with X" providers linked to the new login. A login is one item
+  // with every sign-in option: password (when set) plus any providers here.
+  const [newSsoProviders, setNewSsoProviders] = useState<SsoProvider[]>([]);
 
   // Edit form state
   const [editSite, setEditSite] = useState("");
   const [editUsername, setEditUsername] = useState("");
   const [editPassword, setEditPassword] = useState("");
+  const [editSsoProviders, setEditSsoProviders] = useState<SsoProvider[]>([]);
 
   // Google Drive status (restored: previously lost after flow refactor)
   const [googleStatus, setGoogleStatus] = useState<{ connected: boolean; email?: string } | null>(null);
@@ -130,7 +149,12 @@ export default function Home() {
     router.replace("/lock" as any);
   };
 
-  const handleCreate = async (site: string, username: string, password: string) => {
+  const handleCreate = async (
+    site: string,
+    username: string,
+    password: string,
+    ssoProviders: SsoProvider[] = [],
+  ) => {
     if (!vaultKey) return;
     // Best-effort origin binding for future autofill matching: when the site
     // field parses as an origin, store it; otherwise leave origin unset (the
@@ -141,7 +165,17 @@ export default function Home() {
     } catch {
       origin = undefined;
     }
-    const itemWithId: CreateVaultItem = { id: uuidv4(), site, username, password, origin };
+    // One item carries every sign-in option: an optional stored password plus
+    // zero or more SSO providers. Passwordless SSO-only items simply omit the
+    // secret; callers must pass a password and/or at least one provider.
+    const itemWithId: CreateVaultItem = {
+      id: uuidv4(),
+      site,
+      username: username || undefined,
+      password: password || undefined,
+      ssoProviders,
+      origin,
+    };
     const { cipher, iv } = await encrypt(JSON.stringify(itemWithId), vaultKey);
     const intent: CreateIntentPayload = {
       payload: b64(cipher),
@@ -158,17 +192,22 @@ export default function Home() {
     setNewSite("");
     setNewUsername("");
     setNewPassword("");
+    setNewSsoProviders([]);
   }
 
   const handleUpdate = async (item: VaultItem) => {
     if (!vaultKey) return;
+    // Per-field LWW: ssoProviders rides as a full-set replacement alongside
+    // site/username/password. Clearing the password field keeps the stored
+    // value (empty edit ≠ delete); SSO set is authoritative from the chips.
     const updatedItem: UpdateVaultItem = {
       id: item.id,
       fields: {
         site: editSite || item.site,
         username: editUsername || item.username,
         password: editPassword || item.password,
-      }
+        ssoProviders: editSsoProviders,
+      },
     };
     const { cipher, iv } = await encrypt(JSON.stringify(updatedItem), vaultKey);
     const intent: CreateIntentPayload = {
@@ -293,7 +332,8 @@ export default function Home() {
     return decryptedVault.items.filter(
       (item) =>
         item.site.toLowerCase().includes(q) ||
-        item.username.toLowerCase().includes(q)
+        (item.username ?? "").toLowerCase().includes(q) ||
+        (item.ssoProviders ?? []).join(" ").toLowerCase().includes(q)
     );
   }, [decryptedVault?.items, searchQuery]);
 
@@ -452,11 +492,11 @@ export default function Home() {
                   <Text className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-2 mb-2">
                     {group}
                   </Text>
-                  {items.map((item, index) => (
+                  {items.map((item) => (
                     <Pressable
-                      key={`${item.site}-${item.username}-${index}`}
+                      key={item.id}
                       className={`flex-row items-center px-3 py-3 rounded-lg mb-1 ${
-                        selectedItem?.site === item.site && selectedItem?.username === item.username
+                        selectedItem?.id === item.id
                           ? "bg-purple-600/20 border border-purple-500/30"
                           : "hover:bg-[#2a2a4a]"
                       }`}
@@ -469,7 +509,16 @@ export default function Home() {
                       </View>
                       <View className="flex-1">
                         <Text className="text-white text-sm font-medium">{item.site}</Text>
-                        <Text className="text-gray-400 text-xs">{item.username}</Text>
+                        <Text className="text-gray-400 text-xs">
+                          {[
+                            item.username ?? "",
+                            (item.ssoProviders ?? []).length > 0
+                              ? `Continue with ${(item.ssoProviders ?? []).map((p) => ssoLabel(p)).join(", ")}`
+                              : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" · ") || "SSO only"}
+                        </Text>
                       </View>
                     </Pressable>
                   ))}
@@ -495,8 +544,9 @@ export default function Home() {
                   className="px-3 py-1.5 bg-purple-600 rounded-lg flex-row items-center"
                   onPress={() => {
                     setEditSite(selectedItem.site);
-                    setEditUsername(selectedItem.username);
-                    setEditPassword(selectedItem.password);
+                    setEditUsername(selectedItem.username ?? "");
+                    setEditPassword(selectedItem.password ?? "");
+                    setEditSsoProviders(selectedItem.ssoProviders ?? []);
                     setShowEditModal(true);
                   }}
                 >
@@ -521,11 +571,29 @@ export default function Home() {
                   <Text className="text-gray-400 text-xs">Email</Text>
                 </View>
                 <View className="bg-[#2a2a4a] rounded-lg px-4 py-3">
-                  <Text className="text-white">{selectedItem.username}</Text>
+                  <Text className="text-white">{selectedItem.username ?? "—"}</Text>
                 </View>
               </View>
 
-              {/* Password */}
+              {/* Sign-in options: password and SSO coexist on one item — show
+                  whichever is present (both for logins with two ways in). */}
+              {(selectedItem.ssoProviders ?? []).length > 0 && (
+                <View className="mb-4">
+                  <View className="flex-row items-center mb-1">
+                    <KeyRound size={12} color="#9ca3af" style={{ marginRight: 4 }} />
+                    <Text className="text-gray-400 text-xs">Sign-in options</Text>
+                  </View>
+                  <View className="bg-[#2a4a2e]/40 border border-green-500/20 rounded-lg px-4 py-3">
+                    {(selectedItem.ssoProviders ?? []).map((p) => (
+                      <Text key={p} className="text-green-300 font-medium">Continue with {ssoLabel(p)}</Text>
+                    ))}
+                    {!selectedItem.password && (
+                      <Text className="text-gray-400 text-xs mt-1">No password stored — use the site's sign-in button.</Text>
+                    )}
+                  </View>
+                </View>
+              )}
+              {selectedItem.password ? (
               <View className="mb-4">
                 <View className="flex-row items-center mb-1">
                   <KeyRound size={12} color="#9ca3af" style={{ marginRight: 4 }} />
@@ -543,6 +611,17 @@ export default function Home() {
                   </View>
                 </View>
               </View>
+              ) : (selectedItem.ssoProviders ?? []).length === 0 && (
+              <View className="mb-4">
+                <View className="flex-row items-center mb-1">
+                  <KeyRound size={12} color="#9ca3af" style={{ marginRight: 4 }} />
+                  <Text className="text-gray-400 text-xs">Password</Text>
+                </View>
+                <View className="bg-[#2a2a4a] rounded-lg px-4 py-3 flex-row items-center justify-between">
+                  <Text className="text-gray-500">No password stored</Text>
+                </View>
+              </View>
+              )}
 
               {/* Websites */}
               <View className="mb-4">
@@ -601,6 +680,7 @@ export default function Home() {
         <View className="flex-1 bg-black/60 items-center justify-center">
           <View className="bg-[#1e1e36] rounded-xl p-6 w-96 border border-[#2a2a4a]">
             <Text className="text-xl font-bold text-white mb-4">Add New Item</Text>
+            <Text className="text-gray-400 text-xs mb-3">One item holds every way to sign in — set a password, link SSO, or both.</Text>
             <TextInput
               className="w-full bg-[#2a2a4a] rounded-lg px-4 py-3 text-white mb-3"
               placeholder="Site name"
@@ -610,20 +690,39 @@ export default function Home() {
             />
             <TextInput
               className="w-full bg-[#2a2a4a] rounded-lg px-4 py-3 text-white mb-3"
-              placeholder="Username / Email"
+              placeholder="Username / Email (optional for SSO-only)"
               placeholderTextColor="#666"
               value={newUsername}
               onChangeText={setNewUsername}
               autoCapitalize="none"
             />
             <TextInput
-              className="w-full bg-[#2a2a4a] rounded-lg px-4 py-3 text-white mb-4"
-              placeholder="Password"
+              className="w-full bg-[#2a2a4a] rounded-lg px-4 py-3 text-white mb-3"
+              placeholder="Password (optional if SSO linked)"
               placeholderTextColor="#666"
               value={newPassword}
               onChangeText={setNewPassword}
               secureTextEntry
             />
+            <Text className="text-gray-400 text-xs mb-2">Continue with (optional, multi-select)</Text>
+            <View className="flex-row flex-wrap mb-4 gap-2">
+              {SSO_PROVIDERS.map((p) => {
+                const active = newSsoProviders.includes(p);
+                return (
+                  <Pressable
+                    key={p}
+                    className={`px-3 py-2 rounded-lg ${active ? "bg-purple-600" : "bg-[#2a2a4a]"}`}
+                    onPress={() =>
+                      setNewSsoProviders((prev) =>
+                        prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
+                      )
+                    }
+                  >
+                    <Text className={active ? "text-white font-medium" : "text-gray-400"}>{ssoLabel(p)}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
             <View className="flex-row justify-end space-x-2">
               <Pressable
                 className="px-4 py-2 rounded-lg"
@@ -634,8 +733,10 @@ export default function Home() {
               <Pressable
                 className="px-4 py-2 bg-purple-600 rounded-lg"
                 onPress={() => {
-                  if (newSite && newUsername && newPassword) {
-                    handleCreate(newSite, newUsername, newPassword);
+                  // One item, multiple sign-in options: require a site plus a
+                  // password and/or at least one SSO provider.
+                  if (newSite && (newPassword || newSsoProviders.length > 0)) {
+                    handleCreate(newSite, newUsername, newPassword, newSsoProviders);
                   }
                 }}
               >
@@ -672,13 +773,32 @@ export default function Home() {
               autoCapitalize="none"
             />
             <TextInput
-              className="w-full bg-[#2a2a4a] rounded-lg px-4 py-3 text-white mb-4"
-              placeholder="Password"
+              className="w-full bg-[#2a2a4a] rounded-lg px-4 py-3 text-white mb-3"
+              placeholder="Password (empty keeps stored value)"
               placeholderTextColor="#666"
               value={editPassword}
               onChangeText={setEditPassword}
               secureTextEntry
             />
+            <Text className="text-gray-400 text-xs mb-2">Continue with (multi-select)</Text>
+            <View className="flex-row flex-wrap mb-4 gap-2">
+              {SSO_PROVIDERS.map((p) => {
+                const active = editSsoProviders.includes(p);
+                return (
+                  <Pressable
+                    key={p}
+                    className={`px-3 py-2 rounded-lg ${active ? "bg-purple-600" : "bg-[#2a2a4a]"}`}
+                    onPress={() =>
+                      setEditSsoProviders((prev) =>
+                        prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
+                      )
+                    }
+                  >
+                    <Text className={active ? "text-white font-medium" : "text-gray-400"}>{ssoLabel(p)}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
             <View className="flex-row justify-end space-x-2">
               <Pressable
                 className="px-4 py-2 rounded-lg"
@@ -689,7 +809,7 @@ export default function Home() {
               <Pressable
                 className="px-4 py-2 bg-purple-600 rounded-lg"
                 onPress={() => {
-                  if (selectedItem && (editSite || editUsername || editPassword)) {
+                  if (selectedItem && (editSite || editUsername || editPassword || editSsoProviders.length > 0 || (selectedItem.ssoProviders ?? []).length > 0)) {
                     handleUpdate(selectedItem);
                   }
                 }}

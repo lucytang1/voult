@@ -26,6 +26,8 @@ export {
   UpdateVaultItemSchema,
   DeleteVaultItemSchema,
   CreateVaultItemSchema,
+  SsoProviderSchema,
+  OAUTH_IDP_HOSTS,
   VAULT_DOCUMENT_FORMAT_VERSION,
 } from "./schema.js";
 export type {
@@ -33,6 +35,7 @@ export type {
   CreateVaultItem,
   UpdateVaultItem,
   DeleteVaultItem,
+  SsoProvider,
   DecryptedVault,
   SessionState,
   LockMetadata,

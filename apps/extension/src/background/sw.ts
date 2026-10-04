@@ -10,16 +10,21 @@ import type { ExtensionMessage } from "../lib/messaging";
 import { EXTENSION_VERSION } from "./version";
 import {
   credentialForFill,
+  clearPendingOAuthFor,
   evaluateCandidate,
+  evaluateOAuthPageState,
   getPopupState,
   handleAlarm,
   isUnlocked,
   logout,
   markNeverOrigin,
   normalizeServerUrl,
+  oauthProviderForFill,
   publishLock,
   pushSave,
+  pushSaveOAuth,
   queryLogins,
+  recordOAuthClick,
   saveOnboarding,
   syncSession,
   unlockWithDevice,
@@ -145,6 +150,14 @@ chrome.runtime.onMessage.addListener(
             if (!matches.some((m) => m.id === msg.id)) {
               throw new Error("Login does not match this site.");
             }
+            // Passwordless SSO logins hold no secret: answer with a highlight
+            // directive (providers) instead of a credential. No password ever
+            // crosses. `ssoProvider` (first) is kept for older content scripts.
+            const sso = oauthProviderForFill(msg.id);
+            if (sso && sso.length > 0) {
+              sendResponse({ error: "This login uses Continue-with-SSO — no password to fill.", ssoProviders: sso, ssoProvider: sso[0] });
+              break;
+            }
             sendResponse(credentialForFill(msg.id));
             break;
           }
@@ -170,6 +183,9 @@ chrome.runtime.onMessage.addListener(
               sendResponse({ prompt: false });
               break;
             }
+            // A typed password wins over any in-flight SSO click on this
+            // origin — the user chose the password path.
+            clearPendingOAuthFor(candidateOrigin);
             sendResponse(
               await evaluateCandidate(msg.username, msg.password, candidateOrigin),
             );
@@ -189,6 +205,37 @@ chrome.runtime.onMessage.addListener(
             const neverOrigin = tabOrigin(sender.tab);
             if (neverOrigin) await markNeverOrigin(neverOrigin);
             sendResponse({ ok: true });
+            break;
+          }
+          case "OAUTH_CLICK": {
+            // Click on a "Continue with X" button. Origin stamped from the
+            // sender tab — page claims ignored. Fire-and-forget for the page.
+            const clickOrigin = tabOrigin(sender.tab);
+            if (clickOrigin) recordOAuthClick(msg.provider, clickOrigin, sender.tab?.id);
+            sendResponse({ ok: true });
+            break;
+          }
+          case "OAUTH_PAGE_STATE": {
+            // SSO page (re)loaded or SPA-navigated. The worker matches the
+            // page against the in-flight click and answers prompt or not.
+            const pageOrigin = tabOrigin(sender.tab);
+            if (!pageOrigin) {
+              sendResponse({ prompt: false });
+              break;
+            }
+            sendResponse(
+              await evaluateOAuthPageState(msg.offers, msg.hasLoginForm, msg.path, pageOrigin),
+            );
+            break;
+          }
+          case "SAVE_OAUTH_DECISION": {
+            // User confirmed "Signed in with X?" in the page banner. No
+            // secret crosses contexts — just the provider enum.
+            const decisionOrigin = tabOrigin(sender.tab);
+            if (!decisionOrigin) throw new Error("Unknown tab origin.");
+            const canonical = originOfUrl(decisionOrigin);
+            const result = await pushSaveOAuth(msg.provider, canonical);
+            sendResponse({ saved: result.saved, offline: result.offline });
             break;
           }
           default:

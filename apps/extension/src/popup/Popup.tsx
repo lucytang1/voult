@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { sendMessage } from "../lib/messaging";
+import { sendMessage, ssoProviderLabel } from "../lib/messaging";
 import type { ExtensionMessage, PopupState, VaultItem } from "../lib/messaging";
 
 type RpcResponse<T> = T | { error: string };
@@ -239,9 +239,10 @@ function Unlocked({
   const filtered = items.filter(
     (i) =>
       !q ||
-      i.username.toLowerCase().includes(q) ||
+      (i.username ?? "").toLowerCase().includes(q) ||
       i.site.toLowerCase().includes(q) ||
-      (i.origin ?? "").toLowerCase().includes(q),
+      (i.origin ?? "").toLowerCase().includes(q) ||
+      (i.ssoProviders ?? []).join(" ").toLowerCase().includes(q),
   );
   // Matches for this tab first, then the rest alphabetically.
   const ordered = [...filtered].sort((a, b) => {
@@ -256,10 +257,38 @@ function Unlocked({
     window.setTimeout(() => setCopied((c) => (c === key ? null : c)), 1200);
   };
 
+  // Saved SSO for this site: one tap closes the popup and focuses the site's
+  // own Continue-with button in the tab (the message chain outlives the
+  // popup, so closing immediately is safe). Only passwordless logins suggest
+  // here — logins with a password fill normally.
+  const oauthMatches = (state.matches ?? []).filter(
+    (m) => !m.hasPassword && m.ssoProviders.length > 0,
+  );
+  const suggestSignIn = (id: string) => {
+    onFill(id);
+    window.close();
+  };
+
   return (
     <div style={s.col}>
       {state.insecureOrigin && (
         <p style={s.warn}>This page is plain http — fill only on sites you trust.</p>
+      )}
+      {oauthMatches.length > 0 && (
+        <div style={s.suggestBox}>
+          {oauthMatches.flatMap((m) =>
+            m.ssoProviders.map((p) => (
+              <button
+                key={`${m.id}:${p}`}
+                style={s.suggestBtn}
+                title={`Focus the site's Continue with ${ssoProviderLabel(p)} button`}
+                onClick={() => suggestSignIn(m.id)}
+              >
+                Sign in with {ssoProviderLabel(p)}{m.username ? ` · ${m.username}` : ""}
+              </button>
+            )),
+          )}
+        </div>
       )}
       {state.matches && state.matches.length > 0 && (
         <p style={s.hint}>
@@ -272,19 +301,37 @@ function Unlocked({
         {ordered.slice(0, 50).map((item: VaultItem) => (
           <div key={item.id} style={s.row}>
             <div style={s.rowMain}>
-              <span style={s.rowUser}>{item.username}</span>
-              <span style={s.rowSite}>{item.site || item.origin}</span>
+              <span style={s.rowUser}>
+                {item.password || !(item.ssoProviders ?? []).length
+                  ? (item.username ?? "")
+                  : `Continue with ${(item.ssoProviders ?? []).map((p) => ssoProviderLabel(p)).join(" · ")}`}
+              </span>
+              <span style={s.rowSite}>
+                {item.site || item.origin}
+                {item.password && (item.ssoProviders ?? []).length > 0
+                  ? ` · ${(item.ssoProviders ?? []).map((p) => ssoProviderLabel(p)).join(", ")}`
+                  : ""}
+              </span>
             </div>
             <span style={{ display: "flex", gap: 4 }}>
-              <button style={s.smallBtn} title="Copy username" onClick={() => void doCopy(`${item.id}:u`, item.username)}>
+              <button style={s.smallBtn} title="Copy username" onClick={() => void doCopy(`${item.id}:u`, item.username ?? "")}>
                 {copied === `${item.id}:u` ? "✓" : "User"}
               </button>
-              <button style={s.smallBtn} title="Copy password" onClick={() => void doCopy(`${item.id}:p`, item.password)}>
-                {copied === `${item.id}:p` ? "✓" : "Pass"}
-              </button>
-              <button style={s.smallBtn} disabled={busy} title="Fill in active tab" onClick={() => onFill(item.id)}>
-                Fill
-              </button>
+              {item.password ? (
+                <>
+                  <button style={s.smallBtn} title="Copy password" onClick={() => void doCopy(`${item.id}:p`, item.password ?? "")}>
+                    {copied === `${item.id}:p` ? "✓" : "Pass"}
+                  </button>
+                  <button style={s.smallBtn} disabled={busy} title="Fill in active tab" onClick={() => onFill(item.id)}>
+                    Fill
+                  </button>
+                </>
+              ) : (
+                <span style={s.oauthBadge} title="SSO login — no password to fill">SSO</span>
+              )}
+              {item.password && (item.ssoProviders ?? []).length > 0 && (
+                <span style={s.oauthBadge} title={`Also signs in with ${(item.ssoProviders ?? []).map((p) => ssoProviderLabel(p)).join(", ")}`}>+SSO</span>
+              )}
             </span>
           </div>
         ))}
@@ -347,4 +394,7 @@ const s: Record<string, React.CSSProperties> = {
   rowMain: { display: "flex", flexDirection: "column", minWidth: 0 },
   rowUser: { fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   rowSite: { color: "#9aa0ae", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  oauthBadge: { fontSize: 11, background: "#2c3a2c", color: "#9fd6a4", borderRadius: 999, padding: "4px 10px", alignSelf: "center" },
+  suggestBox: { display: "flex", flexDirection: "column", gap: 6 },
+  suggestBtn: { background: "#4f7cff", border: 0, borderRadius: 8, color: "#fff", padding: "10px", fontSize: 13, fontWeight: 600, cursor: "pointer", textAlign: "center" },
 };

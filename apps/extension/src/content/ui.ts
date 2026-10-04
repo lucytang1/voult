@@ -5,6 +5,7 @@
 // (site/username/origin) are rendered via textContent only — never innerHTML.
 
 import type { LoginMatch } from "../lib/messaging";
+import { ssoProviderLabel } from "./oauth";
 
 const STYLE = `
 :host { all: initial; }
@@ -101,10 +102,21 @@ export function showDropdown(
     row.className = "voult-row";
     const user = document.createElement("span");
     user.className = "voult-user";
-    user.textContent = m.username;
+    // Passwordless SSO informs instead of filling: "Continue with Google"
+    // (all linked providers joined). Logins with a password keep showing the
+    // username — their SSO options surface as a suffix below.
+    const providers = m.ssoProviders ?? [];
+    if (!m.hasPassword && providers.length > 0) {
+      user.textContent = providers.map((p) => `Continue with ${ssoProviderLabel(p)}`).join(" · ");
+    } else {
+      user.textContent = m.username;
+    }
     const org = document.createElement("span");
     org.className = "voult-origin";
-    org.textContent = m.origin;
+    const ssoSuffix = m.hasPassword && providers.length > 0
+      ? ` · Continue with ${providers.map((p) => ssoProviderLabel(p)).join(", ")}`
+      : "";
+    org.textContent = !m.hasPassword && m.username && providers.length > 0 ? `${m.username} · ${m.origin}` : `${m.origin}${ssoSuffix}`;
     if (m.rank === "subdomain") {
       const sub = document.createElement("span");
       sub.className = "voult-sub";
