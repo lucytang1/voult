@@ -16,6 +16,7 @@ export async function createVaultFlow(
   vaultKey: CryptoKey;
   decryptedVault: DecryptedVault;
   version: number;
+  lockEpoch: number;
 }> {
   const json = JSON.stringify({ items: starter.items });
   const unlocked = await signupFlow(password, json);
@@ -25,6 +26,7 @@ export async function createVaultFlow(
     vaultKey: unlocked.vaultKey,
     decryptedVault: unlocked.decryptedVault,
     version: unlocked.version,
+    lockEpoch: unlocked.lockEpoch,
   };
 }
 

@@ -23,17 +23,7 @@ export function createIntent(
   const createdAt = new Date().toISOString();
   const baseVersion = useAppStore.getState().vaultVersion;
 
-  console.log(
-    "createIntent ",
-    id,
-    operation,
-    payload.payload,
-    payload.payloadIv,
-    payload.deviceId,
-    baseVersion,
-    createdAt,
-    null,
-  );
+  // No payload logging: intent rows carry ciphertext + device identity.
 
   return sql(
     `
@@ -74,7 +64,7 @@ export async function fetchPendingIntents() {
     console.error("Failed to parse pending intents", pendingIntents.error);
     return [];
   }
-  console.log("pendingIntents", pendingIntents.data);
+  // No row logging: rows carry ciphertext + device identity.
   return pendingIntents.data;
 }
 

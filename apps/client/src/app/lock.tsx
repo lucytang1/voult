@@ -1,9 +1,10 @@
 import { useRouter } from "expo-router";
 import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
-import { useAppStore } from "@/src/lib/state";
+import { useAppStore, updateLockEpoch } from "@/src/lib/state";
 import { unlockWithPassword } from "@/src/lib/auth/flows";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
+import { fetchSession } from "@/src/lib/queries/session/query";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { Lock as LockIcon } from "lucide-react";
 
@@ -30,6 +31,14 @@ export default function Lock() {
       // Reopen this account's per-user database (closed when the vault was
       // locked) so intents/sync can resume.
       if (session?.vaultId) await initSQLite(session.vaultId);
+      // Converge to the current server epoch (a peer may have locked after
+      // our lock metadata was captured). Best-effort: unlock stays valid.
+      try {
+        const remote = await fetchSession();
+        updateLockEpoch(remote.lock_epoch ?? 0);
+      } catch {
+        // Offline/legacy server — sync check converges later.
+      }
       setPassword("");
       router.replace("/home" as any);
     } catch (err) {
