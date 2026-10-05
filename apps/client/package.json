@@ -7,12 +7,13 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "build:web": "EXPO_PUBLIC_API_URL= expo export --platform web",
+    "build:web": "npm --prefix ../../packages/vault-core run build && EXPO_PUBLIC_API_URL= expo export --platform web",
     "sync:sqlite-web": "mkdir -p public/sqlite && cp node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3-worker1.mjs public/sqlite/sqlite3-worker1.mjs && cp node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3-opfs-async-proxy.js public/sqlite/sqlite3-opfs-async-proxy.js && cp node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3.wasm public/sqlite/sqlite3.wasm",
     "postinstall": "patch-package"
   },
   "dependencies": {
     "@expo/metro-runtime": "~55.0.6",
+    "@voult/vault-core": "file:../../packages/vault-core",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "@sqlite.org/sqlite-wasm": "3.51.2-build6",
     "@tanstack/react-query": "^5.90.20",

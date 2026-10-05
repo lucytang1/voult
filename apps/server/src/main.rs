@@ -27,8 +27,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use endpoints::{
-    auth, get_crypto_params, get_vault, google_endpoints, register, session_status,
-    update_vault, update_vault_password, vaults,
+    auth, get_crypto_params, get_vault, google_endpoints, lock, logout, register,
+    session_status, update_vault, update_vault_password, vaults,
 };
 use static_site::static_site;
 
@@ -231,12 +231,19 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors)
             .service(
                 web::scope("/api")
+                    // Vault/session/ciphertext responses must never sit in a
+                    // cache (browser, proxy, or the extension's fetch cache).
+                    .wrap(
+                        DefaultHeaders::new().add(("Cache-Control", "no-store")),
+                    )
                     .service(register::register)
                     .service(auth::auth)
                     .service(get_vault::get_vault)
                     .service(get_crypto_params::get_crypto_params)
                     .service(update_vault::update_vault)
                     .service(session_status::get_session)
+                    .service(logout::logout)
+                    .service(lock::lock)
                     .service(update_vault_password::update_vault_password)
                     .service(vaults::create_vault)
                     .service(vaults::list_vaults)

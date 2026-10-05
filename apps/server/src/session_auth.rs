@@ -10,6 +10,13 @@ pub fn session_vault_id(session: &Session) -> Result<Option<String>, actix_sessi
     session.get::<String>(SESSION_VAULT_ID_KEY)
 }
 
+/// Destroys the current vault session, if any. Idempotent: purging an empty
+/// session is a no-op success so logout converges even under races
+/// (e.g. web + extension logging out near-simultaneously).
+pub fn clear_vault_session(session: &Session) {
+    session.purge();
+}
+
 /// Establishes an authenticated session scoped to a vault, rotating any existing
 /// session first to prevent session fixation. The cookie stores only the vault
 /// ID — never vault keys, envelopes, or vault data.

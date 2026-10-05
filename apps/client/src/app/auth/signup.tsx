@@ -8,6 +8,7 @@ import {
   setSession,
   setVaultKey,
   updateDecryptedVault,
+  updateLockEpoch,
   updateVaultVersion,
 } from "../../lib/state";
 
@@ -47,6 +48,7 @@ export default function SignUp() {
       const result = await signupFlow(password, TEST_VAULT_JSON);
       setVaultKey(result.vaultKey);
       setSession(result.session);
+      updateLockEpoch(result.lockEpoch);
       updateDecryptedVault(result.decryptedVault);
       updateVaultVersion(result.version);
       router.navigate("/home" as any);
