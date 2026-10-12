@@ -20,12 +20,17 @@ pub fn clear_vault_session(session: &Session) {
 /// Establishes an authenticated session scoped to a vault, rotating any existing
 /// session first to prevent session fixation. The cookie stores only the vault
 /// ID — never vault keys, envelopes, or vault data.
+///
+/// Rotation uses `renew()`, NOT `purge()` + `insert()`: in actix-session 0.11
+/// `insert()` after `purge()` is a silent no-op (status stays `Purged`, the
+/// entry is dropped, `Ok` is still returned) and the middleware then sends a
+/// cookie *deletion* — so a login issued while a session cookie was present
+/// returned 200 yet left the caller logged out (next call 401). `renew()`
+/// deletes the old key server-side and re-saves state into a fresh cookie.
 pub fn establish_vault_session(
     session: &Session,
     vault_id: &str,
 ) -> Result<(), actix_session::SessionInsertError> {
-    if session.contains_key(SESSION_VAULT_ID_KEY) {
-        session.purge();
-    }
+    session.renew();
     session.insert(SESSION_VAULT_ID_KEY, vault_id.to_string())
 }

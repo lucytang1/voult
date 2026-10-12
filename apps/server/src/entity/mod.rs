@@ -4,6 +4,7 @@ pub mod cloud_binding;
 pub mod google_pending_token;
 pub mod google_token;
 pub mod oauth_state;
+pub mod pair_code;
 pub mod prelude;
 pub mod session;
 pub mod vault;

@@ -388,6 +388,13 @@ pub async fn google_disconnect(pool: web::Data<DbPool>, session: Session) -> Htt
     HttpResponse::Ok().json(serde_json::json!({"disconnected": true}))
 }
 
+/// Real backup state for the Drive copy of this vault.
+///
+/// `sync_status` and `remote_revision` alone cannot answer "is my backup
+/// current?" — the binding only knows the revision, not the vault version it
+/// corresponds to. `mirrored_vault_version` vs `vault_version` does, and the
+/// gap between them is exactly how many committed writes the DR copy is
+/// missing.
 #[derive(Serialize)]
 struct BindingResponse {
     vault_id: String,
@@ -396,8 +403,50 @@ struct BindingResponse {
     drive_file_id: Option<String>,
     remote_revision: Option<String>,
     sync_status: String,
+    /// Current server vault version — the write authority.
+    vault_version: i32,
+    /// Vault version the Drive copy corresponds to; null = never mirrored.
+    mirrored_vault_version: Option<i32>,
+    /// Committed writes the Drive copy is missing (0 = backup current).
+    versions_behind: i32,
+    last_mirrored_at: Option<String>,
+    last_mirror_error: Option<String>,
     created_at: String,
     updated_at: String,
+}
+
+impl BindingResponse {
+    async fn from_binding(pool: &crate::db::DbPool, b: cloud_binding::Model) -> Self {
+        // Read the live version so the client can compute staleness without a
+        // second round trip. A missing vault row (deleted underneath us) reads
+        // as version 0 rather than failing the whole binding response.
+        let vault_version = crate::entity::vault::Entity::find_by_id(&b.vault_id)
+            .one(pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|v| v.version)
+            .unwrap_or(0);
+        let versions_behind = b
+            .mirrored_vault_version
+            .map(|mirrored| (vault_version - mirrored).max(0))
+            .unwrap_or(0);
+        Self {
+            vault_id: b.vault_id,
+            provider_kind: b.provider_kind,
+            provider_account_id: b.provider_account_id,
+            drive_file_id: b.drive_file_id,
+            remote_revision: b.remote_revision,
+            sync_status: b.sync_status,
+            vault_version,
+            mirrored_vault_version: b.mirrored_vault_version,
+            versions_behind,
+            last_mirrored_at: b.last_mirrored_at,
+            last_mirror_error: b.last_mirror_error,
+            created_at: b.created_at.to_rfc3339(),
+            updated_at: b.updated_at.to_rfc3339(),
+        }
+    }
 }
 
 #[get("/google/pending")]
@@ -483,16 +532,7 @@ pub async fn google_get_binding(
                 .json(serde_json::json!({"error_msg":"db error","code":"DB_ERROR"}));
         }
     };
-    HttpResponse::Ok().json(BindingResponse {
-        vault_id: binding.vault_id,
-        provider_kind: binding.provider_kind,
-        provider_account_id: binding.provider_account_id,
-        drive_file_id: binding.drive_file_id,
-        remote_revision: binding.remote_revision,
-        sync_status: binding.sync_status,
-        created_at: binding.created_at.to_rfc3339(),
-        updated_at: binding.updated_at.to_rfc3339(),
-    })
+    HttpResponse::Ok().json(BindingResponse::from_binding(pool.get_ref(), binding).await)
 }
 
 #[get("/google/bindings")]
@@ -517,20 +557,60 @@ pub async fn google_list_bindings(pool: web::Data<DbPool>, session: Session) -> 
                 .json(serde_json::json!({"error_msg":"db error","code":"DB_ERROR"}));
         }
     };
-    let resp: Vec<BindingResponse> = bindings
-        .into_iter()
-        .map(|b| BindingResponse {
-            vault_id: b.vault_id,
-            provider_kind: b.provider_kind,
-            provider_account_id: b.provider_account_id,
-            drive_file_id: b.drive_file_id,
-            remote_revision: b.remote_revision,
-            sync_status: b.sync_status,
-            created_at: b.created_at.to_rfc3339(),
-            updated_at: b.updated_at.to_rfc3339(),
-        })
-        .collect();
+    let mut resp: Vec<BindingResponse> = Vec::with_capacity(bindings.len());
+    for b in bindings {
+        resp.push(BindingResponse::from_binding(pool.get_ref(), b).await);
+    }
     HttpResponse::Ok().json(serde_json::json!({"bindings": resp}))
+}
+
+/// Explicit user-triggered backup ("Back up now" in Settings).
+///
+/// The automatic mirror is detached and fire-and-forget, so the UI has no way
+/// to learn its outcome. This awaits the same CAS-gated mirror and returns the
+/// real result, so the user sees success, conflict, or a specific failure
+/// instead of a constant "enabled".
+#[post("/google/vaults/mirror")]
+pub async fn google_mirror_vault(pool: web::Data<DbPool>, session: Session) -> HttpResponse {
+    let vault_id = match session_vault_id(&session) {
+        Ok(Some(id)) => id,
+        _ => {
+            return HttpResponse::Unauthorized().json(
+                serde_json::json!({"error_msg":"session required","code":"SESSION_REQUIRED"}),
+            );
+        }
+    };
+
+    let outcome = crate::google::mirror::mirror_now(pool.get_ref(), &vault_id).await;
+    match &outcome {
+        crate::google::mirror::MirrorOutcome::Mirrored { vault_version } => log::info!(
+            "Manual Drive backup completed for vault {} at version {}",
+            &vault_id[..8.min(vault_id.len())],
+            vault_version
+        ),
+        crate::google::mirror::MirrorOutcome::Conflict => log::warn!(
+            "Manual Drive backup refused for vault {}: the Drive copy changed since last sync",
+            &vault_id[..8.min(vault_id.len())]
+        ),
+        _ => {}
+    }
+
+    // Re-read the binding so the response carries the state the mirror just
+    // persisted, not a value the client has to reconcile.
+    let binding = CloudBindingEntity::find()
+        .filter(cloud_binding::Column::VaultId.eq(&vault_id))
+        .one(pool.get_ref())
+        .await
+        .ok()
+        .flatten();
+
+    match binding {
+        Some(b) => HttpResponse::Ok().json(serde_json::json!({
+            "mirror": outcome,
+            "binding": BindingResponse::from_binding(pool.get_ref(), b).await,
+        })),
+        None => HttpResponse::Ok().json(serde_json::json!({"mirror": outcome})),
+    }
 }
 
 // --- Drive vault transport ---
@@ -621,8 +701,22 @@ pub async fn google_create_vault(
             Err(_) => body.package.as_bytes().to_vec(),
         };
 
-    // Basic vault_id binding check: try to decode package and verify it contains same vault_id (zero-knowledge: server never decrypts, but can check that package JSON contains vault_id field if plaintext wrapper? However package is encrypted, so cannot verify. We trust client but log.)
-    // For Phase 3 we just store bytes.
+    // The package is encrypted, but its *envelope* (vault id, logical revision,
+    // crypto parameters) is plaintext by design. Parsing it lets the server
+    // refuse a package belonging to a different vault and lets it record
+    // exactly which vault version this Drive copy holds, so the backup
+    // watermark is real rather than assumed. No ciphertext is inspected.
+    let header = match crate::google::package::parse_header(&package_bytes, &vault_id) {
+        Ok(h) => h,
+        Err(code) => {
+            log::warn!(
+                "Rejected Google package for vault {}: {}",
+                &vault_id[..8.min(vault_id.len())],
+                code
+            );
+            return provider_error_response(ProviderErrorKind::PackageInvalid, code);
+        }
+    };
 
     let access_token =
         match crate::google::token_store::get_valid_access_token(pool.get_ref(), &vault_id).await {
@@ -641,7 +735,6 @@ pub async fn google_create_vault(
             let now = chrono::Utc::now();
             let existing = CloudBindingEntity::find()
                 .filter(cloud_binding::Column::VaultId.eq(&vault_id))
-                .filter(cloud_binding::Column::VaultId.eq(&body.vault_id))
                 .one(pool.get_ref())
                 .await
                 .unwrap_or(None);
@@ -661,6 +754,9 @@ pub async fn google_create_vault(
                 am.remote_revision = Set(Some(revision.clone()));
                 am.provider_account_id = Set(provider_acct);
                 am.sync_status = Set("idle".to_string());
+                // The Drive copy now holds exactly `header.logical_revision`.
+                am.mirrored_vault_version = Set(Some(header.logical_revision));
+                am.last_mirror_error = Set(None);
                 am.updated_at = Set(now.into());
                 let _ = am.update(pool.get_ref()).await;
             } else {
@@ -671,6 +767,11 @@ pub async fn google_create_vault(
                     drive_file_id: Set(Some(file_id.clone())),
                     remote_revision: Set(Some(revision.clone())),
                     sync_status: Set("idle".to_string()),
+                    mirrored_vault_version: Set(Some(header.logical_revision)),
+                    last_mirrored_at: Set(Some(
+                        now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    )),
+                    last_mirror_error: Set(None),
                     created_at: Set(now.into()),
                     updated_at: Set(now.into()),
                 };
@@ -678,9 +779,10 @@ pub async fn google_create_vault(
             }
 
             log::info!(
-                "Created Google Drive vault {} file {}",
+                "Created Google Drive vault {} file {} at logical revision {}",
                 &body.vault_id[..8],
-                &file_id[..8.min(file_id.len())]
+                &file_id[..8.min(file_id.len())],
+                header.logical_revision
             );
             HttpResponse::Ok().json(GoogleCreateVaultResponse {
                 file_id,
@@ -843,6 +945,13 @@ pub async fn google_replace_vault(
             Err(_) => body.package.as_bytes().to_vec(),
         };
 
+    // Envelope-level validation only (vault id + logical revision); the
+    // snapshot stays opaque ciphertext.
+    let header = match crate::google::package::parse_header(&package_bytes, &vault_id) {
+        Ok(h) => h,
+        Err(code) => return provider_error_response(ProviderErrorKind::PackageInvalid, code),
+    };
+
     let access_token =
         match crate::google::token_store::get_valid_access_token(pool.get_ref(), &vault_id).await {
             Ok(t) => t,
@@ -863,19 +972,24 @@ pub async fn google_replace_vault(
     .await
     {
         Ok(new_rev) => {
-            // Update binding revision
-            if let Some(vid) = &body.vault_id {
-                let now = chrono::Utc::now();
-                if let Ok(Some(existing)) = CloudBindingEntity::find()
-                    .filter(cloud_binding::Column::VaultId.eq(vid))
-                    .one(pool.get_ref())
-                    .await
-                {
-                    let mut am: cloud_binding::ActiveModel = existing.into();
-                    am.remote_revision = Set(Some(new_rev.clone()));
-                    am.updated_at = Set(now.into());
-                    let _ = am.update(pool.get_ref()).await;
-                }
+            // Update the binding revision and the backup watermark together. A
+            // Drive write that updated only `remote_revision` would leave
+            // Settings reporting the backup as stale when it is not.
+            if CloudBindingEntity::find()
+                .filter(cloud_binding::Column::VaultId.eq(&vault_id))
+                .one(pool.get_ref())
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                crate::google::mirror::mark_mirrored(
+                    pool.get_ref(),
+                    &vault_id,
+                    header.logical_revision,
+                    Some(&new_rev),
+                )
+                .await;
             }
             HttpResponse::Ok().json(GoogleReplaceVaultResponse {
                 remote_revision: new_rev,
@@ -914,9 +1028,20 @@ pub async fn google_upsert_binding(
             );
         }
     };
+    // Authorization comes from the session, never the body. Without this check
+    // a session for vault A could create or rewrite the Drive binding of vault
+    // B, which would redirect B's disaster-recovery copy.
     if uuid::Uuid::parse_str(&body.vault_id).is_err() {
         return HttpResponse::BadRequest()
             .json(serde_json::json!({"error_msg":"invalid vault_id","code":"INVALID_INPUT"}));
+    }
+    if body.vault_id != vault_id {
+        return HttpResponse::Forbidden()
+            .json(serde_json::json!({"error_msg":"vault_id does not match session","code":"VAULT_MISMATCH"}));
+    }
+    if body.drive_file_id.trim().is_empty() {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error_msg":"drive_file_id required","code":"INVALID_INPUT"}));
     }
     let now = chrono::Utc::now();
     let provider_kind = body
@@ -935,6 +1060,19 @@ pub async fn google_upsert_binding(
         .ok()
         .flatten()
         .and_then(|t| t.provider_account_id);
+
+    // This endpoint is called right after a Drive *import*: the vault was just
+    // registered from that exact package, so the Drive copy already holds the
+    // local vault's current version. Recording that keeps Settings from
+    // reporting a fresh import as an unmirrored backup — and the next vault
+    // write will advance it normally.
+    let current_version = crate::entity::vault::Entity::find_by_id(&body.vault_id)
+        .one(pool.get_ref())
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v.version);
+
     if let Some(existing) = existing {
         let mut am: cloud_binding::ActiveModel = existing.into();
         am.drive_file_id = Set(Some(body.drive_file_id.clone()));
@@ -942,6 +1080,11 @@ pub async fn google_upsert_binding(
             am.remote_revision = Set(Some(rev.clone()));
         }
         am.provider_account_id = Set(provider_acct);
+        if let Some(v) = current_version {
+            am.mirrored_vault_version = Set(Some(v));
+            am.sync_status = Set("idle".to_string());
+            am.last_mirror_error = Set(None);
+        }
         am.updated_at = Set(now.into());
         if let Err(e) = am.update(pool.get_ref()).await {
             log::error!("failed to update Google cloud binding: {:?}", e);
@@ -955,6 +1098,12 @@ pub async fn google_upsert_binding(
             drive_file_id: Set(Some(body.drive_file_id.clone())),
             remote_revision: Set(body.remote_revision.clone()),
             sync_status: Set("idle".to_string()),
+            mirrored_vault_version: Set(current_version),
+            last_mirrored_at: Set(
+                current_version
+                    .map(|_| now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            ),
+            last_mirror_error: Set(None),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
         };

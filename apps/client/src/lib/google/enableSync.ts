@@ -152,12 +152,10 @@ export async function enableGoogleDriveForVault(vaultId: string): Promise<{
     if (readBack.length === 0) throw new Error("Remote package verification failed: empty file");
   }
 
-  // Mark binding active and enable scheduler triggers only after verification
-  // Server already upserts cloud_binding; client marks vault_mode as google_drive
-  try {
-    const { setVaultMode } = await import("../state");
-    setVaultMode("google_drive");
-  } catch {}
+  // Enrollment is complete once the read-back verified. No client-side Drive
+  // sync state is set: from here the *server* re-writes the Drive copy after
+  // each committed vault write (apps/server/src/google/mirror.rs), and it has
+  // already recorded `mirrored_vault_version` from the package it just stored.
 
   return { fileId, remoteRevision };
 }

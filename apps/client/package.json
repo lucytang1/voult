@@ -13,10 +13,10 @@
   },
   "dependencies": {
     "@expo/metro-runtime": "~55.0.6",
-    "@voult/vault-core": "file:../../packages/vault-core",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "@sqlite.org/sqlite-wasm": "3.51.2-build6",
-    "@tanstack/react-query": "^5.90.20",
+    "@tanstack/react-query": "^5.104.1",
+    "@voult/vault-core": "file:../../packages/vault-core",
     "axios": "^1.13.4",
     "expo": "^55.0.5",
     "expo-application": "~55.0.8",

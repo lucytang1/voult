@@ -15,9 +15,10 @@ export async function fetchVault() {
 
 export const useGetVault = (
   options?: Omit<UseQueryOptions<VaultResponse, Error>, "queryKey" | "queryFn">,
+  vaultId?: string,
 ) => {
   const query = useQuery<VaultResponse, Error>({
-    queryKey: ["vault"],
+    queryKey: ["vault", vaultId ?? "current"],
     queryFn: fetchVault,
     ...options,
   });

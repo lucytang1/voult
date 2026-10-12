@@ -91,6 +91,23 @@ export async function postLogout(serverUrl = DEFAULT_SERVER_URL): Promise<void> 
 }
 
 /**
+ * One-time pairing-code redeem (plans/extension-signin-flow.md §4b).
+ * Unauthenticated by design — the extension has no session yet. Returns only
+ * the vault identity; the master password is still required afterwards.
+ * The code is single-use and short-lived server-side.
+ */
+export async function pairConsume(
+  code: string,
+  serverUrl = DEFAULT_SERVER_URL,
+): Promise<{ vault_id: string }> {
+  return request<{ vault_id: string }>(
+    "/pair/consume",
+    { method: "POST", body: JSON.stringify({ code }) },
+    serverUrl,
+  );
+}
+
+/**
  * Global lock write-through. Bumps the vault's lock_epoch so the web app
  * observes it on its next check-on-use GET /session and wipes keys.
  * Best-effort: callers still lock locally when offline.
@@ -105,4 +122,13 @@ export function isVersionConflict(error: unknown): boolean {
 
 export function isNetworkError(error: unknown): boolean {
   return error instanceof TypeError;
+}
+
+/**
+ * True when a request failed with HTTP 401. Used to distinguish "wrong
+ * credential" (POST /auth rejects the verifier) from "session cookie did
+ * not arrive" (a follow-up call 401s right after a successful /auth).
+ */
+export function isUnauthorized(error: unknown): boolean {
+  return error instanceof Error && /(^|[\s:])401([\s]|$)/.test(error.message);
 }

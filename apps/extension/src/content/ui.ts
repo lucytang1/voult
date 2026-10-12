@@ -4,7 +4,7 @@
 // the dropdown, and our styles never leak into the page. Untrusted strings
 // (site/username/origin) are rendered via textContent only — never innerHTML.
 
-import type { LoginMatch } from "../lib/messaging";
+import type { LoginMatch, SsoSignIn } from "../lib/messaging";
 import { ssoProviderLabel } from "./oauth";
 
 const STYLE = `
@@ -25,6 +25,18 @@ const STYLE = `
   color: inherit; padding: 8px 10px; cursor: pointer;
 }
 .voult-row:hover, .voult-row[data-active="true"] { background: #23262e; }
+.voult-rowinner { display: flex; gap: 8px; align-items: center; }
+.voult-icon-tile {
+  width: 24px; height: 24px; border-radius: 9px; flex-shrink: 0;
+  background: #fff; display: inline-flex; align-items: center; justify-content: center;
+}
+.voult-icon { width: 17px; height: 17px; border-radius: 4px; object-fit: contain; }
+.voult-icon-fallback {
+  width: 24px; height: 24px; border-radius: 9px; flex-shrink: 0;
+  background: #fff; color: #252833; font-size: 11px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.voult-text { min-width: 0; flex: 1; }
 .voult-user { font-weight: 600; display: block; }
 .voult-origin { color: #9aa0ae; font-size: 11px; display: block; }
 .voult-sub { color: #e0b34e; font-size: 11px; margin-left: 6px; }
@@ -59,6 +71,21 @@ function onKey(e: KeyboardEvent): void {
 }
 
 let currentCb: DropdownCallbacks | null = null;
+
+/**
+ * Row identity for a login, mirroring vault-core's `ssoItemIdentity` — duplicated
+ * rather than imported because this bundle must stay a dependency-free IIFE
+ * (no zod in every page; see oauth.ts). A provider-only sign-in ("Sign in with
+ * GitHub", stored when the vault knew no GitHub account) leads with the method
+ * so the row is never blank.
+ */
+function rowIdentity(username: string, methods: SsoSignIn[]): string {
+  if (username) return username;
+  const named = methods.filter((s) => s.account.trim()).map((s) => s.account);
+  if (named.length > 0) return named.join(" · ");
+  const providers = [...new Set(methods.map((s) => s.provider))];
+  return providers.length > 0 ? `Sign in with ${providers.map(ssoProviderLabel).join(", ")}` : "";
+}
 
 /**
  * Shows matches anchored under `anchor` (username field preferred, else the
@@ -100,31 +127,70 @@ export function showDropdown(
     const row = document.createElement("button");
     row.type = "button";
     row.className = "voult-row";
+    // Keep focus on the login field while selecting a suggestion. If the
+    // clicked button takes focus, removing the dropdown below can make the
+    // browser move focus to the page's first link (often “Skip to content”).
+    row.addEventListener("mousedown", (e) => {
+      if (e.button === 0) e.preventDefault();
+    });
+    const inner = document.createElement("span");
+    inner.className = "voult-rowinner";
+    // Display-only site icon (worker-supplied http(s) URL). Hidden on load
+    // failure so a dead icon never breaks the row; letter tile as fallback.
+    const iconUrl = typeof m.faviconUrl === "string" && /^https?:\/\//i.test(m.faviconUrl)
+      ? m.faviconUrl
+      : null;
+    if (iconUrl) {
+      const tile = document.createElement("span");
+      tile.className = "voult-icon-tile";
+      const img = document.createElement("img");
+      img.className = "voult-icon";
+      img.src = iconUrl;
+      img.alt = "";
+      img.referrerPolicy = "no-referrer";
+      img.addEventListener("error", () => {
+        tile.replaceChildren();
+        tile.className = "voult-icon-fallback";
+        tile.textContent = (m.label || "?").charAt(0).toUpperCase();
+      }, { once: true });
+      tile.appendChild(img);
+      inner.appendChild(tile);
+    } else {
+      const fallback = document.createElement("span");
+      fallback.className = "voult-icon-fallback";
+      fallback.textContent = (m.label || "?").charAt(0).toUpperCase();
+      inner.appendChild(fallback);
+    }
+    const text = document.createElement("span");
+    text.className = "voult-text";
     const user = document.createElement("span");
     user.className = "voult-user";
-    // Passwordless SSO informs instead of filling: "Continue with Google"
-    // (all linked providers joined). Logins with a password keep showing the
-    // username — their SSO options surface as a suffix below.
-    const providers = m.ssoProviders ?? [];
-    if (!m.hasPassword && providers.length > 0) {
-      user.textContent = providers.map((p) => `Continue with ${ssoProviderLabel(p)}`).join(" · ");
-    } else {
-      user.textContent = m.username;
-    }
+    // The account is the identity on every row, password or SSO — an SSO-only
+    // login's identity IS its IdP account, so it reads exactly like any other
+    // username and "which Google?" is answered rather than left open. A
+    // provider-only sign-in has no account to show, so the row names the method.
+    const methods = m.sso ?? [];
+    const identity = rowIdentity(m.username, methods);
+    user.textContent = identity;
     const org = document.createElement("span");
     org.className = "voult-origin";
-    const ssoSuffix = m.hasPassword && providers.length > 0
-      ? ` · Continue with ${providers.map((p) => ssoProviderLabel(p)).join(", ")}`
+    // Provider as a suffix, not "Continue with X": tapping the row goes to the
+    // site's own button, but what identifies the row is the account. Skipped
+    // when the row already fell back to "Sign in with X" — don't say it twice.
+    const ssoSuffix = methods.length > 0 && !identity.startsWith("Sign in with")
+      ? ` · ${[...new Set(methods.map((s) => ssoProviderLabel(s.provider)))].join(", ")}`
       : "";
-    org.textContent = !m.hasPassword && m.username && providers.length > 0 ? `${m.username} · ${m.origin}` : `${m.origin}${ssoSuffix}`;
+    org.textContent = `${m.origin}${ssoSuffix}`;
     if (m.rank === "subdomain") {
       const sub = document.createElement("span");
       sub.className = "voult-sub";
       sub.textContent = "subdomain match";
       org.appendChild(sub);
     }
-    row.appendChild(user);
-    row.appendChild(org);
+    text.appendChild(user);
+    text.appendChild(org);
+    inner.appendChild(text);
+    row.appendChild(inner);
     row.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();

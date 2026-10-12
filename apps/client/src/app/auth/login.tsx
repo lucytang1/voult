@@ -13,17 +13,17 @@ export default function LogIn() {
   const router = useRouter();
 
   return (
-    <View className="flex-1 items-center justify-center bg-black px-6">
-      <Text className="text-white text-xl mb-2">Vault-id login is deprecated</Text>
-      <Text className="text-gray-400 text-sm mb-6 text-center">
+    <View className="flex-1 items-center justify-center bg-ground px-6">
+      <Text className="text-primary-text text-xl mb-2">Vault-id login is deprecated</Text>
+      <Text className="text-muted-text text-sm mb-6 text-center">
         Use the landing page instead: create a new vault locally or restore from Google Drive — no vault id needed.
       </Text>
-      <Pressable className="w-full rounded-md bg-purple-600 py-3 items-center" onPress={() => router.replace("/" as any)}>
-        <Text className="text-white font-medium">Go to landing</Text>
+      <Pressable className="w-full rounded-md bg-surface border border-border-strong py-3 items-center" onPress={() => router.replace("/" as any)}>
+        <Text className="text-primary-text font-medium">Go to landing</Text>
       </Pressable>
       <Link href={"/auth/signup" as any} asChild>
         <Pressable className="mt-4">
-          <Text className="text-blue-400">Create a new vault</Text>
+          <Text className="text-accent-text">Create a new vault</Text>
         </Pressable>
       </Link>
     </View>

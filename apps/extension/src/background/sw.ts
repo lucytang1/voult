@@ -9,23 +9,30 @@
 import type { ExtensionMessage } from "../lib/messaging";
 import { EXTENSION_VERSION } from "./version";
 import {
+  adoptSessionProbe,
+  clearPendingPrompt,
+  confirmPendingPrompt,
   credentialForFill,
   clearPendingOAuthFor,
   evaluateCandidate,
   evaluateOAuthPageState,
+  getPendingPrompt,
   getPopupState,
   handleAlarm,
   isUnlocked,
   logout,
   markNeverOrigin,
   normalizeServerUrl,
-  oauthProviderForFill,
+  oauthSignInsForFill,
+  pairWithCode,
   publishLock,
   pushSave,
   pushSaveOAuth,
   queryLogins,
   recordOAuthClick,
+  resetOnboarding,
   saveOnboarding,
+  setPendingPrompt,
   syncSession,
   unlockWithDevice,
   unlockWithPassword,
@@ -55,11 +62,16 @@ chrome.runtime.onInstalled.addListener((details) => {
 
 // Silent device unlock on worker startup (fresh browser session), unless the
 // user explicitly locked (locked flag survives in chrome.storage.session).
+// When nothing is onboarded yet, opportunistically adopt the web session's
+// vault so the popup opens on the password screen instead of Connect.
 async function startupUnlock(): Promise<void> {
   try {
     if (await getSessionValue<number>(LOCKED_FLAG_KEY)) return;
-    const id = await getLocalValue<string>(ACTIVE_VAULT_KEY);
-    if (!id) return;
+    let id = await getLocalValue<string>(ACTIVE_VAULT_KEY);
+    if (!id) {
+      id = await adoptSessionProbe();
+      if (!id) return;
+    }
     await unlockWithDevice();
   } catch (e) {
     console.warn("[voult] startup unlock skipped", e);
@@ -92,6 +104,22 @@ chrome.runtime.onMessage.addListener(
           }
           case "SAVE_ONBOARDING":
             await saveOnboarding(msg.vaultId, msg.serverUrl);
+            sendResponse(await getPopupState());
+            break;
+          case "ADOPT_SESSION": {
+            // Auto-discovery: no vault typed — adopt the web session's vault
+            // when one exists in this browser profile.
+            const id = await adoptSessionProbe();
+            if (!id) throw new Error("No web session found — sign in to the web app first, or pair with a code.");
+            sendResponse(await getPopupState());
+            break;
+          }
+          case "PAIR_WITH_CODE":
+            await pairWithCode(msg.code, msg.serverUrl);
+            sendResponse(await getPopupState());
+            break;
+          case "RESET_ONBOARDING":
+            await resetOnboarding();
             sendResponse(await getPopupState());
             break;
           case "UNLOCK_WITH_PASSWORD":
@@ -151,11 +179,19 @@ chrome.runtime.onMessage.addListener(
               throw new Error("Login does not match this site.");
             }
             // Passwordless SSO logins hold no secret: answer with a highlight
-            // directive (providers) instead of a credential. No password ever
-            // crosses. `ssoProvider` (first) is kept for older content scripts.
-            const sso = oauthProviderForFill(msg.id);
+            // directive (methods) instead of a credential. No password ever
+            // crosses. `ssoProviders` / `ssoProvider` are also sent so a
+            // content script from a different build still degrades to a
+            // highlight rather than a hard failure.
+            const sso = oauthSignInsForFill(msg.id);
             if (sso && sso.length > 0) {
-              sendResponse({ error: "This login uses Continue-with-SSO — no password to fill.", ssoProviders: sso, ssoProvider: sso[0] });
+              const providers = sso.map((s) => s.provider);
+              sendResponse({
+                error: "This login uses Continue-with-SSO — no password to fill.",
+                sso,
+                ssoProviders: providers,
+                ssoProvider: providers[0],
+              });
               break;
             }
             sendResponse(credentialForFill(msg.id));
@@ -186,9 +222,51 @@ chrome.runtime.onMessage.addListener(
             // A typed password wins over any in-flight SSO click on this
             // origin — the user chose the password path.
             clearPendingOAuthFor(candidateOrigin);
-            sendResponse(
-              await evaluateCandidate(msg.username, msg.password, candidateOrigin),
-            );
+            const verdict = await evaluateCandidate(msg.username, msg.password, candidateOrigin);
+            // Retain the prompted capture (memory only) so a sign-in redirect
+            // destroying the page banner can re-show it on the next page.
+            if (verdict.prompt) {
+              setPendingPrompt({
+                username: msg.username,
+                password: msg.password,
+                origin: verdict.origin,
+                mode: verdict.mode,
+                faviconUrl: msg.faviconUrl ?? null,
+                at: Date.now(),
+              });
+            } else if (!verdict.prompt) {
+              // Already saved / never-listed: drop any stale prompt so the
+              // next page does not nag for a resolved capture.
+              clearPendingPrompt();
+            }
+            sendResponse(verdict);
+            break;
+          }
+          case "CHECK_PENDING_SAVE": {
+            // Fresh page load asking whether a pre-redirect capture is still
+            // awaiting a decision. Origin stamped from the sender tab.
+            const pageOrigin = tabOrigin(sender.tab);
+            if (!pageOrigin) {
+              sendResponse({ prompt: false });
+              break;
+            }
+            sendResponse(await getPendingPrompt(pageOrigin));
+            break;
+          }
+          case "CONFIRM_PENDING_SAVE": {
+            // User confirmed the re-shown banner on the post-redirect page.
+            // The secret comes from worker memory — the new page never held it.
+            const decisionOrigin = tabOrigin(sender.tab);
+            if (!decisionOrigin) throw new Error("Unknown tab origin.");
+            const canonical = originOfUrl(decisionOrigin);
+            const icon = sender.tab?.favIconUrl ?? msg.faviconUrl ?? null;
+            const result = await confirmPendingPrompt(canonical, icon);
+            sendResponse({ saved: result.saved, offline: result.offline });
+            break;
+          }
+          case "DISMISS_PENDING_SAVE": {
+            clearPendingPrompt();
+            sendResponse({ ok: true });
             break;
           }
           case "SAVE_DECISION": {
@@ -197,13 +275,22 @@ chrome.runtime.onMessage.addListener(
             const decisionOrigin = tabOrigin(sender.tab);
             if (!decisionOrigin) throw new Error("Unknown tab origin.");
             const canonical = originOfUrl(decisionOrigin);
-            const result = await pushSave(msg.username, msg.password, canonical, msg.mode);
+            // Icon priority: the browser's own tab icon first (it IS what the
+            // tab shows — DOM scraping can pick a different theme/size
+            // variant), then the page-declared icon. The worker re-validates
+            // either; origin is still stamped from the sender tab.
+            const icon = sender.tab?.favIconUrl ?? msg.faviconUrl ?? null;
+            const result = await pushSave(msg.username, msg.password, canonical, msg.mode, icon);
+            // Resolved here — the post-redirect page must not re-prompt.
+            // Offline keeps the retained prompt so a later page can retry.
+            if (result.saved) clearPendingPrompt();
             sendResponse({ saved: result.saved, offline: result.offline });
             break;
           }
           case "NEVER_ORIGIN": {
             const neverOrigin = tabOrigin(sender.tab);
             if (neverOrigin) await markNeverOrigin(neverOrigin);
+            clearPendingPrompt();
             sendResponse({ ok: true });
             break;
           }
@@ -230,11 +317,13 @@ chrome.runtime.onMessage.addListener(
           }
           case "SAVE_OAUTH_DECISION": {
             // User confirmed "Signed in with X?" in the page banner. No
-            // secret crosses contexts — just the provider enum.
+            // secret crosses contexts — just the provider and the account the
+            // user typed.
             const decisionOrigin = tabOrigin(sender.tab);
             if (!decisionOrigin) throw new Error("Unknown tab origin.");
             const canonical = originOfUrl(decisionOrigin);
-            const result = await pushSaveOAuth(msg.provider, canonical);
+            const icon = sender.tab?.favIconUrl ?? msg.faviconUrl ?? null;
+            const result = await pushSaveOAuth(msg.provider, msg.account, canonical, icon);
             sendResponse({ saved: result.saved, offline: result.offline });
             break;
           }

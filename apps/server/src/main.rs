@@ -27,7 +27,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use endpoints::{
-    auth, get_crypto_params, get_vault, google_endpoints, lock, logout, register,
+    auth, favicon, get_crypto_params, get_vault, google_endpoints, lock, logout, pair, register,
     session_status, update_vault, update_vault_password, vaults,
 };
 use static_site::static_site;
@@ -238,12 +238,15 @@ async fn main() -> std::io::Result<()> {
                     )
                     .service(register::register)
                     .service(auth::auth)
+                    .service(favicon::favicon)
                     .service(get_vault::get_vault)
                     .service(get_crypto_params::get_crypto_params)
                     .service(update_vault::update_vault)
                     .service(session_status::get_session)
                     .service(logout::logout)
                     .service(lock::lock)
+                    .service(pair::pair_start)
+                    .service(pair::pair_consume)
                     .service(update_vault_password::update_vault_password)
                     .service(vaults::create_vault)
                     .service(vaults::list_vaults)
@@ -259,6 +262,7 @@ async fn main() -> std::io::Result<()> {
                     .service(google_endpoints::google_create_vault)
                     .service(google_endpoints::google_read_vault)
                     .service(google_endpoints::google_replace_vault)
+                    .service(google_endpoints::google_mirror_vault)
                     .service(google_endpoints::google_upsert_binding)
                     .service(google_endpoints::google_link_pending)
                     .service(google_endpoints::google_list_vaults_pending)

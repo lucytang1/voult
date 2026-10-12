@@ -34,9 +34,12 @@ cd apps/extension && npm install && npm run build
 
 ## M1 manual matrix (unlock + suggest + fill)
 
-- Onboarding rejects non-UUID vault ids and non-loopback `http` server URLs.
+- Connect screen never asks for a vault ID: with a web session alive it
+  auto-adopts into the password screen; otherwise a one-time pairing code
+  from the web app (Settings → Connect browser extension) links the vault.
+  Non-loopback `http` server URLs are still rejected.
 - Wrong password fails locally ("Incorrect password.", no distinguishing
-  network behavior); correct password unlocks, enrolls the device envelope.
+  network behavior); correct password logs in, enrolls the device envelope.
 - Reload with session alive + no lock flag → silent device unlock; with lock
   flag (after Lock, timeout, or screen lock) → password screen.
 - Idle past the configured timeout, screen lock, Lock button, and browser
@@ -47,7 +50,7 @@ cd apps/extension && npm install && npm run build
   iframes never filled; `http` pages show insecure markers.
 - Fill via dropdown click, `Ctrl/Cmd+Shift+L`, and popup Fill all dispatch
   framework-compatible input events; never auto-submits.
-- OAuth markers: dropdown rows read "Continue with X" (never fill);
+- OAuth markers: dropdown rows read the account + provider (never fill);
   `FILL_CREDENTIAL` for an OAuth id is refused by the worker; popup shows an
   SSO badge, hides Pass, disables Fill.
 
@@ -66,15 +69,30 @@ cd apps/extension && npm install && npm run build
 
 Test page needs two SSO buttons (Google + GitHub hrefs or text) on an
 `https` origin with a password form beside them.
-- Click "Continue with Google" → complete the IdP dance and return to the
-  app (usually a page with no SSO buttons, e.g. `/dashboard`) → one "Signed
-  in with Google?" banner; Save creates a passwordless marker (verify in web
-  app: green "Continue with Google" detail, no password block).
+- Vault holding NO account for a provider + click "Continue with Google" →
+  complete the IdP dance and return to the app (usually a page with no SSO
+  buttons, e.g. `/dashboard`) → one "Signed in with Google?" banner with a
+  single `Save "Sign in with Google"` button. Saving creates a passwordless
+  item with NO `username` and the method `Google` (verify in web app:
+  "Sign-in methods: Google", no password block); the popup and the suggest
+  dropdown label that row "Sign in with Google".
+- Vault holding ≥1 account for a provider → the banner lists exactly those
+  accounts as rows, nothing else; picking one creates/updates a passwordless
+  item whose `username` IS that account. The list is capped at 8. An account
+  qualifies if the vault has an explicit SSO method for that provider **or** a
+  login on the provider's own domain (`github.com` + handle `lucytang1` is
+  that person's GitHub account). Seed one in the web app first, e.g.
+  `you@gmail.com` and `you@acme.com` on some other site.
+- Picking an account the site already stores → no duplicate row, no error
+  (the method is already there).
 - Dismiss / abort (never return) / timeout (>10 min) / locked vault → no
   write, no error.
 - "Never for this site" → no further OAuth prompts on that origin.
-- Second visit to the login page → "Continue with Google" suggestion row;
-  no password prompt for that marker.
+- Signing in with a *second*, different Google account on a site that already
+  has one → not re-prompted (the prompt is provider-scoped and cannot know the
+  account); add it manually in the web app, where it becomes a second item.
+- Second visit to the login page → suggestion row naming the account;
+  no password prompt for that item.
 - Suggestion on SSO/email-only pages (no password field): focusing the email
   field offers stored OAuth markers, and the popup shows a "Sign in with X"
   button for this site; pressing it closes the popup and focuses the site's

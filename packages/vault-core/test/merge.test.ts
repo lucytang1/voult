@@ -21,7 +21,7 @@ const item = (over: Partial<VaultItem> = {}): VaultItem => ({
   site: "example.com",
   username: "alice",
   password: "pw-1",
-  ssoProviders: [],
+  sso: [],
   origin: "https://example.com",
   ...over,
 });

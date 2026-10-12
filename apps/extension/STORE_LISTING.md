@@ -12,10 +12,11 @@
 Voult is a self-hosted, zero-knowledge password manager. This companion
 extension does two things: it offers to save logins when you sign in, and it
 suggests the right login when you return to a login page. It also remembers
-"Continue with Google / GitHub" sign-ins — sites where you used SSO instead
-of a password — so you always know how you signed up. Your master password
-and vault key never leave the browser; the server stores only encrypted data
-and can never read your passwords.
+that you signed in with SSO — "Continue with Google / GitHub" — and, when your
+vault already knows your accounts for that provider, lets you pick the right
+one so you can always tell which of your accounts belongs to which site. Your
+master password and vault key never leave the browser; the server stores only
+encrypted data and can never read your passwords.
 
 ## Permission justifications (for review + listing)
 

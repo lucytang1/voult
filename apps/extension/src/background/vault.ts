@@ -22,16 +22,24 @@ import {
   decrypt,
   derivePasswordWrappingKey,
   encrypt,
+  fallbackFaviconUrl,
+  faviconForItem,
+  findItemForAccount,
   getAuthVerifierB64,
+  hasSsoSignIn,
   importVaultKey,
   isValidVaultId,
   mergeVault,
   originOfUrl,
   rankOriginMatch,
+  sanitizeFaviconUrl,
   unwrapKeyBytes,
+  ssoAccountsForProvider,
+  upsertSsoSignIn,
   uuid,
   wrapKeyBytes,
   type SsoProvider,
+  type SsoSignIn,
   type VaultItem,
 } from "@voult/vault-core";
 import {
@@ -39,7 +47,9 @@ import {
   fetchSession,
   fetchVault,
   isNetworkError,
+  isUnauthorized,
   isVersionConflict,
+  pairConsume,
   postAuth,
   postLock,
   postLogout,
@@ -141,16 +151,14 @@ export function normalizeServerUrl(input: string): string {
   return trimmed;
 }
 
-// --- Onboarding ------------------------------------------------------------
+// --- Onboarding (password-only: vault id is never typed) --------------------
+// The vault id is adopted either from the existing session cookie
+// (auto-discovery when the web app signed in first) or from a one-time
+// pairing code shown in the web app. Both paths converge on the same
+// single-vault invariant as the legacy manual onboarding below.
 
-export async function saveOnboarding(vaultIdInput: string, serverUrlInput: string): Promise<void> {
-  const id = vaultIdInput.trim();
-  if (!isValidVaultId(id)) throw new Error("Vault ID must be a UUID (copy it from the Voult web app).");
-  const serverUrl = normalizeServerUrl(serverUrlInput);
-  // Single-vault invariant: switching the onboarded vault abandons the old
-  // one entirely (keys wiped, per-vault records cleared) so two vaults can
-  // never be live side by side. clearVaultRecords also drops the old vault's
-  // stored lock epoch (same `vault:<id>:` prefix).
+/** Shared tail: abandon any previous vault, pin the new id locked. */
+async function pinVaultLocked(id: string, serverUrl: string): Promise<void> {
   const previous = (await getLocalValue<string>(ACTIVE_VAULT_KEY)) ?? null;
   if (previous && previous !== id) {
     await lock();
@@ -165,6 +173,86 @@ export async function saveOnboarding(vaultIdInput: string, serverUrlInput: strin
   await setLocalValue(SERVER_URL_KEY, serverUrl);
   await setLocalValue(ACTIVE_VAULT_KEY, id);
   await setSessionValue(LOCKED_FLAG_KEY, 1);
+}
+
+/**
+ * Auto-discovery (M0): when the web app already holds a session cookie in
+ * this browser profile, adopt its vault id without asking the user to type
+ * anything. Returns the adopted id, or null when no session exists (caller
+ * falls back to the pairing-code form). Never unlocks — just onboards locked.
+ */
+export async function adoptSessionProbe(): Promise<string | null> {
+  const serverUrl = await getServerUrl();
+  let session: Awaited<ReturnType<typeof fetchSession>>;
+  try {
+    session = await fetchSession(serverUrl);
+  } catch {
+    return null;
+  }
+  if (!session.authenticated || !isValidVaultId(session.vault_id)) return null;
+  await pinVaultLocked(session.vault_id, serverUrl);
+  await setKnownEpoch(session.vault_id, session.lock_epoch ?? 0);
+  return session.vault_id;
+}
+
+/**
+ * Pairing-code redeem (M1): exchange the 6-character code shown in the web
+ * app for the vault identity, then pin it locked. The master password is
+ * still required on the next unlock — the code is not an auth credential.
+ */
+export async function pairWithCode(rawCode: string, serverUrlInput?: string): Promise<string> {
+  const code = rawCode.trim();
+  if (!code) throw new Error("Enter the pairing code from the web app.");
+  const serverUrl = serverUrlInput?.trim()
+    ? normalizeServerUrl(serverUrlInput)
+    : await getServerUrl();
+  let vaultId: string;
+  try {
+    ({ vault_id: vaultId } = await pairConsume(code, serverUrl));
+  } catch (e) {
+    // Offline is a normal state — don't blame the code when the network is down.
+    if (isNetworkError(e)) throw new Error("Server unreachable — check the server URL and try again.");
+    throw new Error("Invalid or expired code — generate a fresh one in the web app.");
+  }
+  if (!isValidVaultId(vaultId)) throw new Error("Pairing failed — try again.");
+  await pinVaultLocked(vaultId, serverUrl);
+  try {
+    const session = await fetchSession(serverUrl);
+    if (session.authenticated && session.vault_id === vaultId) {
+      await setKnownEpoch(vaultId, session.lock_epoch ?? 0);
+    }
+  } catch {
+    // Offline/cookie-blocked after pairing — unlock via password still works;
+    // the next online check converges the epoch baseline.
+  }
+  return vaultId;
+}
+
+/** Forget the onboarded vault and return to the Connect screen. */
+export async function resetOnboarding(): Promise<void> {
+  const id = (await getLocalValue<string>(ACTIVE_VAULT_KEY)) ?? null;
+  await lock();
+  if (id) {
+    try {
+      await deleteDeviceRecords(id);
+      await clearVaultRecords(id);
+    } catch (e) {
+      console.error("[voult] failed to clear vault records on reset", e);
+    }
+    if (epochCache && epochCache.vaultId === id) epochCache = null;
+    await chrome.storage.local.remove(ACTIVE_VAULT_KEY);
+  }
+  await setSessionValue(LOCKED_FLAG_KEY, 1);
+}
+
+export async function saveOnboarding(vaultIdInput: string, serverUrlInput: string): Promise<void> {
+  // Legacy manual path (kept for already-onboarded profiles and tests).
+  // The popup no longer offers a UUID field — new users pair via code or
+  // session auto-discovery. Shares the single-vault pin tail above.
+  const id = vaultIdInput.trim();
+  if (!isValidVaultId(id)) throw new Error("Vault ID must be a UUID (copy it from the Voult web app).");
+  const serverUrl = normalizeServerUrl(serverUrlInput);
+  await pinVaultLocked(id, serverUrl);
 }
 
 // --- Unlock ----------------------------------------------------------------
@@ -215,20 +303,46 @@ async function finishUnlock(
 }
 
 /**
+ * Vault fetch immediately after a successful POST /auth. Retries once on
+ * 401: POST /auth already verified the password, so the first 401 means
+ * the fresh session cookie lost a commit race (not a bad credential), and
+ * the retry — after the cookie store settles — succeeds. A second 401 is
+ * real (e.g. server restarted with a new cookie key) and is rethrown.
+ */
+async function fetchVaultAfterAuth(
+  serverUrl: string,
+): Promise<Awaited<ReturnType<typeof fetchVault>>> {
+  try {
+    return await fetchVault(serverUrl);
+  } catch (e) {
+    if (!isUnauthorized(e)) throw e;
+    console.warn("[voult] vault fetch raced the fresh session cookie; retrying once");
+    await new Promise((r) => setTimeout(r, 500));
+    return await fetchVault(serverUrl);
+  }
+}
+
+/**
  * Password unlock. Derives locally, authenticates with the static verifier,
  * unwraps the vault key, fetches + decrypts. Throws "Incorrect password." on
  * AES-GCM failure so the popup can show it without leaking error detail.
+ *
+ * A successful POST /auth proves the password was correct, so a 401 on the
+ * vault fetch immediately after is never "wrong password" — it is the
+ * session cookie losing a commit race in the extension network stack (the
+ * follow-up request arrives cookieless; a later attempt then succeeds).
+ * Retry that fetch once after a short delay instead of failing the login.
  */
 export async function unlockWithPassword(password: string): Promise<void> {
   const id = (await getLocalValue<string>(ACTIVE_VAULT_KEY)) ?? "";
-  if (!isValidVaultId(id)) throw new Error("No vault onboarded — set the vault ID first.");
+  if (!isValidVaultId(id)) throw new Error("No vault onboarded — connect the extension first.");
   const serverUrl = await getServerUrl();
   const params = await fetchCryptoParams(id, serverUrl);
   const authKey = await createAuthKey(password, params.salt, params.iterations);
   const vaultVerifier = await getAuthVerifierB64(authKey);
   await postAuth(id, vaultVerifier, serverUrl);
   const wrappingKey = await derivePasswordWrappingKey(password, params.salt, params.iterations);
-  const vaultData = await fetchVault(serverUrl);
+  const vaultData = await fetchVaultAfterAuth(serverUrl);
   const v = vaultData.vault;
   if (!v.vault_key_wrap || !v.vault_key_wrap_iv) {
     throw new Error("Vault key material unavailable for unlock.");
@@ -360,6 +474,7 @@ export async function lock(): Promise<void> {
   vaultId = null;
   pendingSave = null;
   pendingOAuth = null;
+  pendingPrompt = null;
   await setSessionValue(LOCKED_FLAG_KEY, 1);
   await chrome.alarms.clear(AUTOLOCK_ALARM);
   console.info("[voult] locked");
@@ -433,7 +548,6 @@ export function queryLogins(pageOrigin: string): LoginMatch[] {
     .map((item) => {
       const rank = rankOf(item, canonical);
       if (!rank) return null;
-      const providers = item.ssoProviders ?? [];
       const m: LoginMatch = {
         id: item.id,
         username: item.username ?? "",
@@ -442,7 +556,9 @@ export function queryLogins(pageOrigin: string): LoginMatch[] {
         rank,
         // One item carries every sign-in option: password fill and/or SSO.
         hasPassword: !!item.password,
-        ssoProviders: providers,
+        sso: item.sso ?? [],
+        // Display-only icon (stored favicon, else `<origin>/favicon.ico`).
+        faviconUrl: faviconForItem(item),
       };
       return m;
     })
@@ -457,8 +573,8 @@ export function credentialForFill(id: string): { username: string; password: str
   const item = items.find((i) => i.id === id);
   if (!item) throw new Error("Login not found.");
   // SSO-only items hold no secret — they inform, never fill. Items carrying
-  // both a password and SSO providers fill the password; the content script
-  // shows "Continue with X" rows alongside and never calls fill for
+  // both a password and SSO methods fill the password; the content script
+  // shows the SSO rows alongside and never calls fill for
   // passwordless picks. This is the worker-side backstop (also blocks a
   // compromised renderer asking for a passwordless id directly).
   if (!item.password) {
@@ -468,17 +584,19 @@ export function credentialForFill(id: string): { username: string; password: str
 }
 
 /**
- * SSO providers when an id names a passwordless login, else null. Lets the
+ * Sign-in methods when an id names a passwordless login, else null. Lets the
  * worker answer FILL_CREDENTIAL with a highlight directive instead of a
  * secret — the content script scrolls to the site's own SSO button. Items
  * that also store a password fill normally, so this returns null for them.
+ * Returns the full methods (provider + account) so the UI can name which
+ * account the tap will sign into.
  */
-export function oauthProviderForFill(id: string): SsoProvider[] | null {
+export function oauthSignInsForFill(id: string): SsoSignIn[] | null {
   if (!isUnlocked()) return null;
   const item = items.find((i) => i.id === id);
   if (!item || item.password) return null;
-  const providers = item.ssoProviders ?? [];
-  return providers.length > 0 ? providers : null;
+  const methods = item.sso ?? [];
+  return methods.length > 0 ? methods : null;
 }
 
 // --- Popup state ---------------------------------------------------------------
@@ -586,6 +704,8 @@ export interface PendingSave {
   origin: string;
   mode: "save" | "update";
   itemId?: string;
+  /** Page's declared icon at capture time (re-validated before any write). */
+  faviconUrl?: string | null;
 }
 
 let pendingSave: PendingSave | null = null;
@@ -596,6 +716,99 @@ export function setPendingSave(save: PendingSave | null): void {
 
 export function getPendingSave(): PendingSave | null {
   return pendingSave;
+}
+
+// --- Redirect-surviving save prompt (memory only — never persisted) ---------
+//
+// The save banner is page-anchored, so a sign-in redirect destroys it before
+// the user can act. The worker therefore retains the last prompted capture;
+// each freshly loaded page on the same origin re-asks via
+// getPendingPrompt() and re-shows the banner. Confirm uses the retained
+// secret (the new page has no password field); explicit dismiss / never /
+// lock / successful save clears it.
+
+export interface PendingPrompt {
+  username: string;
+  password: string;
+  origin: string;
+  mode: "save" | "update";
+  faviconUrl?: string | null;
+  /** Wall-clock of the capture; compared against PENDING_PROMPT_TTL_MS. */
+  at: number;
+}
+
+let pendingPrompt: PendingPrompt | null = null;
+
+/** Prompt survives long enough for any IdP/login redirect dance, no longer. */
+const PENDING_PROMPT_TTL_MS = 5 * 60 * 1000;
+
+export function setPendingPrompt(p: PendingPrompt | null): void {
+  pendingPrompt = p;
+}
+
+export function clearPendingPrompt(): void {
+  pendingPrompt = null;
+}
+
+/**
+ * Returns the retained prompt for `pageOrigin` when it is still actionable:
+ * unlocked, fresh, same origin, not never-listed, and not already saved.
+ * Stale entries are cleared so one capture prompts at most until resolved.
+ */
+export async function getPendingPrompt(pageOrigin: string): Promise<SavePrompt> {
+  if (!isUnlocked() || !pendingPrompt) return { prompt: false };
+  let canonical: string;
+  try {
+    canonical = originOfUrl(pageOrigin);
+  } catch {
+    return { prompt: false };
+  }
+  const p = pendingPrompt;
+  if (p.origin !== canonical) return { prompt: false };
+  if (Date.now() - p.at > PENDING_PROMPT_TTL_MS) {
+    pendingPrompt = null;
+    return { prompt: false };
+  }
+  if (await isNeverOrigin(canonical)) {
+    pendingPrompt = null;
+    return { prompt: false };
+  }
+  touch();
+  // Resolved meanwhile (saved elsewhere / duplicate tab confirmed) → drop.
+  const exact = items.find((i) => i.origin === canonical && i.username === p.username);
+  if (exact && exact.password === p.password) {
+    pendingPrompt = null;
+    return { prompt: false };
+  }
+  return { prompt: true, mode: p.mode, origin: canonical, username: p.username };
+}
+
+/**
+ * Confirms the retained prompt using the stored secret. The caller may pass
+ * the new page's icon (preferred); otherwise the capture-time icon is used.
+ * Keeps the prompt when offline so a later page can retry; clears on save.
+ */
+export async function confirmPendingPrompt(
+  pageOrigin: string,
+  faviconUrl?: string | null,
+): Promise<SaveResult> {
+  if (!isUnlocked() || !pendingPrompt) throw new Error("Nothing to save.");
+  let canonical: string;
+  try {
+    canonical = originOfUrl(pageOrigin);
+  } catch {
+    throw new Error("Unknown site origin.");
+  }
+  const p = pendingPrompt;
+  if (p.origin !== canonical) throw new Error("Saved login changed; please capture it again.");
+  if (Date.now() - p.at > PENDING_PROMPT_TTL_MS) {
+    pendingPrompt = null;
+    throw new Error("Saved login expired; please capture it again.");
+  }
+  const icon = sanitizeFaviconUrl(faviconUrl) ?? sanitizeFaviconUrl(p.faviconUrl) ?? null;
+  const result = await pushSave(p.username, p.password, canonical, p.mode, icon);
+  if (result.saved) pendingPrompt = null;
+  return result;
 }
 
 /** Adopt a freshly pushed server snapshot into the in-memory cache. */
@@ -682,37 +895,66 @@ export interface SaveResult {
  * Applies one confirmed save/update and pushes via read-modify-CAS-write.
  * Returns offline:true (and stashes the candidate in memory until lock) when
  * the network is down — plaintext is never written to disk.
+ *
+ * `faviconUrl` is the page's declared icon (untrusted content-script hint):
+ * sanitized here (http(s) only, length-capped) and never allowed to block or
+ * fail the save. Fresh saves store it (falling back to `<origin>/favicon.ico`
+ * when the page declares none); updates heal a missing/stale icon alongside
+ * the password change via the same per-field LWW path.
  */
 export async function pushSave(
   username: string,
   password: string,
   origin: string,
   mode: "save" | "update",
+  faviconUrl?: string | null,
 ): Promise<SaveResult> {
   if (!isUnlocked()) throw new Error("Vault is locked.");
 
+  // Icon resolution happens against the in-memory cache while unlocked so an
+  // update can heal a missing icon. The op is fixed across CAS retries (creates
+  // are idempotent by id; updates replay per-field LWW onto each snapshot).
+  const resolveIcon = (existing?: VaultItem): string | undefined =>
+    sanitizeFaviconUrl(faviconUrl) ?? fallbackFaviconUrl(origin) ?? existing?.faviconUrl;
+
   const op =
     mode === "save"
-      ? {
-          operation: "create",
-          payload: {
-            id: uuid(),
-            site: siteLabelForOrigin(origin),
-            username,
-            password,
-            ssoProviders: [],
-            origin,
-          },
-        }
+      ? (() => {
+          const icon = resolveIcon();
+          return {
+            operation: "create",
+            payload: {
+              id: uuid(),
+              site: siteLabelForOrigin(origin),
+              username,
+              password,
+              sso: [],
+              origin,
+              ...(icon ? { faviconUrl: icon } : {}),
+            },
+          };
+        })()
       : (() => {
           const existing = items.find((i) => i.origin === origin && i.username === username);
           if (!existing) {
             throw new Error("Saved login changed; please capture it again.");
           }
-          return { operation: "update", payload: { id: existing.id, fields: { password } } };
+          const icon = resolveIcon(existing);
+          return {
+            operation: "update",
+            payload: {
+              id: existing.id,
+              fields: {
+                password,
+                // Heal a missing icon or refresh a changed one; identical
+                // values are a no-op downstream (changed stays false).
+                ...(icon && icon !== existing.faviconUrl ? { faviconUrl: icon } : {}),
+              },
+            },
+          };
         })();
 
-  return pushSingleIntent(op, () => setPendingSave({ username, password, origin, mode }));
+  return pushSingleIntent(op, () => setPendingSave({ username, password, origin, mode, faviconUrl: sanitizeFaviconUrl(faviconUrl) ?? null }));
 }
 
 /**
@@ -804,6 +1046,10 @@ async function pushSingleIntent(
 // happens on explicit banner confirm via pushSaveOAuth(), reusing the same
 // CAS path as password saves. No OAuth secret ever exists to store; the
 // provider is linked onto the site's login alongside any password.
+//
+// We cannot observe WHICH IdP account was used, so the prompt never asserts
+// one: it carries the vault's known accounts for that provider and lets the
+// user pick. With no known account the method is stored provider-only.
 
 export interface PendingOAuth {
   provider: SsoProvider;
@@ -816,6 +1062,9 @@ export interface PendingOAuth {
 /** Click→return window. Longer than any real IdP dance; short enough that a
  *  stale click can't nag across sessions (lock() also clears it). */
 const OAUTH_WINDOW_MS = 10 * 60 * 1000;
+
+/** Cap on vault accounts offered in the SSO banner — a picker, not a roster. */
+const ACCOUNT_CHOICE_LIMIT = 8;
 
 let pendingOAuth: PendingOAuth | null = null;
 
@@ -876,45 +1125,81 @@ export async function evaluateOAuthPageState(
   touch();
   // Still choosing (form + login path both present) → wait, keep pending.
   if (hasLoginForm && LOGIN_PATH_RE.test(path)) return { prompt: false };
-  // Already remembered → no prompt. One item holds every sign-in option for
-  // a site, so a provider counts as remembered when any same-origin item
-  // already lists it (password and SSO coexist on that item).
-  if (items.some((i) => i.origin === canonical && (i.ssoProviders ?? []).includes(pending.provider))) {
+  // Already remembered → no prompt. The prompt carries no account of its own
+  // (we cannot know which one was used), so this suppresses re-prompting for
+  // a provider the user already saved *at some account* on this site. A second,
+  // different account at the same provider is therefore not offered a second
+  // prompt — it must be added manually. That is deliberate: nagging on every
+  // sign-in with an account we cannot verify is worse than a missed suggestion.
+  if (
+    items.some(
+      (i) => i.origin === canonical && (i.sso ?? []).some((s) => s.provider === pending.provider),
+    )
+  ) {
     pendingOAuth = null;
     return { prompt: false };
   }
   pendingOAuth = null;
-  return { prompt: true, provider: pending.provider, origin: canonical };
+  // Offer what the vault already knows about this provider. Bounded so a large
+  // vault cannot turn the banner into an unreadable list of accounts.
+  const accounts = ssoAccountsForProvider(items, pending.provider).slice(0, ACCOUNT_CHOICE_LIMIT);
+  return { prompt: true, provider: pending.provider, origin: canonical, accounts };
 }
 
 /**
- * Saves a confirmed SSO sign-in (no secret — provider linked onto the site's
- * login) via the shared CAS push. When a same-origin item already exists the
- * provider is merged into it (one item, multiple sign-in options); otherwise
- * a new passwordless item is created. Throws when locked or when the provider
- * appeared meanwhile.
+ * Saves a confirmed SSO sign-in (no secret — a provider+account method linked
+ * onto the site's login) via the shared CAS push.
+ *
+ * `account` may be empty: that is the honest answer when the vault holds no
+ * account for this provider, and it stores a provider-only method ("Sign in
+ * with GitHub") on an item with no `username`. A non-empty account means the
+ * user picked one of the vault's known accounts for that provider in the
+ * banner, and it is stored exactly as if they had typed it.
+ *
+ * One item = one account. A named sign-in joins the same-origin item that
+ * already represents `account` — which is what keeps case B (site username +
+ * password + "Continue with Google" on the same account) a single row, and case
+ * F (personal and work Google on one site) two rows. A named method is only
+ * ever attached to an item whose identity matches, so the sso/account pair can
+ * never contradict `username`. A provider-only method has no identity to match,
+ * so it never joins an existing item: it becomes its own row, and a repeat
+ * capture of the same method is a silent no-op rather than a duplicate.
+ *
+ * Throws when locked or on an unparseable origin.
  */
-export async function pushSaveOAuth(provider: SsoProvider, origin: string): Promise<SaveResult> {
+export async function pushSaveOAuth(
+  provider: SsoProvider,
+  account: string,
+  origin: string,
+  faviconUrl?: string | null,
+): Promise<SaveResult> {
   if (!isUnlocked()) throw new Error("Vault is locked.");
+  const trimmed = account.trim();
   let canonical: string;
   try {
     canonical = originOfUrl(origin);
   } catch {
     throw new Error("Unknown site origin.");
   }
-  if (items.some((i) => i.origin === canonical && (i.ssoProviders ?? []).includes(provider))) {
-    throw new Error("Already saved for this site.");
+  // Already stored on this origin — nothing to write. Reachable because the
+  // banner offers vault-wide accounts: picking an account this site already
+  // signs in with is a legitimate choice that simply needs no change.
+  if (items.some((i) => i.origin === canonical && hasSsoSignIn(i, provider, trimmed))) {
+    console.info("[voult] oauth login already saved for this origin");
+    return { saved: false, offline: false };
   }
-  // Merge into the site's existing login so email+password and SSO stay one
-  // item; only SSO-only-first-seen sites create a fresh passwordless item.
-  const existing = items.find((i) => i.origin === canonical);
+  // Only a NAMED account can join an existing item — findItemForAccount matches
+  // on `username`, which a provider-only item deliberately has no value for.
+  const existing = trimmed ? findItemForAccount(items, canonical, trimmed) : undefined;
+  const icon = sanitizeFaviconUrl(faviconUrl) ?? fallbackFaviconUrl(canonical);
   const op = existing
     ? {
         operation: "update",
         payload: {
           id: existing.id,
           fields: {
-            ssoProviders: [...(existing.ssoProviders ?? []), provider],
+            sso: upsertSsoSignIn(existing.sso ?? [], { provider, account: trimmed }),
+            ...(icon && icon !== existing.faviconUrl ? { faviconUrl: icon } : {}),
           },
         },
       }
@@ -923,8 +1208,14 @@ export async function pushSaveOAuth(provider: SsoProvider, origin: string): Prom
         payload: {
           id: uuid(),
           site: siteLabelForOrigin(canonical),
-          ssoProviders: [provider],
+          // The IdP account IS this account's identity — there is no
+          // site-local username for an SSO-only login. Provider-only sign-ins
+          // store none: an unknown identity stays unknown rather than becoming
+          // an empty `username` every surface would have to special-case.
+          ...(trimmed ? { username: trimmed } : {}),
+          sso: [{ provider, account: trimmed }],
           origin: canonical,
+          ...(icon ? { faviconUrl: icon } : {}),
         },
       };
   const res = await pushSingleIntent(op, () => undefined);

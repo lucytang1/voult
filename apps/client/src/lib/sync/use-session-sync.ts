@@ -53,6 +53,8 @@ export function useSessionSync(queryClient?: QueryClient) {
       if (useAppStore.getState().isLocked) return;
       lockVaultKeys(null);
       queryClient?.removeQueries({ queryKey: ["vault"] });
+      queryClient?.removeQueries({ queryKey: ["favicon", vaultId] });
+      queryClient?.removeQueries({ queryKey: ["google"] });
       await closeVaultDb();
       postSessionEvent("locked", vaultId, epoch);
       router.replace("/lock" as any);

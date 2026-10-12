@@ -23,7 +23,4 @@ export function fillForm(
 ): void {
   if (form.username) setInputValue(form.username, creds.username);
   setInputValue(form.password, creds.password);
-  // Focus the password field so the user's next keystroke/submit flows
-  // naturally and password managers' “did fill” heuristics stay quiet.
-  form.password.focus();
 }

@@ -11,6 +11,7 @@ import {
 } from "../../crypto/index.web";
 import { UnlockedSession, persistDeviceSecrets, derivePasswordKeys, parseVaultJson } from "../utils";
 import { register as signupRequest } from "../../queries/SignUp/query";
+import type { RegisterRequest, RegisterResponse } from "../../queries/SignUp/api.schema";
 import { fetchSession } from "../../queries/session/query";
 
 /**
@@ -27,6 +28,7 @@ import { fetchSession } from "../../queries/session/query";
 export async function signupFlow(
   password: string,
   vaultJson: string,
+  sendRegistration: (payload: RegisterRequest) => Promise<RegisterResponse> = signupRequest,
 ): Promise<UnlockedSession> {
   // The vault ID is generated client-side and never derived from any identity.
   const vaultId = uuid();
@@ -43,7 +45,7 @@ export async function signupFlow(
     wrappingKey,
   );
 
-  const response = await signupRequest({
+  const response = await sendRegistration({
     vault_id: vaultId,
     vault_verifier: vaultVerifier,
     salt,

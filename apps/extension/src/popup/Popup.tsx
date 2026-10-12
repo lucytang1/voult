@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { sendMessage, ssoProviderLabel } from "../lib/messaging";
 import type { ExtensionMessage, PopupState, VaultItem } from "../lib/messaging";
+import { faviconForItem, ssoItemIdentity } from "@voult/vault-core";
 
 type RpcResponse<T> = T | { error: string };
 
@@ -23,6 +25,32 @@ async function activeTabOrigin(): Promise<string | undefined> {
   }
 }
 
+// Site icon: stored favicon (else `<origin>/favicon.ico`), falling back to a
+// letter tile when the icon is absent or fails to load. URLs are http(s)-only
+// by construction (see sanitizeFaviconUrl) — never rendered blindly.
+function ItemIcon({ item }: { item: VaultItem }) {
+  const [failed, setFailed] = useState(false);
+  const src = faviconForItem(item);
+  const letter = (item.site || item.origin || "?").charAt(0).toUpperCase();
+  if (!src || failed) {
+    return <span style={s.iconFallback}>{letter}</span>;
+  }
+  return (
+    <span style={s.iconTile}>
+      <img
+        src={src}
+        alt=""
+        width={20}
+        height={20}
+        style={s.iconImg}
+        onError={() => setFailed(true)}
+        // Icons are decorative; never leak the vault via referrer.
+        referrerPolicy="no-referrer"
+      />
+    </span>
+  );
+}
+
 async function copyText(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
@@ -36,38 +64,88 @@ async function copyText(text: string): Promise<boolean> {
 // The worker owns every secret; this view only renders projections and
 // forwards gestures. Passwords are never rendered — only copied or filled.
 export function Popup() {
-  const [state, setState] = useState<PopupState | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const refresh = useCallback(async () => {
-    setError(null);
-    const tabUrl = await activeTabOrigin();
-    setState(await call<PopupState>({ type: "GET_STATE", tabOrigin: tabUrl }));
-  }, []);
+  const [tabOrigin, setTabOrigin] = useState<string | undefined>();
+  const [tabReady, setTabReady] = useState(false);
+  const queryClient = useQueryClient();
+  const queryKey = ["popup-state", tabOrigin ?? ""] as const;
+  const stateQuery = useQuery({
+    queryKey,
+    queryFn: () => call<PopupState>({ type: "GET_STATE", tabOrigin }),
+    enabled: tabReady,
+    retry: false,
+    staleTime: 0,
+    gcTime: 0,
+  });
+  const command = useMutation({
+    mutationFn: (execute: () => Promise<void>) => execute(),
+    // Commands may carry an unlock password or pairing code in their closure.
+    gcTime: 0,
+  });
+  const state = stateQuery.data ?? null;
+  const busy = command.isPending;
 
   useEffect(() => {
-    void refresh().catch((e: unknown) =>
-      setError(e instanceof Error ? e.message : "Worker unreachable."),
-    );
-  }, [refresh]);
+    let mounted = true;
+    void activeTabOrigin().then((url) => {
+      if (!mounted) return;
+      setTabOrigin(url);
+      setTabReady(true);
+    });
+    return () => {
+      mounted = false;
+      // Popup state includes vault item passwords. Do not keep it after the
+      // popup closes, even though the QueryClient itself is short-lived.
+      queryClient.removeQueries({ queryKey: ["popup-state"] });
+      queryClient.clear();
+    };
+  }, [queryClient]);
+
+  useEffect(() => {
+    if (!stateQuery.error) return;
+    setError(stateQuery.error instanceof Error ? stateQuery.error.message : "Worker unreachable.");
+  }, [stateQuery.error]);
 
   const run = useCallback(
-    async (fn: () => Promise<PopupState | { ok: boolean }>) => {
-      setBusy(true);
+    async (fn: () => Promise<PopupState | { ok: boolean }>, sensitive = false) => {
       setError(null);
       try {
-        const res = await fn();
-        if ("status" in res) setState(res);
-        else await refresh();
+        const execute = async () => {
+          const result = await fn();
+          if ("status" in result) queryClient.setQueryData(queryKey, result);
+          else await stateQuery.refetch();
+        };
+        // Passwords and one-time pairing codes stay out of mutation variables
+        // and cache; their RPCs run directly and only the sanitized UI state
+        // is written to the short-lived query.
+        if (sensitive) await execute();
+        else await command.mutateAsync(execute);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Request failed.");
       } finally {
-        setBusy(false);
+        // Mutation variables are callbacks; reset so a completed popup action
+        // cannot retain its closure for the lifetime of the open popup.
+        command.reset();
       }
     },
-    [refresh],
+    [command, queryClient, queryKey, stateQuery.refetch],
   );
+
+  // Silent one-shot auto-discovery for the Connect screen: a web session in
+  // this profile jumps straight to the password screen. "No session" is not
+  // an error here — the user just pairs with a code instead.
+  const adoptSilent = useCallback(async () => {
+    try {
+      await command.mutateAsync(async () => {
+        const adopted = await call<PopupState>({ type: "ADOPT_SESSION" });
+        queryClient.setQueryData(queryKey, adopted);
+      });
+    } catch {
+      // No web session — stay on Connect, no error banner.
+    } finally {
+      command.reset();
+    }
+  }, [command, queryClient, queryKey]);
 
   if (!state) {
     return (
@@ -87,11 +165,16 @@ export function Popup() {
       />
       {error && <p style={s.error}>{error}</p>}
       {state.status === "needs-onboarding" && (
-        <Onboarding
+        <Connect
           busy={busy}
           serverUrl={state.serverUrl}
-          onSave={(vaultId, serverUrl) =>
-            void run(() => call<PopupState>({ type: "SAVE_ONBOARDING", vaultId, serverUrl }))
+          onAdopt={() => void run(() => call<PopupState>({ type: "ADOPT_SESSION" }))}
+          onAutoAdopt={adoptSilent}
+          onPair={(code, serverUrl) =>
+            void run(() => call<PopupState>({ type: "PAIR_WITH_CODE", code, serverUrl }), true)
+          }
+          onSettings={(serverUrl) =>
+            void run(() => call<PopupState>({ type: "SET_SETTINGS", serverUrl }))
           }
         />
       )}
@@ -100,9 +183,10 @@ export function Popup() {
           busy={busy}
           vaultId={state.vaultId}
           onUnlock={(password) =>
-            void run(() => call<PopupState>({ type: "UNLOCK_WITH_PASSWORD", password }))
+            void run(() => call<PopupState>({ type: "UNLOCK_WITH_PASSWORD", password }), true)
           }
           onDeviceUnlock={() => void run(() => call<PopupState>({ type: "UNLOCK_WITH_DEVICE" }))}
+          onSwitchVault={() => void run(() => call<PopupState>({ type: "RESET_ONBOARDING" }))}
         />
       )}
       {state.status === "unlocked" && (
@@ -156,27 +240,72 @@ function Header({
   );
 }
 
-function Onboarding({
+// Connect screen: password-only onboarding — the vault id is never typed.
+// Primary path is session auto-discovery (web app already signed in here);
+// otherwise the user enters the one-time pairing code shown in the web app
+// (Settings → Connect browser extension). The worker owns every secret;
+// this view only forwards gestures.
+function Connect({
   busy,
   serverUrl,
-  onSave,
+  onAdopt,
+  onAutoAdopt,
+  onPair,
+  onSettings,
 }: {
   busy: boolean;
   serverUrl: string;
-  onSave: (vaultId: string, serverUrl: string) => void;
+  onAdopt: () => void;
+  onAutoAdopt: () => void;
+  onPair: (code: string, serverUrl: string) => void;
+  onSettings: (serverUrl: string) => void;
 }) {
-  const [vaultId, setVaultId] = useState("");
+  const [code, setCode] = useState("");
   const [url, setUrl] = useState(serverUrl);
+  // Try once on open: signed-in web app → straight to the password screen.
+  // Silent: staying on Connect without a banner is the expected no-session path.
+  useEffect(() => {
+    onAutoAdopt();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   return (
     <div style={s.col}>
-      <p style={s.hint}>Connect this browser to your vault. Find the vault ID in the Voult web app.</p>
-      <label style={s.label}>Vault ID (UUID)</label>
-      <input style={s.input} value={vaultId} onChange={(e) => setVaultId(e.target.value)} placeholder="xxxxxxxx-xxxx-…" spellCheck={false} />
-      <label style={s.label}>Server URL</label>
-      <input style={s.input} value={url} onChange={(e) => setUrl(e.target.value)} spellCheck={false} />
-      <button style={s.primary} disabled={busy || !vaultId.trim()} onClick={() => onSave(vaultId.trim(), url.trim() || serverUrl)}>
-        {busy ? "Saving…" : "Connect vault"}
+      <p style={s.hint}>Connect this browser to your vault — no vault ID needed.</p>
+      <button style={s.primary} disabled={busy} onClick={onAdopt}>
+        {busy ? "Checking…" : "I've signed in — check again"}
       </button>
+      <p style={s.hint}>Or enter the one-time code from the web app:</p>
+      <label style={s.label}>Pairing code</label>
+      <input
+        style={{ ...s.input, textTransform: "uppercase" }}
+        value={code}
+        onChange={(e) => setCode(e.target.value.toUpperCase())}
+        placeholder="ABC123"
+        spellCheck={false}
+        autoComplete="one-time-code"
+        maxLength={8}
+      />
+      <label style={s.label}>Server URL</label>
+      <input
+        style={s.input}
+        value={url}
+        onChange={(e) => {
+          const v = e.target.value;
+          setUrl(v);
+        }}
+        onBlur={() => {
+          if (url.trim() && url.trim() !== serverUrl) onSettings(url.trim());
+        }}
+        spellCheck={false}
+      />
+      <button
+        style={s.primary}
+        disabled={busy || !code.trim()}
+        onClick={() => onPair(code.trim(), url.trim() || serverUrl)}
+      >
+        {busy ? "Connecting…" : "Connect with code"}
+      </button>
+      <p style={s.hint}>Get a code: web app → Settings → Connect browser extension.</p>
     </div>
   );
 }
@@ -186,17 +315,19 @@ function Locked({
   vaultId,
   onUnlock,
   onDeviceUnlock,
+  onSwitchVault,
 }: {
   busy: boolean;
   vaultId: string | null;
   onUnlock: (password: string) => void;
   onDeviceUnlock: () => void;
+  onSwitchVault: () => void;
 }) {
   const [password, setPassword] = useState("");
   const short = vaultId ? `${vaultId.slice(0, 8)}…` : "";
   return (
     <div style={s.col}>
-      <p style={s.hint}>Vault {short} is locked.</p>
+      <p style={s.hint}>Vault {short} is locked. Enter your master password to log in.</p>
       <form
         style={s.col}
         onSubmit={(e) => {
@@ -214,6 +345,9 @@ function Locked({
       </form>
       <button style={s.ghost} disabled={busy} onClick={onDeviceUnlock}>
         Try device unlock instead
+      </button>
+      <button style={s.ghost} disabled={busy} onClick={onSwitchVault} title="Forget this vault and connect a different one">
+        Wrong vault? Connect a different one
       </button>
     </div>
   );
@@ -242,7 +376,11 @@ function Unlocked({
       (i.username ?? "").toLowerCase().includes(q) ||
       i.site.toLowerCase().includes(q) ||
       (i.origin ?? "").toLowerCase().includes(q) ||
-      (i.ssoProviders ?? []).join(" ").toLowerCase().includes(q),
+      (i.sso ?? [])
+        .map((s) => `${ssoProviderLabel(s.provider)} ${s.account}`.trim())
+        .join(" ")
+        .toLowerCase()
+        .includes(q),
   );
   // Matches for this tab first, then the rest alphabetically.
   const ordered = [...filtered].sort((a, b) => {
@@ -260,9 +398,10 @@ function Unlocked({
   // Saved SSO for this site: one tap closes the popup and focuses the site's
   // own Continue-with button in the tab (the message chain outlives the
   // popup, so closing immediately is safe). Only passwordless logins suggest
-  // here — logins with a password fill normally.
+  // here — logins with a password fill normally. One row per sign-in method,
+  // naming the account, so two Google accounts stay distinguishable.
   const oauthMatches = (state.matches ?? []).filter(
-    (m) => !m.hasPassword && m.ssoProviders.length > 0,
+    (m) => !m.hasPassword && m.sso.length > 0,
   );
   const suggestSignIn = (id: string) => {
     onFill(id);
@@ -277,14 +416,15 @@ function Unlocked({
       {oauthMatches.length > 0 && (
         <div style={s.suggestBox}>
           {oauthMatches.flatMap((m) =>
-            m.ssoProviders.map((p) => (
+            m.sso.map((method) => (
               <button
-                key={`${m.id}:${p}`}
+                key={`${m.id}:${method.provider}:${method.account}`}
                 style={s.suggestBtn}
-                title={`Focus the site's Continue with ${ssoProviderLabel(p)} button`}
+                title={`Focus the site's Continue with ${ssoProviderLabel(method.provider)} button`}
                 onClick={() => suggestSignIn(m.id)}
               >
-                Sign in with {ssoProviderLabel(p)}{m.username ? ` · ${m.username}` : ""}
+                Sign in with {ssoProviderLabel(method.provider)}
+                {method.account ? ` · ${method.account}` : ""}
               </button>
             )),
           )}
@@ -298,18 +438,22 @@ function Unlocked({
       <input style={s.input} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search logins…" />
       <div style={s.list}>
         {ordered.length === 0 && <p style={s.hint}>No logins yet — save one from a login page.</p>}
-        {ordered.slice(0, 50).map((item: VaultItem) => (
+        {ordered.slice(0, 50).map((item: VaultItem) => {
+          // A provider-only sign-in (no account) leads with the method name so
+          // the row is never blank; its provider suffix is then redundant.
+          const identity = ssoItemIdentity(item, ssoProviderLabel);
+          const named = !identity.startsWith("Sign in with");
+          return (
           <div key={item.id} style={s.row}>
+            <ItemIcon item={item} />
             <div style={s.rowMain}>
               <span style={s.rowUser}>
-                {item.password || !(item.ssoProviders ?? []).length
-                  ? (item.username ?? "")
-                  : `Continue with ${(item.ssoProviders ?? []).map((p) => ssoProviderLabel(p)).join(" · ")}`}
+                {identity}
               </span>
               <span style={s.rowSite}>
                 {item.site || item.origin}
-                {item.password && (item.ssoProviders ?? []).length > 0
-                  ? ` · ${(item.ssoProviders ?? []).map((p) => ssoProviderLabel(p)).join(", ")}`
+                {(item.sso ?? []).length > 0 && named
+                  ? ` · ${[...new Set((item.sso ?? []).map((x) => x.provider))].map(ssoProviderLabel).join(", ")}`
                   : ""}
               </span>
             </div>
@@ -329,12 +473,13 @@ function Unlocked({
               ) : (
                 <span style={s.oauthBadge} title="SSO login — no password to fill">SSO</span>
               )}
-              {item.password && (item.ssoProviders ?? []).length > 0 && (
-                <span style={s.oauthBadge} title={`Also signs in with ${(item.ssoProviders ?? []).map((p) => ssoProviderLabel(p)).join(", ")}`}>+SSO</span>
+              {item.password && (item.sso ?? []).length > 0 && (
+                <span style={s.oauthBadge} title={`Also signs in with ${(item.sso ?? []).map((x) => ssoProviderLabel(x.provider)).join(", ")}`}>+SSO</span>
               )}
             </span>
           </div>
-        ))}
+          );
+        })}
       </div>
       <button style={s.ghost} onClick={() => setShowSettings((v) => !v)}>
         {showSettings ? "Hide settings" : "Settings"}
@@ -391,10 +536,13 @@ const s: Record<string, React.CSSProperties> = {
   warnBadge: { fontSize: 11, background: "#4a3a12", color: "#e0b34e", borderRadius: 999, padding: "3px 10px" },
   list: { display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" },
   row: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: "#17191f", border: "1px solid #262a35", borderRadius: 8, padding: "7px 9px" },
-  rowMain: { display: "flex", flexDirection: "column", minWidth: 0 },
+  rowMain: { display: "flex", flexDirection: "column", minWidth: 0, flex: 1 },
   rowUser: { fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   rowSite: { color: "#9aa0ae", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   oauthBadge: { fontSize: 11, background: "#2c3a2c", color: "#9fd6a4", borderRadius: 999, padding: "4px 10px", alignSelf: "center" },
+  iconTile: { width: 32, height: 32, borderRadius: 12, flexShrink: 0, background: "transparent", display: "inline-flex", alignItems: "center", justifyContent: "center" },
+  iconImg: { width: 22, height: 22, borderRadius: 4, objectFit: "contain" as const },
+  iconFallback: { width: 32, height: 32, borderRadius: 12, flexShrink: 0, background: "#fff", color: "#252833", fontSize: 14, fontWeight: 700, display: "inline-flex", alignItems: "center", justifyContent: "center" },
   suggestBox: { display: "flex", flexDirection: "column", gap: 6 },
   suggestBtn: { background: "#4f7cff", border: 0, borderRadius: 8, color: "#fff", padding: "10px", fontSize: 13, fontWeight: 600, cursor: "pointer", textAlign: "center" },
 };

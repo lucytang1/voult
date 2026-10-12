@@ -17,6 +17,7 @@ import {
   CreateVaultItemSchema,
   DeleteVaultItemSchema,
   UpdateVaultItemSchema,
+  normalizeAccount,
   type DeleteVaultItem,
   type UpdateVaultItem,
   type VaultItem,
@@ -54,10 +55,12 @@ const applyCreate = (
 ): IntentOutcome => {
   if (items.has(item.id)) return "noop";
   for (const existing of items.values()) {
+    // Accounts compare case-insensitively: `Me@Gmail.com` and `me@gmail.com`
+    // are one account, and treating them as two would flag every re-capture.
     if (
       existing.id !== item.id &&
       existing.site === item.site &&
-      existing.username === item.username
+      normalizeAccount(existing.username ?? "") === normalizeAccount(item.username ?? "")
     ) {
       // No identifying data logged: natural-key dups are routine, not errors.
       console.warn("Duplicate natural key created concurrently; keeping both");

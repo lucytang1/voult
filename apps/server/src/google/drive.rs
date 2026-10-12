@@ -69,6 +69,58 @@ fn vault_id_from_name(name: &str) -> Option<String> {
     }
 }
 
+#[derive(Deserialize, Clone)]
+struct FileRevision {
+    #[serde(rename = "headRevisionId")]
+    head_revision_id: Option<String>,
+    version: Option<String>,
+}
+
+impl FileRevision {
+    /// Drive reports `headRevisionId` for binary files and a monotonic
+    /// `version` string for everything else; either is a usable CAS token.
+    fn token(&self) -> String {
+        self.head_revision_id
+            .clone()
+            .or(self.version.clone())
+            .unwrap_or_else(|| UNKNOWN_REVISION.to_string())
+    }
+}
+
+/// Sentinel used when Drive reports no revision at all. Treated as "no usable
+/// CAS token" by callers — never as a revision that could match.
+pub const UNKNOWN_REVISION: &str = "unknown";
+
+/// Fetches just the current revision token for a file (metadata only, no
+/// content download). Used to establish a CAS baseline before a conditional
+/// write.
+pub async fn file_revision(
+    access_token: &str,
+    file_id: &str,
+) -> Result<String, (ProviderErrorKind, String)> {
+    let client = reqwest::Client::new();
+    let meta_url = format!("{DRIVE_FILES_URL}/{}?fields=headRevisionId,version", file_id);
+    let resp = client
+        .get(&meta_url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| (ProviderErrorKind::RemoteUnavailable, format!("network error: {:?}", e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let kind = map_google_http_error(status, &body);
+        return Err((kind, body));
+    }
+
+    let meta: FileRevision = resp
+        .json()
+        .await
+        .map_err(|e| (ProviderErrorKind::Unknown, format!("meta parse error: {:?}", e)))?;
+    Ok(meta.token())
+}
+
 pub async fn list_vaults(access_token: &str) -> Result<Vec<VaultDescriptor>, (ProviderErrorKind, String)> {
     let client = reqwest::Client::new();
     let url = format!(
@@ -251,32 +303,24 @@ pub async fn replace_vault(
 ) -> Result<String, (ProviderErrorKind, String)> {
     let client = reqwest::Client::new();
 
-    // For conditional write, fetch current revision and compare
+    // Conditional write: refuse unless the file is still at the revision we
+    // last observed. This is the gate that stops a stale mirror (or a stale
+    // client) from clobbering a newer Drive copy.
     if let Some(expected) = if_match_revision {
-        let meta_url = format!("{DRIVE_FILES_URL}/{}?fields=headRevisionId,version", file_id);
-        let meta_resp = client
-            .get(&meta_url)
-            .bearer_auth(access_token)
-            .send()
-            .await
-            .map_err(|e| (ProviderErrorKind::RemoteUnavailable, format!("network error: {:?}", e)))?;
-
-        if !meta_resp.status().is_success() {
-            let status = meta_resp.status();
-            let body = meta_resp.text().await.unwrap_or_default();
-            let kind = map_google_http_error(status, &body);
-            return Err((kind, body));
-        }
-        #[derive(Deserialize)]
-        struct Meta {
-            #[serde(rename = "headRevisionId")]
-            head_revision_id: Option<String>,
-            version: Option<String>,
-        }
-        let meta: Meta = meta_resp.json().await.map_err(|e| (ProviderErrorKind::Unknown, format!("meta parse error: {:?}", e)))?;
-        let current = meta.head_revision_id.or(meta.version).unwrap_or_default();
+        let current = file_revision(access_token, file_id).await?;
         if current != expected {
-            return Err((ProviderErrorKind::RemoteConflict, format!("revision mismatch: expected {}, got {}", expected, current)));
+            return Err((
+                ProviderErrorKind::RemoteConflict,
+                format!(
+                    "revision mismatch: expected {}, got {}",
+                    expected,
+                    if current == UNKNOWN_REVISION {
+                        "(none)"
+                    } else {
+                        &current
+                    }
+                ),
+            ));
         }
     }
 

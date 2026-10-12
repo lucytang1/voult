@@ -1,5 +1,6 @@
 import axios from "axios";
 import { teardownVaultSession } from "../auth/teardown";
+import { queryClient } from "./client";
 
 /**
  * Shared HTTP client for the vault API. Credentialed requests (session
@@ -16,6 +17,25 @@ export const http = axios.create({
   baseURL: process.env.EXPO_PUBLIC_API_URL || "/api",
   withCredentials: true,
 });
+
+/** Absolute or root-relative URL for a same-origin API path (e.g. the
+ * favicon proxy used as an <img> source — plain strings, not axios, so the
+ * base must be applied manually). Relative in production (same-origin serve),
+ * absolute against EXPO_PUBLIC_API_URL in split-origin dev. */
+export function apiUrl(path: string): string {
+  const base = (process.env.EXPO_PUBLIC_API_URL || "/api").replace(/\/+$/, "");
+  const clean = path.startsWith("/") ? path : `/${path}`;
+  return `${base}${clean}`;
+}
+
+/** Same-origin URL that proxies a vault icon through the backend (required:
+ * the app's COEP `require-corp` header makes the browser refuse cross-origin
+ * `<img>` loads, and favicon hosts don't send CORP). Session cookie still
+ * applies: same-origin in production; split-origin dev loads fall back to the
+ * letter tile (background <img> sends no cookies cross-origin). */
+export function proxiedFaviconUrl(iconUrl: string): string {
+  return apiUrl(`/favicon?u=${encodeURIComponent(iconUrl)}`);
+}
 
 export function isSessionRequired(error: unknown): boolean {
   return (
@@ -41,7 +61,7 @@ http.interceptors.response.use(
   (response) => response,
   (error) => {
     if (isSessionRequired(error)) {
-      void teardownVaultSession();
+      void teardownVaultSession(queryClient);
     }
     return Promise.reject(error);
   },

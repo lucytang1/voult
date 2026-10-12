@@ -27,61 +27,69 @@ async function intentFor(operation: string, payload: unknown): Promise<PendingIn
   };
 }
 
-describe("mergeVault with SSO options", () => {
-  it("creates an SSO-only item without password", async () => {
+describe("mergeVault with SSO sign-in methods", () => {
+  it("creates an SSO-only item carrying provider + account", async () => {
     const marker: VaultItem = {
       id: uuid(),
       site: "example.com",
-      ssoProviders: ["google"],
+      username: "me@gmail.com",
+      sso: [{ provider: "google", account: "me@gmail.com" }],
       origin: "https://example.com",
     };
     const res = await mergeVault([], [await intentFor("create", marker)], key);
     assert.equal(res.changed, true);
     assert.equal(res.items.length, 1);
-    assert.deepEqual(res.items[0].ssoProviders, ["google"]);
+    assert.deepEqual(res.items[0].sso, [{ provider: "google", account: "me@gmail.com" }]);
+    assert.equal(res.items[0].password, undefined);
   });
 
-  it("creates one item carrying both password and SSO", async () => {
+  it("creates one account carrying both password and an SSO method", async () => {
     const both: VaultItem = {
       id: uuid(),
       site: "example.com",
-      username: "alice",
+      username: "me@acme.com",
       password: "pw-1",
-      ssoProviders: ["google"],
+      sso: [{ provider: "google", account: "me@acme.com" }],
       origin: "https://example.com",
     };
     const res = await mergeVault([], [await intentFor("create", both)], key);
     assert.equal(res.changed, true);
     assert.equal(res.items.length, 1);
     assert.equal(res.items[0].password, "pw-1");
-    assert.deepEqual(res.items[0].ssoProviders, ["google"]);
+    assert.deepEqual(res.items[0].sso, [{ provider: "google", account: "me@acme.com" }]);
   });
 
-  it("updates replace the ssoProviders set via LWW", async () => {
+  it("updates replace the sso set via LWW", async () => {
     const base: VaultItem = {
       id: uuid(),
       site: "example.com",
-      username: "alice",
+      username: "me@acme.com",
       password: "pw-1",
-      ssoProviders: [],
+      sso: [],
       origin: "https://example.com",
     };
     const res = await mergeVault(
       [base],
-      [await intentFor("update", { id: base.id, fields: { ssoProviders: ["github"] } })],
+      [
+        await intentFor("update", {
+          id: base.id,
+          fields: { sso: [{ provider: "google", account: "me@acme.com" }] },
+        }),
+      ],
       key,
     );
-    assert.deepEqual(res.items[0].ssoProviders, ["github"]);
+    assert.deepEqual(res.items[0].sso, [{ provider: "google", account: "me@acme.com" }]);
     // Untouched fields survive the per-field merge.
-    assert.equal(res.items[0].username, "alice");
+    assert.equal(res.items[0].username, "me@acme.com");
     assert.equal(res.items[0].password, "pw-1");
   });
 
-  it("bad-provider creates are quarantined, not applied", async () => {
+  it("an sso entry with no account is quarantined, not applied", async () => {
     const bad = {
       id: uuid(),
       site: "example.com",
-      ssoProviders: ["yahoo"],
+      username: "me@gmail.com",
+      sso: [{ provider: "google" }],
       origin: "https://example.com",
     };
     const intent = await intentFor("create", bad);
@@ -89,5 +97,47 @@ describe("mergeVault with SSO options", () => {
     assert.equal(res.changed, false);
     assert.deepEqual(res.items, []);
     assert.deepEqual(res.quarantinedIds, [intent.id]);
+  });
+
+  it("an unknown provider is quarantined, not applied", async () => {
+    const bad = {
+      id: uuid(),
+      site: "example.com",
+      username: "me@yahoo.com",
+      sso: [{ provider: "yahoo", account: "me@yahoo.com" }],
+      origin: "https://example.com",
+    };
+    const intent = await intentFor("create", bad);
+    const res = await mergeVault([], [intent], key);
+    assert.equal(res.changed, false);
+    assert.deepEqual(res.items, []);
+    assert.deepEqual(res.quarantinedIds, [intent.id]);
+  });
+
+  it("two accounts on one origin stay separate items (case F)", async () => {
+    const personal: VaultItem = {
+      id: uuid(),
+      site: "notion.so",
+      username: "me@gmail.com",
+      sso: [{ provider: "google", account: "me@gmail.com" }],
+      origin: "https://notion.so",
+    };
+    const work: VaultItem = {
+      id: uuid(),
+      site: "notion.so",
+      username: "me@acme.com",
+      sso: [{ provider: "google", account: "me@acme.com" }],
+      origin: "https://notion.so",
+    };
+    const res = await mergeVault(
+      [],
+      [await intentFor("create", personal), await intentFor("create", work)],
+      key,
+    );
+    assert.equal(res.items.length, 2);
+    assert.deepEqual(
+      res.items.map((i) => i.username).sort(),
+      ["me@acme.com", "me@gmail.com"],
+    );
   });
 });

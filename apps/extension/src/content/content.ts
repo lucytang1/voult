@@ -8,6 +8,7 @@
 
 import { findLoginForms, type LoginForm } from "./detect";
 import { findOAuthButtons, highlightOffer, providerForClick, ssoProviderLabel } from "./oauth";
+import { currentFaviconUrl } from "./favicon";
 import { fillForm } from "./fill";
 import { showDropdown } from "./ui";
 import { showSaveBanner, showOAuthSaveBanner } from "./banner";
@@ -28,7 +29,26 @@ if (window.top !== window.self) {
 }
 
 function send<T>(msg: ExtensionMessage): Promise<T> {
-  return chrome.runtime.sendMessage(msg) as Promise<T>;
+  // Stale-script guard: reloading/reinstalling the extension orphans this
+  // script in already-open tabs (`chrome.runtime` goes undefined). Answer
+  // with an error value instead of throwing so every caller — which already
+  // handles `{ error }` via isErrorResponse — goes quiet, and fire-and-forget
+  // sends stay silent. The tab works again after a reload.
+  try {
+    if (globalThis.chrome?.runtime?.id === undefined) {
+      return Promise.resolve({ error: "Extension reloaded — reload this page." } as unknown as T);
+    }
+    return (globalThis.chrome.runtime.sendMessage(msg) as Promise<T>).catch(
+      (e: unknown) =>
+        ({
+          error: e instanceof Error ? e.message : "Extension unreachable.",
+        }) as unknown as T,
+    );
+  } catch (e) {
+    return Promise.resolve({
+      error: e instanceof Error ? e.message : "Extension unreachable.",
+    } as unknown as T);
+  }
 }
 
 function isErrorResponse(r: unknown): r is { error: string } {
@@ -53,8 +73,8 @@ async function requestFill(form: LoginForm | null, id: string): Promise<void> {
  *  carrying both fill the password (SSO stays visible as a badge/row). */
 async function pickMatch(form: LoginForm | null, matches: LoginMatch[], id: string): Promise<void> {
   const m = matches.find((x) => x.id === id);
-  if (m && !m.hasPassword && m.ssoProviders.length > 0) {
-    highlightOffer(m.ssoProviders[0] ?? "custom");
+  if (m && !m.hasPassword && m.sso.length > 0) {
+    highlightOffer(m.sso[0].provider);
     return;
   }
   if (form) await requestFill(form, id);
@@ -79,7 +99,7 @@ async function onFieldFocus(e: FocusEvent): Promise<void> {
   // focusing the email field still offers stored SSO options. Password-only
   // rows are excluded here — with no form there is nothing to fill.
   if (target.type === "text" || target.type === "email") {
-    const oauth = matches.filter((m) => m.ssoProviders.length > 0);
+    const oauth = matches.filter((m) => m.sso.length > 0);
     if (oauth.length === 0) return;
     showDropdown(target, oauth, {
       onPick: (id) => void pickMatch(null, matches, id),
@@ -91,7 +111,8 @@ async function onFieldFocus(e: FocusEvent): Promise<void> {
   // Worker-initiated fills (popup button / keyboard shortcut). Password fills
 // stay scoped to forms actually present in this document; passwordless picks
 // resolve to a button highlight via the worker's providers error (no form
-// needed).
+// needed). Skipped entirely in orphaned scripts (see send()).
+if (globalThis.chrome?.runtime?.id !== undefined) {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "VOULT_FILL_ONE") {
     const forms = findLoginForms();
@@ -128,6 +149,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   return false;
 });
+} // end orphaned-script guard for onMessage registration
 
 // Delegated at document level so SPA-rendered fields work with no observer.
 document.addEventListener("focusin", (e) => {
@@ -179,12 +201,22 @@ async function reportOAuthPageState(): Promise<void> {
     offers,
     hasLoginForm,
     path: window.location.pathname,
+    faviconUrl: currentFaviconUrl(),
   });
   if (isErrorResponse(res) || !res.prompt) return;
-  const { provider, origin } = res;
-  showOAuthSaveBanner(ssoProviderLabel(provider), origin, {
-    onConfirm: () => {
-      void send<{ saved: boolean }>({ type: "SAVE_OAUTH_DECISION", provider });
+  const { provider, origin, accounts } = res;
+  const pageFavicon = currentFaviconUrl();
+  // The banner never types an account for the user: it offers the ones this
+  // vault already knows for `provider`, or saves the method alone when it knows
+  // none. `account` is therefore either a vault account or "".
+  showOAuthSaveBanner(ssoProviderLabel(provider), origin, accounts, {
+    onConfirm: (account: string) => {
+      void send<{ saved: boolean }>({
+        type: "SAVE_OAUTH_DECISION",
+        provider,
+        account,
+        faviconUrl: pageFavicon,
+      });
     },
     onNever: () => {
       void send({ type: "NEVER_ORIGIN" });
@@ -229,7 +261,8 @@ function readCredential(form: LoginForm): { username: string; password: string }
 async function handleCapture(form: LoginForm): Promise<void> {
   const creds = readCredential(form);
   if (!creds || !creds.username) return;
-  const res = await send<SavePrompt | { error: string }>({ type: "LOGIN_CANDIDATE", ...creds });
+  const faviconUrl = currentFaviconUrl();
+  const res = await send<SavePrompt | { error: string }>({ type: "LOGIN_CANDIDATE", ...creds, faviconUrl });
   if (isErrorResponse(res) || !res.prompt) return;
   const { mode, origin, username } = res;
   showSaveBanner(mode, origin, username, {
@@ -239,14 +272,50 @@ async function handleCapture(form: LoginForm): Promise<void> {
         username: creds.username,
         password: creds.password,
         mode,
+        faviconUrl: currentFaviconUrl() ?? faviconUrl,
       });
     },
     onNever: () => {
       void send({ type: "NEVER_ORIGIN" });
     },
-    onDismiss: () => undefined,
+    // Explicit dismiss resolves the retained prompt too — otherwise the next
+    // page load would re-show a banner the user already rejected. A redirect
+    // without user action keeps the worker copy, so it re-shows there.
+    onDismiss: () => {
+      void send({ type: "DISMISS_PENDING_SAVE" });
+    },
   });
 }
+
+// --- Redirect survival -------------------------------------------------------
+// The banner above lives in the page DOM: a sign-in redirect destroys it
+// before the user can act. The worker retains the prompted capture (see
+// LOGIN_CANDIDATE), so every fresh page re-asks and re-shows it here. The
+// confirm uses the worker-retained secret — this page never held it.
+
+async function checkPendingSave(): Promise<void> {
+  const res = await send<SavePrompt | { error: string }>({ type: "CHECK_PENDING_SAVE" });
+  if (isErrorResponse(res) || !res.prompt) return;
+  const { mode, origin, username } = res;
+  showSaveBanner(mode, origin, username, {
+    onConfirm: () => {
+      void send<{ saved: boolean }>({
+        type: "CONFIRM_PENDING_SAVE",
+        faviconUrl: currentFaviconUrl(),
+      });
+    },
+    onNever: () => {
+      void send({ type: "NEVER_ORIGIN" });
+    },
+    onDismiss: () => {
+      void send({ type: "DISMISS_PENDING_SAVE" });
+    },
+  });
+}
+
+// Fresh document (content runs at document_idle): re-show a pre-redirect
+// prompt, if the worker still holds one for this origin.
+void checkPendingSave();
 
 document.addEventListener(
   "submit",
@@ -276,9 +345,11 @@ window.addEventListener("beforeunload", () => {
       handledOrphans.add(form.password);
     }
     // Best effort only — the page is going away; no banner, just the capture.
-    // navigator.sendMessage is unavailable; fire-and-forget runtime message.
+    // navigator.sendMessage is unavailable; fire-and-forget runtime message
+    // (safe send: no-op with an error value in orphaned scripts). The worker
+    // retains the capture so the next page can re-show the banner.
     const creds = readCredential(form);
     if (!creds || !creds.username) continue;
-    void chrome.runtime.sendMessage({ type: "LOGIN_CANDIDATE", ...creds });
+    void send({ type: "LOGIN_CANDIDATE", ...creds, faviconUrl: currentFaviconUrl() });
   }
 });
