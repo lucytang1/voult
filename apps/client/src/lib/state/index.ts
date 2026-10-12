@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { AppState, AuthState, DecryptedVault, LockMetadata, SessionState, VaultItem } from "./type";
 import { UpdateVaultItem, CreateVaultItem, DeleteVaultItem } from "../sync/type";
+import { getWebAutolockMinutes } from "../settings";
 
 const useAppStore = create<AppState>()((set) => ({
   vaultKey: null,
@@ -8,6 +9,7 @@ const useAppStore = create<AppState>()((set) => ({
   session: null,
   decryptedVault: null,
   vaultVersion: null,
+  lockEpoch: null,
   isLocked: true,
   isSyncing: false,
   lockMetadata: null,
@@ -15,8 +17,8 @@ const useAppStore = create<AppState>()((set) => ({
 
 const setVaultKey = (vaultKey: CryptoKey) => {
   // Any path that installs a key (login, signup, password unlock) ends the
-  // locked state, including its persisted flag.
-  clearLockedFlag();
+  // locked state, including its persisted record.
+  clearLockRecord();
   useAppStore.setState({ vaultKey, isLocked: false });
 };
 const setAuthKey = (authKey: CryptoKey) => useAppStore.setState({ authKey });
@@ -26,6 +28,15 @@ const updateVaultVersion = (vaultVersion: number) =>
   useAppStore.setState({ vaultVersion });
 const setSyncStatus = (isSyncing: boolean) =>
   useAppStore.setState({ isSyncing });
+/**
+ * Last server `lock_epoch` this client has converged to. Set on unlock (from
+ * the pre-unlock GET /session) and on every observed session; advanced by the
+ * POST /lock response on our own lock. Deliberately NOT cleared by
+ * lockVaultStorage — a lock must remember the epoch it just published so a
+ * stale poll can't resurrect keys. Cleared only with the session itself.
+ */
+const updateLockEpoch = (lockEpoch: number) =>
+  useAppStore.setState({ lockEpoch });
 
 // --- Auth state machine --------------------------------------------------
 //
@@ -82,33 +93,68 @@ const deleteVaultItem = (deleteitem: DeleteVaultItem) =>
 // --- Lifecycle helpers (vault-native names) ------------------------------
 
 /**
- * Lock must survive page reloads: in-memory state is lost on refresh, and
- * unlockWithDevice() would otherwise silently re-unlock the vault. A
- * sessionStorage flag marks the session as user-locked so the bootstrap
- * skips device-key auto-unlock. sessionStorage (not localStorage) means a
- * fresh browser session still requires login.
+ * A lock survives a reload only until the web autolock timeout lapses.
+ *
+ * In-memory state is lost on refresh, so without a record a reload would
+ * silently re-unlock via the device key — correct for an *expired* lock, but
+ * not for a lock the user just performed or an autolock that fired seconds ago.
+ * We therefore store the wall-clock time of the last lock instead of a boolean,
+ * and treat the lock as live only until the web autolock timeout has elapsed.
+ * "Never" (0) means the lock holds until an explicit unlock, which is the
+ * old behaviour for users who opt out of autolock.
+ *
+ * sessionStorage (not localStorage) keeps this scoped to the browser session:
+ * a fresh tab/window is a fresh storage area and gets a clean auto-unlock.
  */
-const LOCKED_FLAG_KEY = "voult.locked";
-export function persistLockedFlag() {
+const LOCKED_AT_KEY = "voult.lockedAt";
+
+/** Records the moment of a lock and returns it. */
+export function persistLockRecord(): number {
+  const lockedAt = Date.now();
   try {
-    sessionStorage.setItem(LOCKED_FLAG_KEY, "1");
+    sessionStorage.setItem(LOCKED_AT_KEY, String(lockedAt));
   } catch (e) {
-    console.warn("Failed to persist locked flag", e);
+    console.warn("Failed to persist lock record", e);
   }
+  return lockedAt;
 }
-export function clearLockedFlag() {
+
+export function clearLockRecord() {
   try {
-    sessionStorage.removeItem(LOCKED_FLAG_KEY);
+    sessionStorage.removeItem(LOCKED_AT_KEY);
   } catch {
     // ignore
   }
 }
-export function isLockedFlagSet(): boolean {
+
+function readLockRecord(): number | null {
   try {
-    return sessionStorage.getItem(LOCKED_FLAG_KEY) === "1";
+    const raw = sessionStorage.getItem(LOCKED_AT_KEY);
+    if (raw === null) return null;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) {
+      console.warn("Discarding invalid lock record", raw);
+      return null;
+    }
+    return parsed;
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * True while the most recent lock is still inside its autolock window, i.e.
+ * this reload must stay on /lock. Once the window lapses the record is dropped
+ * and the caller may attempt a silent device-key unlock.
+ */
+export function isLockStillActive(): boolean {
+  const lockedAt = readLockRecord();
+  if (lockedAt === null) return false;
+  const minutes = getWebAutolockMinutes();
+  if (minutes <= 0) return true; // autolock disabled: hold until explicit unlock
+  if (Date.now() - lockedAt < minutes * 60_000) return true;
+  clearLockRecord();
+  return false;
 }
 
 /**
@@ -122,7 +168,7 @@ export function isLockedFlagSet(): boolean {
  * caller where the query client is available.
  */
 const lockVaultStorage = (metadata: LockMetadata | null = null) => {
-  persistLockedFlag();
+  persistLockRecord();
   useAppStore.setState({
     vaultKey: null,
     authKey: null,
@@ -138,13 +184,14 @@ const lockVaultStorage = (metadata: LockMetadata | null = null) => {
  * deletion is handled by the caller (teardown path).
  */
 const clearSessionState = () => {
-  clearLockedFlag();
+  clearLockRecord();
   useAppStore.setState({
     vaultKey: null,
     authKey: null,
     session: null,
     decryptedVault: null,
     vaultVersion: null,
+    lockEpoch: null,
     isLocked: true,
     lockMetadata: null,
   });
@@ -158,11 +205,10 @@ export {
   updateDecryptedVault,
   updateVaultVersion,
   setSyncStatus,
+  updateLockEpoch,
   lockVaultStorage,
   clearSessionState,
   addVaultItem,
   updateVaultItem,
   deleteVaultItem,
 };
-export const setVaultState = (s: any) => useAppStore.setState({ vaultState: s } as any);
-export const setVaultMode = (m: any) => useAppStore.setState({ vaultMode: m } as any);

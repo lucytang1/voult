@@ -11,6 +11,8 @@ import {
 } from "../../crypto/index.web";
 import { UnlockedSession, persistDeviceSecrets, derivePasswordKeys, parseVaultJson } from "../utils";
 import { register as signupRequest } from "../../queries/SignUp/query";
+import type { RegisterRequest, RegisterResponse } from "../../queries/SignUp/api.schema";
+import { fetchSession } from "../../queries/session/query";
 
 /**
  * Signup flow — vault-scoped, no account/user:
@@ -26,6 +28,7 @@ import { register as signupRequest } from "../../queries/SignUp/query";
 export async function signupFlow(
   password: string,
   vaultJson: string,
+  sendRegistration: (payload: RegisterRequest) => Promise<RegisterResponse> = signupRequest,
 ): Promise<UnlockedSession> {
   // The vault ID is generated client-side and never derived from any identity.
   const vaultId = uuid();
@@ -42,7 +45,7 @@ export async function signupFlow(
     wrappingKey,
   );
 
-  const response = await signupRequest({
+  const response = await sendRegistration({
     vault_id: vaultId,
     vault_verifier: vaultVerifier,
     salt,
@@ -57,6 +60,16 @@ export async function signupFlow(
   // Persist the device envelope only after the server assigns the vault id.
   await persistDeviceSecrets(vaultKeyRaw, response.vault_id);
 
+  // A fresh vault starts at lock_epoch 0; read it back so the session-sync
+  // check has a baseline. Best-effort — unlock is valid regardless.
+  let lockEpoch = 0;
+  try {
+    const session = await fetchSession();
+    lockEpoch = session.lock_epoch ?? 0;
+  } catch {
+    // Offline/legacy server — sync check converges later.
+  }
+
   return {
     session: {
       vaultId: response.vault_id,
@@ -65,6 +78,7 @@ export async function signupFlow(
     vaultKey,
     decryptedVault: parseVaultJson(vaultJson),
     version: 1,
+    lockEpoch,
   };
 }
 

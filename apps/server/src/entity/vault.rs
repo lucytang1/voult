@@ -20,6 +20,10 @@ pub struct Model {
     pub crypto_version: i32,
     pub vault_key_wrap: Option<String>,
     pub vault_key_wrap_iv: Option<String>,
+    // Global lock signal for web ↔ extension consistency. Monotonic counter,
+    // bumped by POST /api/lock; peers compare it in GET /session and wipe
+    // local keys on a bump. Non-sensitive: never key material or plaintext.
+    pub lock_epoch: i32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

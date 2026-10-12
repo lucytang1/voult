@@ -35,8 +35,10 @@ Env / config (`apps/server/src/main.rs:38`): all vars optional with per-install 
 - The server runs migrations automatically on startup (`Migrator::up` in `main.rs:222`); you don't need to invoke them manually for normal dev.
 - COOP/COEP headers are required by sqlite-wasm OPFS (`SharedArrayBuffer`) — set both on the server responses (`main.rs:280` `DefaultHeaders`) and in `public/_headers`. Don't remove them.
 - Server never handles plaintext: crypto (v2 hierarchy: PBKDF2-HMAC-SHA256 → HKDF `auth`/`vault-wrap-v2` → random 256-bit vault key AES-GCM, device key wrap) lives entirely client-side in `src/lib/crypto/index.web.ts:10` and `src/lib/crypto/device-key.ts`. Cookie `voult_session` stores only `vault_id` (`session_auth.rs:6`), never keys/envelopes.
-- Client storage is **per-vault namespaced** (`apps/client/architecture.md#local-storage-namespacing`): one OPFS file per vault, one IndexedDB record per vault (`vault:<id>`), `sessionStorage["voult.locked"]` is profile-global. SQLite is opened only after a session exists (`initSQLite(vaultId)` validates UUID) and closed on lock/logout. Teardown is centralized in `src/lib/auth/teardown.ts:18` (capture vaultId → close per-vault DB → delete only this vault's device records → wipe Zustand → clear query cache) and used by home logout, lock-screen logout, and 401 interceptor (`src/lib/queries/http.ts:39`).
-- Lock semantics: `lockVaultStorage` (`src/lib/state/index.ts:124`) wipes `vaultKey`/`decryptedVault`/`authKey` but keeps session + device envelope; `persistLockedFlag()` makes lock survive reload so `_layout.tsx:35` bootstrap routes to `/lock` instead of silent `unlockWithDevice()` (`src/lib/auth/flows.ts:73`). Unlock with password unwraps locally via `LockMetadata` (no network on wrong password).
+- Client storage is **per-vault namespaced** (`apps/client/architecture.md#local-storage-namespacing`): one OPFS file per vault, one IndexedDB record per vault (`vault:<id>`), `sessionStorage["voult.lockedAt"]` is profile-global. SQLite is opened only after a session exists (`initSQLite(vaultId)` validates UUID) and closed on lock/logout. Teardown is centralized in `src/lib/auth/teardown.ts:18` (capture vaultId → close per-vault DB → delete only this vault's device records → wipe Zustand → clear query cache) and used by home logout, lock-screen logout, and 401 interceptor (`src/lib/queries/http.ts:39`).
+- Lock semantics: `lockVaultStorage` (`src/lib/state/index.ts`) wipes `vaultKey`/`decryptedVault`/`authKey` but keeps session + device envelope. Every lock (manual button, autolock, peer/extension lock) goes through the shared `lockVaultNow()` (`src/lib/auth/lock.ts`) — capture unlock metadata → `POST /lock` (bumps shared `lock_epoch`, so it locks the extension too) → wipe keys + ciphertext caches → close SQLite → `/lock`. Unlock with password unwraps locally via `LockMetadata` (no network on wrong password).
+- **A lock is a window, not a permanent flag.** `persistLockRecord()` stores the lock *timestamp* in `sessionStorage`, and `isLockStillActive()` honours it only until the web autolock timeout lapses; after that a reload falls through to silent `unlockWithDevice()` in the bootstrap (`_layout.tsx`). Setting the web autolock timer to "Never" restores the old permanent-lock behaviour. `useAutolock()` (`src/lib/auth/use-autolock.ts`, mounted in `_layout.tsx`) locks on inactivity; a hidden tab records no activity, and the timeout is re-read every tick so settings changes apply without a reload.
+- Autolock preferences live in `localStorage` (`src/lib/settings/index.ts`), not SQLite, because the deadline must be readable while locked. The web timer is enforced by the client; the extension timer is stored but **not yet delivered** to the extension (it still reads `voult.lockTimeoutMinutes` from `chrome.storage.local`) — that needs a per-vault settings record on the server the extension pulls on its next session check.
 - Client sync uses an offline-first `intent` table (durable encrypted mutation log: `operation` `create|update|delete`, `payload/payload_iv`, `device_id` per-vault, `base_version`, `synced`, `error`) with deterministic version-based conflict resolution — see `apps/client/conflict-resolution.md` and `architecture.md` before touching sync code. Merge policy `src/lib/sync/merge.ts:24` (idempotent create, LWW update, sticky delete, quarantine). Server CAS is `UPDATE … WHERE id=? AND version=?` + `rows_affected` → `409 VERSION_CONFLICT` (`src/endpoints/update_vault.rs:98`). Scheduler `src/lib/sync/sync-scheduler.ts` coalesces triggers (window-focus, online, intent-created, forced) but `useSyncTriggers` is currently disabled in `src/app/_layout.tsx:21`.
 - Google Drive sync: bindings/tokens keyed by `vault_id` (`google_token`, `cloud_binding`). OAuth under `/api/google/*`; pending-state flow bypasses bootstrap auto-restore (`_layout.tsx:31`).
 
@@ -55,6 +57,23 @@ When the user asks to "create a plan", "make a plan", "plan this", or otherwise 
 - Do not treat the chat response as the canonical copy of the plan.
 - The Markdown file should contain the complete plan.
 - Don't just transcribe the user's instructions into a plan: research the relevant code first, think through the approach, and proactively suggest alternatives or better ways to accomplish the goal (including trade-offs) before finalizing the plan.
+
+### Plan Style
+
+The taste every plan should aim for:
+
+- Research-first: read the code and docs the plan touches (`architecture.md`, `conflict-resolution.md`, roadmap) before writing. Cite evidence as `file:line` so claims are checkable.
+- Alternatives with verdicts: name the approaches considered, give each an honest trade-off, and recommend one explicitly. Rejected options stay in the plan with the reason (prevents re-litigation).
+- Concrete over abstract: a files-to-touch index (new / edit / do-not-touch), exact endpoint/payload shapes, and real function/module names — never "update the backend accordingly".
+- Trust-boundary aware: state what the change must NOT break (zero-knowledge invariants, session semantics, per-vault namespacing) and call out new attack surface with mitigations.
+- No compat baggage by default: this project has no releases — change schemas in place, no version fields, no migrations, no legacy fallbacks, unless the user explicitly asks for backward compatibility.
+- No new dependencies without justification: prefer owning small, auditable scripts over unmaintained third-party packages, especially on security-sensitive paths.
+- End with open questions: decisions deferred, each with a due-by milestone.
+
+### Phases
+
+Break implementation into ordered phases (`M0` foundations/pipeline first, then feature slices, hardening/store-readiness last). Each phase states its scope plus acceptance criteria concrete enough to verify by hand (what to click, what to observe, what must fail cleanly). Phases are the agent's execution order — each one must leave the tree working.
+
 
 ## Docs
 

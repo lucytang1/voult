@@ -87,6 +87,11 @@ export async function linkPendingGoogleToken(state: string): Promise<{ linked: b
   return res.data;
 }
 
+export async function persistGoogleBinding(input: { vault_id: string; drive_file_id: string }): Promise<{ linked: boolean }> {
+  const res = await http.post<{ linked: boolean }>("/google/binding", input);
+  return res.data;
+}
+
 export async function disconnectGoogle(): Promise<{ disconnected: boolean }> {
   const res = await http.post<{ disconnected: boolean }>("/google/disconnect");
   return res.data;
@@ -159,44 +164,71 @@ export async function deleteGoogleVault(params: {
   return res.data;
 }
 
-export async function getGoogleBinding(vaultId: string): Promise<{
+/**
+ * Real backup state for the Drive copy of a vault.
+ *
+ * `remote_revision` alone cannot answer "is my backup current?" — it is the
+ * Drive revision, not the vault version it corresponds to.
+ * `mirrored_vault_version` vs `vault_version` can, and `versions_behind` is
+ * that gap: the number of committed writes the disaster-recovery copy is
+ * missing.
+ */
+export interface GoogleBinding {
   vault_id: string;
   provider_kind: string;
   provider_account_id?: string;
   drive_file_id?: string;
   remote_revision?: string;
+  /** idle | pending | mirroring | auth_required | unlinked | conflict | error */
   sync_status: string;
-}> {
-  const res = await http.get<{
-    vault_id: string;
-    provider_kind: string;
-    provider_account_id?: string;
-    drive_file_id?: string;
-    remote_revision?: string;
-    sync_status: string;
-  }>("/google/binding", { params: { vault_id: vaultId } });
+  /** Current server vault version (the write authority). */
+  vault_version: number;
+  /** Vault version held in Drive; undefined = never mirrored. */
+  mirrored_vault_version?: number;
+  /** Committed writes the Drive copy is missing (0 = backup current). */
+  versions_behind: number;
+  last_mirrored_at?: string;
+  last_mirror_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getGoogleBinding(vaultId: string): Promise<GoogleBinding> {
+  const res = await http.get<GoogleBinding>("/google/binding", { params: { vault_id: vaultId } });
   return res.data;
 }
 
-export async function listGoogleBindings(): Promise<
-  Array<{
-    vault_id: string;
-    provider_kind: string;
-    provider_account_id?: string;
-    drive_file_id?: string;
-    remote_revision?: string;
-    sync_status: string;
-  }>
-> {
-  const res = await http.get<{ bindings: Array<{
-    vault_id: string;
-    provider_kind: string;
-    provider_account_id?: string;
-    drive_file_id?: string;
-    remote_revision?: string;
-    sync_status: string;
-  }> }>("/google/bindings");
+export async function listGoogleBindings(): Promise<GoogleBinding[]> {
+  const res = await http.get<{ bindings: GoogleBinding[] }>("/google/bindings");
   return res.data.bindings;
+}
+
+/** Result of an explicit "Back up now". Mirrors the server's discriminated union. */
+export type MirrorResult =
+  | { result: "mirrored"; vault_version: number }
+  | { result: "up_to_date"; vault_version: number }
+  | { result: "unlinked" }
+  | { result: "auth_required" }
+  | { result: "conflict" }
+  | { result: "unsupported"; reason: string }
+  | { result: "error"; code: string };
+
+/**
+ * Triggers a backup now and awaits its outcome.
+ *
+ * The automatic mirror is detached server-side, so this is the only way for the
+ * UI to learn what actually happened. It uses the same revision CAS gate, so a
+ * retry after a conflict fails again rather than overwriting a Drive copy that
+ * changed — "Back up now" means "try again", never "force overwrite".
+ */
+export async function mirrorGoogleVault(): Promise<{
+  mirror: MirrorResult;
+  binding?: GoogleBinding;
+}> {
+  const res = await http.post<{ mirror: MirrorResult; binding?: GoogleBinding }>(
+    "/google/vaults/mirror"
+  );
+  return res.data;
 }
 
 // --- Helper to detect if Google is configured ---

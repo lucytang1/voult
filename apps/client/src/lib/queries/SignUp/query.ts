@@ -10,11 +10,6 @@ export async function register(payload: RegisterRequest): Promise<RegisterRespon
 export const useSignUp = () => {
     return useMutation<RegisterResponse, Error, RegisterRequest>({
         mutationFn: register,
-        onSuccess: (data) => {
-            console.log("SignUp success", data);
-        },
-        onError: (error) => {
-            console.error("SignUp error", error);
-        },
+        gcTime: 0,
     });
 }

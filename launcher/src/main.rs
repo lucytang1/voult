@@ -8,7 +8,7 @@ use std::{
 };
 
 use tray_icon::{
-    TrayIcon, TrayIconBuilder,
+    Icon, TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuId, MenuItem},
 };
 use winit::{
@@ -422,15 +422,43 @@ impl Launcher {
         self.start_stop_id = Some(start_stop_item.id().clone());
         self.start_stop_item = Some(start_stop_item);
         self.status_item = Some(status_item);
-        self.tray_icon = Some(
-            TrayIconBuilder::new()
-                .with_title("Voult")
-                .with_tooltip("Voult server")
-                .with_menu(Box::new(menu))
-                .build()?,
-        );
+
+        // Menu-bar icon from the bundled asset. Embedded at compile time via
+        // `include_bytes!` so it works both in dev (`cargo run`) and in the
+        // bundled Voult.app (no runtime asset path to resolve).
+        // `with_icon_as_template(true)` lets macOS tint the solid-black glyph
+        // for light/dark menu bars, like a standard template image.
+        let mut builder = TrayIconBuilder::new()
+            .with_tooltip("Voult server")
+            .with_menu(Box::new(menu));
+        match Self::load_tray_icon() {
+            Some(icon) => {
+                builder = builder
+                    .with_icon(icon)
+                    .with_icon_as_template(true);
+            }
+            None => {
+                // Fallback to the old text label if the icon can't be decoded.
+                builder = builder.with_title("Voult");
+            }
+        }
+
+        self.tray_icon = Some(builder.build()?);
         self.update_menu();
         Ok(())
+    }
+
+    /// Decode `assets/voult.png` into a tray `Icon`.
+    fn load_tray_icon() -> Option<Icon> {
+        const ICON_BYTES: &[u8] = include_bytes!("../assets/voult.png");
+        let image = image::load_from_memory(ICON_BYTES)
+            .inspect_err(|error| eprintln!("Could not decode tray icon: {error}"))
+            .ok()?
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        Icon::from_rgba(image.into_raw(), width, height)
+            .inspect_err(|error| eprintln!("Could not create tray icon: {error}"))
+            .ok()
     }
 }
 

@@ -6,6 +6,9 @@ pub use sea_orm_migration::prelude::*;
 // databases (apps/server/voult.db) must be deleted and recreated. The server
 // migrates automatically on startup.
 mod m20260901_000001_vault_centric_init;
+mod m20260904_000002_vault_lock_epoch;
+mod m20260905_000003_pair_code;
+mod m20261011_000004_cloud_binding_mirror_state;
 
 pub struct Migrator;
 
@@ -14,6 +17,9 @@ impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         vec![
             Box::new(m20260901_000001_vault_centric_init::Migration),
+            Box::new(m20260904_000002_vault_lock_epoch::Migration),
+            Box::new(m20260905_000003_pair_code::Migration),
+            Box::new(m20261011_000004_cloud_binding_mirror_state::Migration),
         ]
     }
 }

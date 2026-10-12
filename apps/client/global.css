@@ -5,9 +5,11 @@
  
 @import "nativewind/theme";
 
-/* Dark background from the start - prevents white flash */
+/* Dark background from the start - prevents white flash.
+   Must match --color-ground below or the first paint flashes a different
+   black than the app then renders. */
 html, body, #root {
-  background-color: #0D0208;
+  background-color: #0C0B13;
   min-height: 100%;
 }
 
@@ -25,6 +27,46 @@ html, body, #root {
 }
 
 @theme {
-    /* Colors */
+    /* ------------------------------------------------------------------
+       Voult palette — synced from the Paper file "Voult".
 
+       The first six are the design file's own tokens (page "01 Landing - /"),
+       copied verbatim. The rest are derived steps in the same plum scene:
+       the Paper set only names six roles, but the app needs intermediate
+       surfaces (cards on panels, inputs on cards) and a *visible* accent
+       line — #3F072C is a fill colour and disappears as a border or ring
+       against #0C0B13. Derived values live here so the whole palette can be
+       retuned from one block.
+       ------------------------------------------------------------------ */
+    --color-ground: #0C0B13;      /* page background (Paper) */
+    --color-panel: #160D1B;       /* raised panel — landing action rail (Paper) */
+    --color-border: #352235;      /* hairlines, outlines (Paper) */
+    --color-primary-text: #F2F4F7;/* headings, body, button labels (Paper) */
+    --color-muted-text: #7E8590;  /* secondary copy, placeholders (Paper) */
+    --color-accent: #3F072C;      /* accent fill (Paper) */
+
+    /* Derived surfaces — each step lighter than the one it sits on.
+       These lifts are deliberately small. This palette is a dark plum
+       range, so no fill can reach the 3:1 UI-component ratio without going
+       bright magenta and breaking the mood; legibility is carried by
+       --color-primary-text (15:1 on every surface here), and controls are
+       defined by their edge, not by fill contrast. */
+    --color-card: #1E1124;        /* card on a panel */
+    --color-surface: #2E1736;     /* inputs, chips, secondary buttons */
+    --color-surface-hover: #3B1D43;
+
+    /* Derived lines. --color-border is the Paper hairline (dividers,
+       card outlines). This is the emphatic one — use it where an edge has
+       to read as a control, e.g. the primary button outline. */
+    --color-border-strong: #5E3A60;
+
+    /* Derived accent steps: hover lift, a line bright enough to read
+       as a selection ring / focus border on the dark ground, and a light
+       tint for accent-coloured TEXT. --color-accent-line is a border colour
+       only — at 2:1 on the ground it fails text contrast, hence accent-text. */
+    --color-accent-hover: #57103E;
+    --color-accent-line: #7C2A63;
+    --color-accent-text: #D89AC6;
+
+    --font-app: Inter, system-ui, sans-serif;
 }

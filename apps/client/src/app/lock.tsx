@@ -1,9 +1,10 @@
 import { useRouter } from "expo-router";
 import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
-import { useAppStore } from "@/src/lib/state";
+import { useAppStore, updateLockEpoch } from "@/src/lib/state";
 import { unlockWithPassword } from "@/src/lib/auth/flows";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
+import { fetchSession } from "@/src/lib/queries/session/query";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { Lock as LockIcon } from "lucide-react";
 
@@ -30,6 +31,14 @@ export default function Lock() {
       // Reopen this account's per-user database (closed when the vault was
       // locked) so intents/sync can resume.
       if (session?.vaultId) await initSQLite(session.vaultId);
+      // Converge to the current server epoch (a peer may have locked after
+      // our lock metadata was captured). Best-effort: unlock stays valid.
+      try {
+        const remote = await fetchSession();
+        updateLockEpoch(remote.lock_epoch ?? 0);
+      } catch {
+        // Offline/legacy server — sync check converges later.
+      }
       setPassword("");
       router.replace("/home" as any);
     } catch (err) {
@@ -41,29 +50,29 @@ export default function Lock() {
   };
 
   return (
-    <View className="flex-1 items-center justify-center bg-black px-6">
-      <View className="w-12 h-12 rounded-full bg-[#1e1e36] items-center justify-center mb-4 border border-[#2a2a4a]">
-        <LockIcon size={22} color="#a78bfa" />
+    <View className="flex-1 items-center justify-center bg-ground px-6">
+      <View className="w-12 h-12 rounded-full bg-card items-center justify-center mb-4 border border-border">
+        <LockIcon size={22} color="#D89AC6" />
       </View>
-      <Text className="text-white text-xl mb-1">Voult is locked</Text>
-      <Text className="text-gray-400 text-sm mb-6">
+      <Text className="text-primary-text text-xl mb-1">Voult is locked</Text>
+      <Text className="text-muted-text text-sm mb-6">
         {session?.vaultId ? `Vault ${session.vaultId.slice(0, 8)}…` : ""}
       </Text>
       <TextInput
-        className="w-full rounded-md bg-white px-3 py-2 mb-4"
+        className="w-full rounded-md border border-border bg-surface px-3 py-2 mb-4 text-primary-text"
         placeholder="Master password"
-        placeholderTextColor="#666"
+        placeholderTextColor="#7E8590"
         secureTextEntry
         value={password}
         onChangeText={setPassword}
         onSubmitEditing={onUnlock}
       />
       <Pressable
-        className="w-full rounded-md bg-blue-600 py-2 items-center"
+        className="w-full rounded-md bg-surface border border-border-strong py-2 items-center"
         onPress={onUnlock}
         disabled={submitting || !password}
       >
-        <Text className="text-white">{submitting ? "Unlocking..." : "Unlock"}</Text>
+        <Text className="text-primary-text">{submitting ? "Unlocking..." : "Unlock"}</Text>
       </Pressable>
       {error ? <Text className="text-red-400 mt-3">{error}</Text> : null}
     </View>

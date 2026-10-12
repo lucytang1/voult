@@ -163,6 +163,17 @@ export async function importVaultFromGoogle(args: {
   // Persist device envelope for silent unlock next time.
   await persistDeviceSecrets(vaultKeyRaw, pkg.vaultId);
 
+  // The register above established a session; record its lock epoch
+  // (fresh vault → 0) so the session-sync check has a baseline.
+  let lockEpoch = 0;
+  try {
+    const { fetchSession } = await import("../queries/session/query");
+    const session = await fetchSession();
+    lockEpoch = session.lock_epoch ?? 0;
+  } catch {
+    // Offline/legacy server — unlock still valid; sync check converges later.
+  }
+
   // Build UnlockedSession from the Drive-decrypted data.
   const parsedItems = Array.isArray(decryptedVault.items) ? decryptedVault.items : [];
   return {
@@ -170,5 +181,6 @@ export async function importVaultFromGoogle(args: {
     vaultKey,
     decryptedVault: { formatVersion: 1, vaultId: pkg.vaultId, items: parsedItems },
     version: pkg.logicalRevision ?? 1,
+    lockEpoch,
   };
 }

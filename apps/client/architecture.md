@@ -147,7 +147,8 @@ applied by another:
 | IndexedDB `voult` | Records keyed `vault:<vaultId>` | `device_key` + `device_envelope` stores in `src/lib/crypto/device-key.ts`. Logout deletes only the active vault's records. |
 | TanStack Query cache | In-memory only | Cleared on logout/401 via the centralized teardown path. |
 | Zustand store | In-memory only | Wiped on lock/logout. |
-| `sessionStorage["voult.locked"]` | Profile-global (intentional) | Locking is profile-wide semantics, not vault-specific. |
+| `sessionStorage["voult.lockedAt"]` | Profile-global (intentional) | Locking is profile-wide semantics, not vault-specific. Stores the *timestamp* of the last lock, not a boolean, so a reload stays locked only until the web autolock timeout lapses. |
+| `localStorage["voult.autolock.*"]` | Device-global | Web + extension autolock timeouts (`src/lib/settings/index.ts`). Not vault data: deliberately readable while the vault is locked, which SQLite is not. |
 
 Teardown is centralized in `src/lib/auth/teardown.ts` and used by all exit
 paths (home logout, lock-screen logout, 401 interceptor): capture the vault id →

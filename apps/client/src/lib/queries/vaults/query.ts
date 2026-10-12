@@ -1,4 +1,5 @@
 import { http } from "../http";
+import { useQuery } from "@tanstack/react-query";
 
 export interface CreateVaultRequest {
   vault_id?: string;
@@ -24,6 +25,16 @@ export interface CreateVaultResponse {
 export async function createVault(payload: CreateVaultRequest): Promise<CreateVaultResponse> {
   const res = await http.post<CreateVaultResponse>("/vaults", payload);
   return res.data;
+}
+
+/** Vault summaries are server state; keep them out of component-owned copies. */
+export function useVaultList(enabled: boolean, vaultId?: string) {
+  return useQuery({
+    queryKey: ["vaults", vaultId ?? "anonymous"],
+    queryFn: listVaults,
+    enabled,
+    staleTime: 30_000,
+  });
 }
 
 export interface VaultSummary {

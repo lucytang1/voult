@@ -24,8 +24,8 @@ export default function DebugPage() {
   return (
     <View>
       <Text>Debug Page</Text>
-      <Text className="text-white">{JSON.stringify(clientState, null, 2)}</Text>
-      <Text className="text-white">{JSON.stringify(intent, null, 2)}</Text>
+      <Text className="text-primary-text">{JSON.stringify(clientState, null, 2)}</Text>
+      <Text className="text-primary-text">{JSON.stringify(intent, null, 2)}</Text>
     </View>
   )
 }

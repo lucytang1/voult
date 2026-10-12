@@ -9,6 +9,16 @@ pub struct Model {
     pub drive_file_id: Option<String>,
     pub remote_revision: Option<String>,
     pub sync_status: String,
+    /// Server `vault.version` that the Drive copy currently corresponds to.
+    /// `None` means the binding has never been mirrored. Comparing this with the
+    /// live vault version is how a stale disaster-recovery copy is detected
+    /// without decrypting anything.
+    pub mirrored_vault_version: Option<i32>,
+    /// ISO UTC timestamp of the last successful Drive write.
+    pub last_mirrored_at: Option<String>,
+    /// Short provider error code from the last failed mirror attempt. Never a
+    /// provider response body, token, or ciphertext.
+    pub last_mirror_error: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }
