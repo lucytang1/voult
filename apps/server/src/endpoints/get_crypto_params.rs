@@ -44,11 +44,7 @@ pub async fn get_crypto_params(
         );
     }
     if uuid::Uuid::parse_str(&request.vault_id).is_err() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid vault_id",
-            "INVALID_INPUT",
-        );
+        return error_response(StatusCode::BAD_REQUEST, "invalid vault_id", "INVALID_INPUT");
     }
 
     let vault = match Vaults::find()

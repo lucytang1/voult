@@ -1,30 +1,36 @@
-//! Out-of-band Drive mirroring: the disaster-recovery copy.
+//! Out-of-band provider mirroring: the disaster-recovery copy.
+//!
+//! This module is provider-neutral. It knows the vault's version, the binding's
+//! watermark, and the rules for refusing to clobber; it does not know what a
+//! Drive is. Everything provider-specific goes through
+//! [`crate::cloud::provider::CloudProvider`].
 //!
 //! # Model
 //!
-//! **The server is the write authority. Drive is the disaster-recovery copy.**
+//! **The server is the write authority. A provider is the disaster-recovery
+//! copy.**
 //!
 //! `/update_vault` commits a vault write with an atomic version CAS and returns.
-//! It never waits on Google, never fails because Google is down, and never
-//! makes a vault write conditional on Drive. Immediately *after* the commit we
-//! spawn a detached mirror task that re-writes the Drive copy.
+//! It never waits on a provider, never fails because one is down, and never
+//! makes a vault write conditional on one. Immediately *after* the commit we
+//! spawn a detached mirror task that re-writes the provider copy.
 //!
 //! # Safety properties
 //!
 //! * **Never blocking, never failing the write.** The mirror is spawned with
 //!   `actix_web::rt::spawn` after the CAS succeeds. Every failure path is logged
 //!   and folded into `cloud_binding` state; none can affect `/update_vault`.
-//! * **Cannot clobber a newer Drive copy.** The write is conditional on
-//!   `cloud_binding.remote_revision` — the revision *we* last observed ourselves
-//!   (`drive::replace_vault` honours `if_match_revision`). If the Drive file
-//!   moved underneath us (restored elsewhere, edited by another client, changed
-//!   by hand) the CAS fails, we record `REMOTE_CONFLICT`, and we do **not**
-//!   overwrite. Overwriting is a separate, explicit, user-initiated act.
+//! * **Cannot clobber a newer provider copy.** The write is conditional on
+//!   `cloud_binding.remote_revision` — the revision *we* last observed ourselves,
+//!   passed as `if_match` to [`crate::cloud::provider::CloudProvider::conditional_write`].
+//!   If the remote file moved underneath us (restored elsewhere, edited by another
+//!   client, changed by hand) the CAS fails, we record `REMOTE_CONFLICT`, and we
+//!   do **not** overwrite. Overwriting is a separate, explicit, user-initiated act.
 //! * **Coalesced.** A burst of vault writes collapses into a bounded number of
-//!   Drive writes. Sync pushes can land back-to-back while a user edits; without
-//!   coalescing each push would cost a Drive round trip and burn quota.
+//!   provider writes. Sync pushes can land back-to-back while a user edits;
+//!   without coalescing each push would cost a round trip and burn quota.
 //! * **Zero-knowledge.** The mirror only re-serializes ciphertext the server
-//!   already stores (see [`crate::google::package`]). No key is derived,
+//!   already stores (see [`crate::cloud::package`]). No key is derived,
 //!   unwrapped, or decrypted here, and no plaintext, verifier, or token is
 //!   logged.
 //!
@@ -33,29 +39,31 @@
 //! `cloud_binding.sync_status`, `mirrored_vault_version`, and
 //! `last_mirror_error` carry the real backup state that Settings renders:
 //!
-//! | `sync_status`   | meaning                                            |
-//! |-----------------|----------------------------------------------------|
-//! | `idle`          | Drive matches the committed server vault            |
-//! | `pending`       | vault committed, mirror queued                      |
-//! | `mirroring`     | mirror in flight                                   |
-//! | `auth_required` | Google token missing/expired — reconnect required   |
-//! | `unlinked`      | no usable Drive file bound to this vault            |
-//! | `conflict`      | Drive moved; copy preserved, never overwritten      |
-//! | `error`         | transient provider failure; retried on next write  |
+//! | `sync_status`   | meaning                                                     |
+//! |-----------------|-------------------------------------------------------------|
+//! | `idle`          | the provider copy matches the committed server vault        |
+//! | `pending`       | vault committed, mirror queued                              |
+//! | `mirroring`     | mirror in flight                                            |
+//! | `auth_required` | credential missing/expired, or provider unconfigured        |
+//! | `unlinked`      | no usable remote file bound to this vault                   |
+//! | `conflict`      | remote copy moved; preserved, never overwritten             |
+//! | `error`         | transient provider failure; retried on next write           |
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use actix_web::rt;
 use chrono::{SecondsFormat, Utc};
 use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
+use crate::cloud::error::{ProviderError, ProviderErrorKind};
+use crate::cloud::provider::{self, CloudProvider, ProviderKind};
+use crate::cloud::{package, token_store};
 use crate::db::DbPool;
 use crate::entity::cloud_binding::{self, Entity as CloudBindingEntity};
 use crate::entity::vault::{self, Entity as VaultEntity};
-use crate::google::error::ProviderErrorKind;
-use crate::google::{drive, package, token_store};
 
 pub const STATUS_IDLE: &str = "idle";
 pub const STATUS_PENDING: &str = "pending";
@@ -65,9 +73,16 @@ pub const STATUS_UNLINKED: &str = "unlinked";
 pub const STATUS_CONFLICT: &str = "conflict";
 pub const STATUS_ERROR: &str = "error";
 
+/// A binding with no provider file id. Provider-neutral: the id is opaque, and
+/// only the provider that issued it can interpret it.
+const ERR_NO_REMOTE_FILE: &str = "NO_REMOTE_FILE";
+/// The `cloud_binding.provider_kind` column names a provider this build does
+/// not implement. Never fall back to a default provider here.
+const ERR_UNKNOWN_PROVIDER: &str = "UNKNOWN_PROVIDER";
+
 /// Vaults with a mirror currently running, mapped to "another vault write
 /// landed while this mirror was in flight". Stops a burst of vault writes from
-/// spawning a Drive write each.
+/// spawning a provider write each.
 static IN_FLIGHT: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
 
 /// Try to become the single mirror for `vault_id`. Returns `true` when the
@@ -110,24 +125,25 @@ fn settle(vault_id: &str) -> bool {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "result")]
 pub enum MirrorOutcome {
-    /// Drive now holds the committed server vault.
+    /// The provider now holds the committed server vault.
     #[serde(rename = "mirrored")]
     Mirrored { vault_version: i32 },
-    /// Drive already held this exact version — nothing was written.
+    /// The provider already held this exact version — nothing was written.
     #[serde(rename = "up_to_date")]
     UpToDate { vault_version: i32 },
-    /// This vault has no Drive binding, so there is nothing to mirror to.
+    /// This vault has no provider binding, so there is nothing to mirror to.
     #[serde(rename = "unlinked")]
     Unlinked,
-    /// Google authorization is missing or expired; the user must reconnect.
+    /// The credential is missing or expired, or the provider is not configured
+    /// on this server. Either way the user must reconnect.
     #[serde(rename = "auth_required")]
     AuthRequired,
-    /// The Drive file changed since our last observed revision. Preserved, not
+    /// The remote file changed since our last observed revision. Preserved, not
     /// overwritten — resolving this is an explicit user action.
     #[serde(rename = "conflict")]
     Conflict,
-    /// The vault has no password-wrapped envelope, so a Drive copy would not be
-    /// restorable on a new device.
+    /// The vault has no password-wrapped envelope, so a provider copy would not
+    /// be restorable on a new device.
     #[serde(rename = "unsupported")]
     Unsupported { reason: String },
     /// Transient provider failure; retried on the next vault write.
@@ -138,14 +154,14 @@ pub enum MirrorOutcome {
 /// Spawn a detached mirror for `vault_id`. Returns immediately.
 ///
 /// Called after `/update_vault` commits. Must never be awaited by the request
-/// path: the vault write is already durably accepted, and a Drive outage must
+/// path: the vault write is already durably accepted, and a provider outage must
 /// not turn a successful write into an error or a slow response.
 pub fn spawn_after_commit(pool: DbPool, vault_id: String) {
     if !claim(&vault_id) {
         // A mirror is already running for this vault. Its trailing re-check
         // picks up the version we just committed, so dropping this request is
         // safe and keeps a burst of writes to one upload.
-        log::debug!("Drive mirror already in flight for vault; coalescing");
+        log::debug!("Mirror already in flight for vault; coalescing");
         return;
     }
     rt::spawn(async move {
@@ -161,10 +177,54 @@ pub fn spawn_after_commit(pool: DbPool, vault_id: String) {
             }
         }
         log::debug!(
-            "Drive mirror pass limit reached for vault {}; leaving any newer version to the next vault write",
+            "Mirror pass limit reached for vault {}; leaving any newer version to the next vault write",
             short_id(&vault_id)
         );
     });
+}
+
+/// Recover level-triggered mirror work after a crash and retry provider
+/// failures periodically even if the vault receives no further writes.
+pub fn start_sweeper(pool: DbPool) {
+    rt::spawn(async move {
+        let mut tick = rt::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            sweep_pending(&pool).await;
+        }
+    });
+}
+
+/// A binding is owed a mirror exactly while its watermark trails the server
+/// vault version. No retry queue or extra durable state is needed.
+pub async fn sweep_pending(pool: &DbPool) {
+    let bindings = match CloudBindingEntity::find()
+        .filter(cloud_binding::Column::RemoteFileId.is_not_null())
+        .all(pool)
+        .await
+    {
+        Ok(bindings) => bindings,
+        Err(err) => {
+            log::error!("cloud mirror sweeper could not load bindings: {err}");
+            return;
+        }
+    };
+    for binding in bindings {
+        let vault = match VaultEntity::find_by_id(binding.vault_id.clone())
+            .one(pool)
+            .await
+        {
+            Ok(Some(vault)) => vault,
+            Ok(None) => continue,
+            Err(err) => {
+                log::warn!("cloud mirror sweeper could not read vault version: {err}");
+                continue;
+            }
+        };
+        if binding.mirrored_vault_version != Some(vault.version) {
+            spawn_after_commit(pool.clone(), binding.vault_id);
+        }
+    }
 }
 
 /// Upper bound on coalesced passes per spawned mirror. Each pass only runs when
@@ -179,7 +239,7 @@ const MAX_MIRROR_PASSES: usize = 8;
 pub async fn mark_pending(pool: &DbPool, vault_id: &str) {
     let has_binding = CloudBindingEntity::find()
         .filter(cloud_binding::Column::VaultId.eq(vault_id))
-        .filter(cloud_binding::Column::DriveFileId.is_not_null())
+        .filter(cloud_binding::Column::RemoteFileId.is_not_null())
         .one(pool)
         .await
         .map(|r| r.is_some())
@@ -190,7 +250,7 @@ pub async fn mark_pending(pool: &DbPool, vault_id: &str) {
     set_status(pool, vault_id, STATUS_PENDING, None).await;
 }
 
-/// Mirror the committed vault to Drive now, awaiting the result.
+/// Mirror the committed vault to the provider now, awaiting the result.
 ///
 /// For the explicit "Back up now" user action. Respects the same CAS gate as
 /// the automatic path, so a manual retry after a conflict fails again until the
@@ -231,8 +291,8 @@ async fn attempt(pool: &DbPool, vault_id: &str) -> Attempt {
     {
         Ok(Some(b)) => b,
         Ok(None) => {
-            // No Drive binding: this vault is local-only. Not an error.
-            log::debug!("No Drive binding for vault; nothing to mirror");
+            // No provider binding: this vault is local-only. Not an error.
+            log::debug!("No provider binding for vault; nothing to mirror");
             return Attempt::Unlinked;
         }
         Err(e) => {
@@ -241,8 +301,21 @@ async fn attempt(pool: &DbPool, vault_id: &str) -> Attempt {
         }
     };
 
-    let Some(file_id) = binding.drive_file_id.clone() else {
-        set_status(pool, vault_id, STATUS_UNLINKED, Some("NO_DRIVE_FILE")).await;
+    // Resolve which provider this vault is bound to. A value we cannot parse is
+    // a real fault (the database holds a provider this build does not know), and
+    // it must NOT silently fall back to a default: mirroring to the wrong
+    // account would copy a vault to a provider the user never chose.
+    let kind = match ProviderKind::parse(&binding.provider_kind) {
+        Ok(k) => k,
+        Err(e) => {
+            log::error!("unrecognized provider in cloud binding: {}", e.0);
+            set_status(pool, vault_id, STATUS_ERROR, Some(ERR_UNKNOWN_PROVIDER)).await;
+            return Attempt::Failed(ERR_UNKNOWN_PROVIDER.to_string());
+        }
+    };
+
+    let Some(file_id) = binding.remote_file_id.clone() else {
+        set_status(pool, vault_id, STATUS_UNLINKED, Some(ERR_NO_REMOTE_FILE)).await;
         return Attempt::Unlinked;
     };
 
@@ -259,8 +332,20 @@ async fn attempt(pool: &DbPool, vault_id: &str) -> Attempt {
         }
     };
 
-    // Already backed up at this exact version: skip the Drive round trip
-    // entirely, so a re-check costs one indexed read.
+    // A current watermark does not prove a usable credential still exists:
+    // disconnect deliberately preserves the binding. Check the indexed token
+    // row first so Settings cannot report "up to date" after credentials were
+    // removed. This performs no provider request unless refresh is due.
+    let access_token = match token_store::get_valid_access_token(pool, kind, vault_id).await {
+        Ok(t) => t,
+        Err(_) => {
+            set_status(pool, vault_id, STATUS_AUTH_REQUIRED, None).await;
+            return Attempt::AuthRequired;
+        }
+    };
+
+    // Already backed up at this exact version: no package serialization or
+    // provider file request is needed once the credential is known to exist.
     if binding.mirrored_vault_version == Some(vault_row.version) {
         return Attempt::UpToDate(vault_row.version);
     }
@@ -271,7 +356,7 @@ async fn attempt(pool: &DbPool, vault_id: &str) -> Attempt {
         Ok(b) => b,
         Err(reason) => {
             log::warn!(
-                "Drive mirror skipped for vault {}: no restorable package ({})",
+                "Mirror skipped for vault {}: no restorable package ({})",
                 short_id(vault_id),
                 reason
             );
@@ -280,46 +365,56 @@ async fn attempt(pool: &DbPool, vault_id: &str) -> Attempt {
         }
     };
 
-    // Google access token (refreshed when near expiry). Missing/expired is a
-    // user action, not a vault-write failure.
-    let access_token = match token_store::get_valid_access_token(pool, vault_id).await {
-        Ok(t) => t,
-        Err(_) => {
+    set_status(pool, vault_id, STATUS_MIRRORING, None).await;
+
+    // Resolve the provider implementation. A binding can name a provider this
+    // build knows but cannot configure (missing credentials) — that is
+    // `auth_required`, not a mirror bug.
+    let impl_ = match provider::provider(kind) {
+        Some(p) => p,
+        None => {
+            log::warn!(
+                "vault {} is bound to {}, which is not configured on this server",
+                short_id(vault_id),
+                kind
+            );
             set_status(pool, vault_id, STATUS_AUTH_REQUIRED, None).await;
             return Attempt::AuthRequired;
         }
     };
 
-    set_status(pool, vault_id, STATUS_MIRRORING, None).await;
-
-    // The CAS baseline: the last Drive revision *we* observed. If the binding
-    // never recorded one (e.g. a binding adopted from an import), read the
-    // current revision first — a metadata read plus a conditional write is
-    // strictly safer than writing blind, and still refuses to clobber a copy
-    // that moves between the read and the write.
-    let expected = match resolve_baseline(pool, vault_id, &access_token, &file_id, &binding).await
-    {
-        Ok(rev) => rev,
-        Err(code) => {
-            set_status(pool, vault_id, STATUS_ERROR, Some(code.as_str())).await;
-            return Attempt::Failed(code);
-        }
-    };
+    // The CAS baseline: the last revision *we* observed. If the binding never
+    // recorded one (e.g. a binding adopted from an import), read the current
+    // revision first — a metadata read plus a conditional write is strictly
+    // safer than writing blind, and still refuses to clobber a copy that moves
+    // between the read and the write.
+    let expected =
+        match resolve_baseline(&impl_, pool, vault_id, &access_token, &file_id, &binding).await {
+            Ok(rev) => rev,
+            Err(code) => {
+                set_status(pool, vault_id, STATUS_ERROR, Some(code.as_str())).await;
+                return Attempt::Failed(code);
+            }
+        };
     let expected = expected.as_deref();
 
-    match drive::replace_vault(&access_token, &file_id, &package_bytes, expected).await {
+    match impl_
+        .conditional_write(&access_token, &file_id, &package_bytes, expected)
+        .await
+    {
         Ok(new_rev) => {
             log::info!(
-                "Mirrored vault to Drive (vault_version={}, revision={})",
+                "Mirrored vault to {} (vault_version={}, revision={})",
+                kind,
                 vault_row.version,
                 short_id(&new_rev)
             );
             mark_mirrored(pool, vault_id, vault_row.version, Some(&new_rev)).await;
             Attempt::Mirrored(vault_row.version)
         }
-        Err((kind, msg)) => {
-            handle_drive_error(pool, vault_id, vault_row.version, &kind, &msg).await;
-            match kind {
+        Err(err) => {
+            handle_provider_error(pool, vault_id, vault_row.version, &err).await;
+            match err.kind {
                 ProviderErrorKind::AuthRequired => Attempt::AuthRequired,
                 ProviderErrorKind::RemoteConflict => Attempt::Conflict,
                 ProviderErrorKind::RemoteDeleted | ProviderErrorKind::VaultNotFound => {
@@ -331,9 +426,10 @@ async fn attempt(pool: &DbPool, vault_id: &str) -> Attempt {
     }
 }
 
-/// The revision to condition the Drive write on. Normally the one recorded on
-/// the binding; read live only when the binding has none.
+/// The revision to condition the write on. Normally the one recorded on the
+/// binding; read live only when the binding has none.
 async fn resolve_baseline(
+    impl_: &provider::AnyProvider,
     pool: &DbPool,
     vault_id: &str,
     access_token: &str,
@@ -343,24 +439,33 @@ async fn resolve_baseline(
     if let Some(rev) = binding.remote_revision.as_deref() {
         return Ok(Some(rev.to_string()));
     }
-    match drive::file_revision(access_token, file_id).await {
-        Ok(rev) if rev != drive::UNKNOWN_REVISION => {
+    // Read the provider's revision. Three distinct outcomes:
+    //   Err(..)      → the read failed (network, auth, file gone)
+    //   Ok(Err(..))  → the file exists but reports no usable revision: refuse
+    //   Ok(Ok(rev))  → a real revision we can condition on
+    match impl_.file_revision(access_token, file_id).await {
+        Ok(Ok(rev)) => {
             // Persist it so subsequent mirrors condition on the stored value.
             let _ = CloudBindingEntity::update_many()
-                .col_expr(cloud_binding::Column::RemoteRevision, Expr::value(Some(rev.clone())))
+                .col_expr(
+                    cloud_binding::Column::RemoteRevision,
+                    Expr::value(Some(rev.clone())),
+                )
                 .filter(cloud_binding::Column::VaultId.eq(vault_id))
                 .exec(pool)
                 .await;
             Ok(Some(rev))
         }
-        // "unknown" is not a usable CAS token: conditioning on it would match
-        // any file, defeating the gate. Refuse rather than write blind.
-        Ok(_) => Err("REMOTE_REVISION_UNAVAILABLE".to_string()),
-        Err((kind, _)) => Err(kind.code().to_string()),
+        // An absent revision is not a usable CAS token: conditioning on it would
+        // match any file, defeating the gate. Refuse rather than write blind.
+        Ok(Err(_no_revision)) => Err(ProviderErrorKind::RemoteRevisionUnavailable
+            .code()
+            .to_string()),
+        Err(err) => Err(err.code().to_string()),
     }
 }
 
-/// Record that the Drive copy is current at `vault_version`.
+/// Record that the provider copy is current at `vault_version`.
 ///
 /// `remote_revision` of `None` leaves the stored revision untouched (used when
 /// the binding's revision is already correct).
@@ -380,9 +485,15 @@ pub async fn mark_mirrored(
             cloud_binding::Column::LastMirroredAt,
             Expr::value(Some(now.to_rfc3339_opts(SecondsFormat::Secs, true))),
         )
-        .col_expr(cloud_binding::Column::LastMirrorError, Expr::value(None::<String>))
+        .col_expr(
+            cloud_binding::Column::LastMirrorError,
+            Expr::value(None::<String>),
+        )
         .col_expr(cloud_binding::Column::SyncStatus, Expr::value(STATUS_IDLE))
-        .col_expr(cloud_binding::Column::UpdatedAt, Expr::value(sea_orm::Value::ChronoDateTimeUtc(Some(now))))
+        .col_expr(
+            cloud_binding::Column::UpdatedAt,
+            Expr::value(sea_orm::Value::ChronoDateTimeUtc(Some(now))),
+        )
         .filter(cloud_binding::Column::VaultId.eq(vault_id));
     if let Some(rev) = remote_revision {
         update = update.col_expr(
@@ -395,46 +506,45 @@ pub async fn mark_mirrored(
     }
 }
 
-async fn handle_drive_error(
+async fn handle_provider_error(
     pool: &DbPool,
     vault_id: &str,
     vault_version: i32,
-    kind: &ProviderErrorKind,
-    msg: &str,
+    err: &ProviderError,
 ) {
-    match kind {
+    match &err.kind {
         ProviderErrorKind::AuthRequired => {
             set_status(pool, vault_id, STATUS_AUTH_REQUIRED, None).await;
         }
         ProviderErrorKind::RemoteConflict => {
-            // The Drive copy is newer than what we last saw. Deliberately do NOT
+            // The remote copy is newer than what we last saw. Deliberately do NOT
             // advance `mirrored_vault_version` — claiming the backup is current
-            // would hide a real divergence between the server and Drive.
+            // would hide a real divergence between the server and the provider.
             log::warn!(
-                "Drive mirror conflict for vault {} (server at version {}): the Drive copy changed since last sync; not overwriting",
+                "Mirror conflict for vault {} (server at version {}): the remote copy changed since last sync; not overwriting",
                 short_id(vault_id),
                 vault_version
             );
-            set_status(pool, vault_id, STATUS_CONFLICT, Some(kind.code())).await;
+            set_status(pool, vault_id, STATUS_CONFLICT, Some(err.code())).await;
         }
         ProviderErrorKind::RemoteDeleted | ProviderErrorKind::VaultNotFound => {
             log::warn!(
-                "Drive backup for vault {} is missing; the local vault at version {} is unaffected",
+                "Remote backup for vault {} is missing; the local vault at version {} is unaffected",
                 short_id(vault_id),
                 vault_version
             );
-            set_status(pool, vault_id, STATUS_UNLINKED, Some(kind.code())).await;
+            set_status(pool, vault_id, STATUS_UNLINKED, Some(err.code())).await;
         }
         other => {
             // Transient (rate limit, provider 5xx, network). The local vault is
             // committed and correct; only the DR copy is behind, and the next
             // vault write retries.
             log::warn!(
-                "Drive mirror failed for vault {} at version {}: {} ({})",
+                "Mirror failed for vault {} at version {}: {} ({})",
                 short_id(vault_id),
                 vault_version,
                 other.code(),
-                msg
+                err.detail()
             );
             set_status(pool, vault_id, STATUS_ERROR, Some(other.code())).await;
         }
@@ -446,7 +556,10 @@ async fn set_status(pool: &DbPool, vault_id: &str, status: &str, error: Option<&
     let now = Utc::now();
     let mut update = CloudBindingEntity::update_many()
         .col_expr(cloud_binding::Column::SyncStatus, Expr::value(status))
-        .col_expr(cloud_binding::Column::UpdatedAt, Expr::value(sea_orm::Value::ChronoDateTimeUtc(Some(now))))
+        .col_expr(
+            cloud_binding::Column::UpdatedAt,
+            Expr::value(sea_orm::Value::ChronoDateTimeUtc(Some(now))),
+        )
         .filter(cloud_binding::Column::VaultId.eq(vault_id));
     if let Some(code) = error {
         update = update.col_expr(
@@ -459,13 +572,18 @@ async fn set_status(pool: &DbPool, vault_id: &str, status: &str, error: Option<&
     }
 }
 
-/// Records that the Drive copy corresponds to `vault_version` **without**
+/// Records that the provider copy corresponds to `vault_version` **without**
 /// claiming a revision.
 ///
-/// Used when a Drive package is adopted as the local vault (import/enrollment):
-/// the Drive copy *is* the source of truth there, so no upload is needed — but
-/// the revision was never recorded, so the next automatic mirror reads a live
+/// Used when a provider package is adopted as the local vault (import): the
+/// remote copy *is* the source of truth there, so no upload is needed — but no
+/// revision was recorded either, so the next automatic mirror reads a live
 /// baseline before its first conditional write rather than writing blind.
+///
+/// Currently unreferenced: the import path records adoption through
+/// `POST /cloud/binding`. Kept because it is the correct primitive for that
+/// path, and deleting it would only defer the same reasoning to the next change.
+#[allow(dead_code)]
 pub async fn mark_adopted(pool: &DbPool, vault_id: &str, vault_version: i32) {
     let now = Utc::now();
     let _ = CloudBindingEntity::update_many()
@@ -473,31 +591,56 @@ pub async fn mark_adopted(pool: &DbPool, vault_id: &str, vault_version: i32) {
             cloud_binding::Column::MirroredVaultVersion,
             Expr::value(Some(vault_version)),
         )
-        .col_expr(cloud_binding::Column::LastMirroredAt, Expr::value(Some(now.to_rfc3339_opts(SecondsFormat::Secs, true))))
-        .col_expr(cloud_binding::Column::LastMirrorError, Expr::value(None::<String>))
+        .col_expr(
+            cloud_binding::Column::LastMirroredAt,
+            Expr::value(Some(now.to_rfc3339_opts(SecondsFormat::Secs, true))),
+        )
+        .col_expr(
+            cloud_binding::Column::LastMirrorError,
+            Expr::value(None::<String>),
+        )
         .col_expr(cloud_binding::Column::SyncStatus, Expr::value(STATUS_IDLE))
-        .col_expr(cloud_binding::Column::UpdatedAt, Expr::value(sea_orm::Value::ChronoDateTimeUtc(Some(now))))
+        .col_expr(
+            cloud_binding::Column::UpdatedAt,
+            Expr::value(sea_orm::Value::ChronoDateTimeUtc(Some(now))),
+        )
         .filter(cloud_binding::Column::VaultId.eq(vault_id))
         .exec(pool)
         .await;
 }
 
 /// First 8 characters of an identifier, for logs. Enough to correlate, and it
-/// is a public UUID or an opaque Drive revision — never key material.
+/// is a public UUID or an opaque provider revision — never key material.
 fn short_id(id: &str) -> &str {
     &id[..8.min(id.len())]
 }
 
 /// Used by the enrollment path to learn the revision it just created, so the
 /// first automatic mirror has a real CAS baseline.
-pub async fn observe_remote_revision(pool: &DbPool, vault_id: &str, file_id: &str) -> Option<String> {
-    let token = token_store::get_valid_access_token(pool, vault_id).await.ok()?;
-    let rev = drive::file_revision(&token, file_id).await.ok()?;
-    if rev == drive::UNKNOWN_REVISION {
-        return None;
-    }
+///
+/// Unreferenced today: enrollment records the returned revision directly on the
+/// binding. Retained because it is the only way to establish a baseline when a
+/// provider's create call does not report one.
+#[allow(dead_code)]
+pub async fn observe_remote_revision(
+    pool: &DbPool,
+    kind: ProviderKind,
+    vault_id: &str,
+    file_id: &str,
+) -> Option<String> {
+    let token = token_store::get_valid_access_token(pool, kind, vault_id)
+        .await
+        .ok()?;
+    let impl_ = provider::provider(kind)?;
+    // `None` for either "the read failed" or "no usable revision": in both cases
+    // there is no baseline to record, and recording a placeholder would let a
+    // later conditional write match nothing.
+    let rev = impl_.file_revision(&token, file_id).await.ok()?.ok()?;
     let _ = CloudBindingEntity::update_many()
-        .col_expr(cloud_binding::Column::RemoteRevision, Expr::value(Some(rev.clone())))
+        .col_expr(
+            cloud_binding::Column::RemoteRevision,
+            Expr::value(Some(rev.clone())),
+        )
         .filter(cloud_binding::Column::VaultId.eq(vault_id))
         .exec(pool)
         .await;
@@ -514,9 +657,7 @@ mod tests {
     async fn test_pool() -> DbPool {
         // In-memory SQLite, migrated to the current schema so the tests exercise
         // the real columns rather than a hand-rolled approximation.
-        let pool = Database::connect("sqlite::memory:")
-            .await
-            .expect("connect");
+        let pool = Database::connect("sqlite::memory:").await.expect("connect");
         migration::Migrator::up(&pool, None).await.expect("migrate");
         pool
     }
@@ -544,11 +685,29 @@ mod tests {
         let am = cloud_binding::ActiveModel {
             vault_id: Set(id.to_string()),
             provider_kind: Set("google_drive".to_string()),
-            drive_file_id: Set(file_id.map(|s| s.to_string())),
+            remote_file_id: Set(file_id.map(|s| s.to_string())),
             sync_status: Set(STATUS_IDLE.to_string()),
             ..Default::default()
         };
         am.insert(pool).await.expect("insert binding");
+    }
+
+    async fn seed_usable_token(pool: &DbPool, id: &str) {
+        use crate::entity::cloud_token;
+        use sea_orm::Set;
+        let am = cloud_token::ActiveModel {
+            vault_id: Set(id.to_string()),
+            provider_kind: Set("google_drive".to_string()),
+            access_token: Set("test-access-token".to_string()),
+            refresh_token: Set(None),
+            token_type: Set("Bearer".to_string()),
+            expires_at: Set(chrono::Utc::now().timestamp() + 3600),
+            scope: Set(None),
+            provider_account_id: Set(None),
+            provider_email: Set(None),
+            ..Default::default()
+        };
+        am.insert(pool).await.expect("insert token");
     }
 
     async fn load_binding(pool: &DbPool, id: &str) -> cloud_binding::Model {
@@ -559,13 +718,20 @@ mod tests {
             .expect("binding exists")
     }
 
-    /// The CAS gate must never pass `None` through to `replace_vault` when the
-    /// Drive revision is unknown — an unconditional write could clobber a newer
-    /// copy, which is exactly what this module exists to prevent.
+    /// The mirror must refuse to mirror when the provider cannot produce a
+    /// revision token. The sentinel's *value* is Drive's business and is pinned
+    /// in its own implementation; what this module must guarantee is that it
+    /// never turns "no revision" into "any revision matches".
     #[test]
-    fn unknown_revision_is_not_usable_as_a_baseline() {
-        assert_eq!(drive::UNKNOWN_REVISION, "unknown");
-        assert_ne!(drive::UNKNOWN_REVISION, "");
+    fn no_revision_is_not_a_usable_baseline() {
+        use crate::cloud::provider::NoRevision;
+        // Distinct from a real revision, so `resolve_baseline` can tell them
+        // apart and refuse instead of writing blind.
+        assert_ne!(
+            NoRevision.to_string(),
+            "rev-1",
+            "an absent revision must never compare equal to a real one"
+        );
     }
 
     /// The handoff between concurrent writers must be race-free: a write that
@@ -649,7 +815,10 @@ mod tests {
 
         mark_pending(&pool, "v-bound").await;
 
-        assert_eq!(load_binding(&pool, "v-bound").await.sync_status, STATUS_PENDING);
+        assert_eq!(
+            load_binding(&pool, "v-bound").await.sync_status,
+            STATUS_PENDING
+        );
     }
 
     /// The watermark must advance together with the status, and the error must
@@ -672,7 +841,7 @@ mod tests {
     }
 
     /// The conflict path must NOT advance the watermark. Claiming the backup is
-    /// current when Drive has diverged is precisely the silent-staleness bug
+    /// current when the provider has diverged is precisely the silent-staleness bug
     /// this work exists to remove.
     #[tokio::test]
     async fn conflict_does_not_advance_the_watermark() {
@@ -681,14 +850,8 @@ mod tests {
         seed_binding(&pool, "v-conflict", Some("file-1")).await;
         mark_mirrored(&pool, "v-conflict", 5, Some("rev-1")).await;
 
-        handle_drive_error(
-            &pool,
-            "v-conflict",
-            9,
-            &ProviderErrorKind::RemoteConflict,
-            "revision mismatch",
-        )
-        .await;
+        let err = ProviderError::new(ProviderErrorKind::RemoteConflict, "revision mismatch");
+        handle_provider_error(&pool, "v-conflict", 9, &err).await;
 
         let b = load_binding(&pool, "v-conflict").await;
         assert_eq!(b.sync_status, STATUS_CONFLICT);
@@ -706,14 +869,8 @@ mod tests {
         seed_vault(&pool, "v-gone").await;
         seed_binding(&pool, "v-gone", Some("file-1")).await;
 
-        handle_drive_error(
-            &pool,
-            "v-gone",
-            3,
-            &ProviderErrorKind::RemoteDeleted,
-            "404",
-        )
-        .await;
+        let err = ProviderError::new(ProviderErrorKind::RemoteDeleted, "404");
+        handle_provider_error(&pool, "v-gone", 3, &err).await;
 
         let b = load_binding(&pool, "v-gone").await;
         assert_eq!(b.sync_status, STATUS_UNLINKED);
@@ -724,20 +881,19 @@ mod tests {
         );
     }
 
-    /// `UpToDate` must short-circuit before any Drive call, which is what makes
-    /// the trailing re-check in `spawn_after_commit` free.
+    /// A current watermark still requires a credential row; this catches
+    /// disconnects while avoiding any Drive file request for a healthy binding.
     #[tokio::test]
-    async fn mirror_now_reports_up_to_date_without_touching_drive() {
+    async fn mirror_now_requires_credentials_even_when_watermark_matches() {
         let pool = test_pool().await;
         seed_vault(&pool, "v-fresh").await;
         seed_binding(&pool, "v-fresh", Some("file-1")).await;
-        // No google_token row → any real Drive attempt would fail on the token.
-        // Returning UpToDate proves the version check short-circuits first.
+        // Simulate disconnect: the binding remains, but its provider token is gone.
         mark_mirrored(&pool, "v-fresh", 1, Some("rev-1")).await;
 
         match mirror_now(&pool, "v-fresh").await {
-            MirrorOutcome::UpToDate { vault_version } => assert_eq!(vault_version, 1),
-            other => panic!("expected UpToDate, got {other:?}"),
+            MirrorOutcome::AuthRequired => {}
+            other => panic!("expected AuthRequired, got {other:?}"),
         }
     }
 
@@ -753,7 +909,7 @@ mod tests {
     }
 
     /// A vault with no password envelope cannot produce a restorable backup, so
-    /// the mirror must refuse rather than write an unusable copy to Drive.
+    /// the mirror must refuse rather than write an unusable copy.
     #[tokio::test]
     async fn vault_without_envelope_is_unsupported() {
         use sea_orm::Set;
@@ -773,6 +929,7 @@ mod tests {
         };
         am.insert(&pool).await.expect("insert");
         seed_binding(&pool, "v-legacy", Some("file-1")).await;
+        seed_usable_token(&pool, "v-legacy").await;
 
         match mirror_now(&pool, "v-legacy").await {
             MirrorOutcome::Unsupported { reason } => {
@@ -782,7 +939,7 @@ mod tests {
         }
     }
 
-    /// Import/adoption: the Drive copy is the source of truth, so the local
+    /// Import/adoption: the provider copy is the source of truth, so the local
     /// vault's current version is the watermark — without inventing a revision.
     #[tokio::test]
     async fn mark_adopted_claims_the_version_but_not_a_revision() {
@@ -797,7 +954,7 @@ mod tests {
         assert_eq!(b.sync_status, STATUS_IDLE);
         assert_eq!(
             b.remote_revision, None,
-            "adoption must not invent a Drive revision; the first mirror reads a real baseline"
+            "adoption must not invent a revision; the first mirror reads a real baseline"
         );
     }
 }

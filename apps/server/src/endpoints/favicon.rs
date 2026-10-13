@@ -119,31 +119,55 @@ pub async fn favicon(query: web::Query<FaviconQuery>, session: Session) -> HttpR
 
     let raw = query.u.trim();
     if raw.is_empty() || raw.len() > MAX_URL_LEN {
-        return error_response(StatusCode::BAD_REQUEST, "invalid icon url", "INVALID_FAVICON_URL");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid icon url",
+            "INVALID_FAVICON_URL",
+        );
     }
     let url = match reqwest::Url::parse(raw) {
         Ok(u) => u,
         Err(_) => {
-            return error_response(StatusCode::BAD_REQUEST, "invalid icon url", "INVALID_FAVICON_URL");
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid icon url",
+                "INVALID_FAVICON_URL",
+            );
         }
     };
     if url.scheme() != "https" && url.scheme() != "http" {
-        return error_response(StatusCode::BAD_REQUEST, "icon url must be http(s)", "INVALID_FAVICON_URL");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "icon url must be http(s)",
+            "INVALID_FAVICON_URL",
+        );
     }
     if url.username() != "" || url.password().is_some() {
-        return error_response(StatusCode::BAD_REQUEST, "invalid icon url", "INVALID_FAVICON_URL");
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid icon url",
+            "INVALID_FAVICON_URL",
+        );
     }
     let host = match url.host_str() {
         Some(h) => h.to_string(),
         None => {
-            return error_response(StatusCode::BAD_REQUEST, "invalid icon url", "INVALID_FAVICON_URL");
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid icon url",
+                "INVALID_FAVICON_URL",
+            );
         }
     };
     // Literal IPs are checked without DNS; hostnames are resolved and every
     // answer must be public (blocks DNS-rebinding to loopback/private).
     if let Ok(ip) = host.parse::<IpAddr>() {
         if !is_public_ip(&ip) {
-            return error_response(StatusCode::BAD_REQUEST, "icon host not allowed", "FAVICON_HOST_DENIED");
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "icon host not allowed",
+                "FAVICON_HOST_DENIED",
+            );
         }
     } else {
         let port = url.port_or_known_default().unwrap_or(443);
@@ -218,7 +242,11 @@ pub async fn favicon(query: web::Query<FaviconQuery>, session: Session) -> HttpR
     }
     if let Some(len) = upstream.content_length() {
         if len > MAX_ICON_BYTES as u64 {
-            return error_response(StatusCode::BAD_GATEWAY, "icon too large", "FAVICON_TOO_LARGE");
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "icon too large",
+                "FAVICON_TOO_LARGE",
+            );
         }
     }
     let declared = upstream
@@ -238,7 +266,11 @@ pub async fn favicon(query: web::Query<FaviconQuery>, session: Session) -> HttpR
         }
     };
     if bytes.len() > MAX_ICON_BYTES || bytes.is_empty() {
-        return error_response(StatusCode::BAD_GATEWAY, "icon too large", "FAVICON_TOO_LARGE");
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "icon too large",
+            "FAVICON_TOO_LARGE",
+        );
     }
     // Trust a declared image/* type; otherwise sniff. Anything else is not
     // proxied (an HTML error page must never be served as an image).
@@ -295,25 +327,37 @@ mod tests {
             "::",
             "2001:db8::1",
         ] {
-            assert!(!is_public_ip(&bad.parse().unwrap()), "{bad} should be denied");
+            assert!(
+                !is_public_ip(&bad.parse().unwrap()),
+                "{bad} should be denied"
+            );
         }
     }
 
     #[test]
     fn sniffing_recognises_common_icon_formats() {
-        assert_eq!(sniff_image_kind(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
+        assert_eq!(
+            sniff_image_kind(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
         assert_eq!(sniff_image_kind(b"\xff\xd8\xff rest"), Some("image/jpeg"));
         assert_eq!(sniff_image_kind(b"GIF89a rest"), Some("image/gif"));
         let mut webp = b"RIFFxxxxWEBP".to_vec();
         webp.extend_from_slice(&[0; 4]);
         assert_eq!(sniff_image_kind(&webp), Some("image/webp"));
-        assert_eq!(sniff_image_kind(b"\x00\x00\x01\x00 rest"), Some("image/x-icon"));
+        assert_eq!(
+            sniff_image_kind(b"\x00\x00\x01\x00 rest"),
+            Some("image/x-icon")
+        );
         assert_eq!(sniff_image_kind(b"\xef\xbb\xbf<svg xmlns"), None); // BOM not handled
         assert_eq!(
             sniff_image_kind(b"  <?xml version=\"1.0\"?><svg viewBox"),
             Some("image/svg+xml")
         );
-        assert_eq!(sniff_image_kind(b"<svg viewBox=\"0 0 16 16\">"), Some("image/svg+xml"));
+        assert_eq!(
+            sniff_image_kind(b"<svg viewBox=\"0 0 16 16\">"),
+            Some("image/svg+xml")
+        );
         assert_eq!(sniff_image_kind(b"<html><body>nope"), None);
         assert_eq!(sniff_image_kind(b""), None);
     }
@@ -323,8 +367,18 @@ mod tests {
         let url = reqwest::Url::parse("https://github.com/favicon.ico").unwrap();
         assert_eq!(url.scheme(), "https");
         assert_eq!(url.host_str(), Some("github.com"));
-        assert!(reqwest::Url::parse("javascript:alert(1)").unwrap().host_str().is_none());
-        assert!(reqwest::Url::parse("data:image/png;base64,xx").unwrap().host_str().is_none());
+        assert!(
+            reqwest::Url::parse("javascript:alert(1)")
+                .unwrap()
+                .host_str()
+                .is_none()
+        );
+        assert!(
+            reqwest::Url::parse("data:image/png;base64,xx")
+                .unwrap()
+                .host_str()
+                .is_none()
+        );
         assert!(reqwest::Url::parse("/favicon.ico").is_err());
     }
 }

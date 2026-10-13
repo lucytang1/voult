@@ -3,7 +3,7 @@ import { http } from "../queries/http";
 // --- Types per provider-neutral interface §4.3 ---
 
 export interface ProviderAccount {
-  provider: "google_drive";
+  provider: string;
   accountId?: string;
   email?: string;
   scope?: string;
@@ -29,7 +29,6 @@ export type ProviderErrorCode =
   | "VAULT_NOT_FOUND"
   | "PACKAGE_INVALID"
   | "PROVIDER_RATE_LIMITED"
-  | "GOOGLE_NOT_CONFIGURED"
   | "UNKNOWN";
 
 export function isProviderError(error: unknown, code?: ProviderErrorCode): boolean {
@@ -40,7 +39,7 @@ export function isProviderError(error: unknown, code?: ProviderErrorCode): boole
 
 // --- Google OAuth ---
 
-export async function getGoogleStatus(): Promise<{
+export async function getCloudStatus(): Promise<{
   connected: boolean;
   email?: string;
   provider_account_id?: string;
@@ -51,53 +50,62 @@ export async function getGoogleStatus(): Promise<{
     email?: string;
     provider_account_id?: string;
     scope?: string;
-  }>("/google/status");
+  }>("/cloud/status");
   return res.data;
 }
 
-export async function startGoogleAuth(): Promise<{ auth_url: string; state: string }> {
-  const res = await http.get<{ auth_url: string; state: string }>("/google/auth/start");
+export async function startCloudAuth(provider: string): Promise<{ auth_url: string; state: string }> {
+  const res = await http.get<{ auth_url: string; state: string }>("/cloud/auth/start", { params: { provider } });
   return res.data;
 }
 
-export async function startGoogleAuthPublic(email: string): Promise<{ auth_url: string; state: string }> {
-  const res = await http.get<{ auth_url: string; state: string }>("/google/auth/start", {
-    params: { email },
+export async function startCloudAuthPublic(email: string, provider: string): Promise<{ auth_url: string; state: string }> {
+  const res = await http.get<{ auth_url: string; state: string }>("/cloud/auth/start", {
+    params: { email, provider },
   });
   return res.data;
 }
 
-export async function listGoogleVaultsPending(state: string): Promise<VaultDescriptor[]> {
-  const res = await http.get<{ vaults: VaultDescriptor[] }>("/google/vaults/pending", {
+export async function listCloudVaultsPending(state: string): Promise<VaultDescriptor[]> {
+  const res = await http.get<{ vaults: VaultDescriptor[] }>("/cloud/vaults/pending", {
     params: { state },
   });
   return res.data.vaults;
 }
 
-export async function readGoogleVaultPending(state: string, fileId: string): Promise<{ package: string; remote_revision: string; file_id: string }> {
+export async function readCloudVaultPending(state: string, fileId: string): Promise<{ package: string; remote_revision: string; file_id: string }> {
   const res = await http.get<{ package: string; remote_revision: string; file_id: string }>(
-    "/google/vaults/pending/read",
+    "/cloud/vaults/pending/read",
     { params: { state, file_id: fileId } }
   );
   return res.data;
 }
 
-export async function linkPendingGoogleToken(state: string): Promise<{ linked: boolean }> {
-  const res = await http.post<{ linked: boolean }>("/google/link-pending", { state });
+export async function linkPendingCloudToken(state: string): Promise<{ linked: boolean }> {
+  const res = await http.post<{ linked: boolean }>("/cloud/link-pending", { state });
   return res.data;
 }
 
-export async function persistGoogleBinding(input: { vault_id: string; drive_file_id: string }): Promise<{ linked: boolean }> {
-  const res = await http.post<{ linked: boolean }>("/google/binding", input);
+export async function persistCloudBinding(input: { vault_id: string; remote_file_id?: string; provider: string }): Promise<{
+  upserted: boolean; provider_kind: string; remote_file_id: string; remote_revision?: string;
+}> {
+  const { provider, ...binding } = input;
+  const res = await http.post<{ upserted: boolean; provider_kind: string; remote_file_id: string; remote_revision?: string }>("/cloud/binding", binding, { params: { provider } });
   return res.data;
 }
 
-export async function disconnectGoogle(): Promise<{ disconnected: boolean }> {
-  const res = await http.post<{ disconnected: boolean }>("/google/disconnect");
+export interface CloudCredential { kind: string; display_name: string; email?: string }
+export async function listCloudCredentials(): Promise<CloudCredential[]> {
+  const res = await http.get<{ credentials: CloudCredential[] }>("/cloud/credentials");
+  return res.data.credentials;
+}
+
+export async function disconnectCloud(): Promise<{ disconnected: boolean }> {
+  const res = await http.post<{ disconnected: boolean }>("/cloud/disconnect");
   return res.data;
 }
 
-export function redirectToGoogleAuth(authUrl: string) {
+export function redirectToCloudAuth(authUrl: string) {
   // Browser asks local API to start Google authorization – then redirects
   // Uses same-window navigation to preserve session cookie (local Rust server)
   if (typeof window !== "undefined") {
@@ -107,12 +115,12 @@ export function redirectToGoogleAuth(authUrl: string) {
 
 // --- Drive transport ---
 
-export async function listGoogleVaults(): Promise<VaultDescriptor[]> {
-  const res = await http.get<{ vaults: VaultDescriptor[] }>("/google/vaults");
+export async function listCloudVaults(): Promise<VaultDescriptor[]> {
+  const res = await http.get<{ vaults: VaultDescriptor[] }>("/cloud/vaults");
   return res.data.vaults;
 }
 
-export async function createGoogleVault(vaultId: string, packageB64: string): Promise<{
+export async function createCloudVault(vaultId: string, packageB64: string): Promise<{
   file_id: string;
   remote_revision: string;
   vault_id: string;
@@ -121,14 +129,14 @@ export async function createGoogleVault(vaultId: string, packageB64: string): Pr
     file_id: string;
     remote_revision: string;
     vault_id: string;
-  }>("/google/vaults/create", {
+  }>("/cloud/vaults/create", {
     vault_id: vaultId,
     package: packageB64,
   });
   return res.data;
 }
 
-export async function readGoogleVault(params: {
+export async function readCloudVault(params: {
   vault_id?: string;
   file_id?: string;
 }): Promise<{ package: string; remote_revision: string; file_id: string }> {
@@ -136,11 +144,11 @@ export async function readGoogleVault(params: {
     package: string;
     remote_revision: string;
     file_id: string;
-  }>("/google/vaults/read", { params });
+  }>("/cloud/vaults/read", { params });
   return res.data;
 }
 
-export async function replaceGoogleVault(params: {
+export async function replaceCloudVault(params: {
   vault_id?: string;
   file_id?: string;
   package: string;
@@ -149,16 +157,16 @@ export async function replaceGoogleVault(params: {
   const res = await http.post<{
     remote_revision: string;
     file_id: string;
-  }>("/google/vaults/replace", params);
+  }>("/cloud/vaults/replace", params);
   return res.data;
 }
 
-export async function deleteGoogleVault(params: {
+export async function deleteCloudVault(params: {
   vault_id?: string;
   file_id?: string;
 }): Promise<{ deleted: boolean; file_id: string }> {
   const res = await http.post<{ deleted: boolean; file_id: string }>(
-    "/google/vaults/delete",
+    "/cloud/vaults/delete",
     params
   );
   return res.data;
@@ -173,11 +181,13 @@ export async function deleteGoogleVault(params: {
  * that gap: the number of committed writes the disaster-recovery copy is
  * missing.
  */
-export interface GoogleBinding {
+export interface CloudBinding {
   vault_id: string;
   provider_kind: string;
   provider_account_id?: string;
-  drive_file_id?: string;
+  /** Opaque provider file handle. Renamed from `drive_file_id`: the value is
+   * provider-agnostic, though for Drive it is a Drive id. */
+  remote_file_id?: string;
   remote_revision?: string;
   /** idle | pending | mirroring | auth_required | unlinked | conflict | error */
   sync_status: string;
@@ -193,13 +203,13 @@ export interface GoogleBinding {
   updated_at: string;
 }
 
-export async function getGoogleBinding(vaultId: string): Promise<GoogleBinding> {
-  const res = await http.get<GoogleBinding>("/google/binding", { params: { vault_id: vaultId } });
+export async function getCloudBinding(vaultId: string): Promise<CloudBinding> {
+  const res = await http.get<CloudBinding>("/cloud/binding", { params: { vault_id: vaultId } });
   return res.data;
 }
 
-export async function listGoogleBindings(): Promise<GoogleBinding[]> {
-  const res = await http.get<{ bindings: GoogleBinding[] }>("/google/bindings");
+export async function listCloudBindings(): Promise<CloudBinding[]> {
+  const res = await http.get<{ bindings: CloudBinding[] }>("/cloud/bindings");
   return res.data.bindings;
 }
 
@@ -221,37 +231,35 @@ export type MirrorResult =
  * retry after a conflict fails again rather than overwriting a Drive copy that
  * changed — "Back up now" means "try again", never "force overwrite".
  */
-export async function mirrorGoogleVault(): Promise<{
+export async function mirrorCloudVault(): Promise<{
   mirror: MirrorResult;
-  binding?: GoogleBinding;
+  binding?: CloudBinding;
 }> {
-  const res = await http.post<{ mirror: MirrorResult; binding?: GoogleBinding }>(
-    "/google/vaults/mirror"
+  const res = await http.post<{ mirror: MirrorResult; binding?: CloudBinding }>(
+    "/cloud/vaults/mirror"
   );
   return res.data;
 }
 
-// --- Helper to detect if Google is configured ---
-export async function isGoogleConfigured(): Promise<boolean> {
-  try {
-    await startGoogleAuth();
-    // If it returns auth_url, it's configured – but we don't want to create state unnecessarily
-    // So just check status with special handling: if GOOGLE_NOT_CONFIGURED, it would have 500
-    // Instead, we can try getGoogleStatus and see if it ever returns GOOGLE_NOT_CONFIGURED
-    return true;
-  } catch (e: any) {
-    const code = e?.response?.data?.code as string | undefined;
-    if (code === "GOOGLE_NOT_CONFIGURED") return false;
-    // If we got auth_url even with error, still configured
-    // For now, assume configured if start didn't return GOOGLE_NOT_CONFIGURED
-    // Fallback: check status
-    try {
-      await getGoogleStatus();
-      return true;
-    } catch (e2: any) {
-      const c2 = e2?.response?.data?.code as string | undefined;
-      if (c2 === "GOOGLE_NOT_CONFIGURED") return false;
-      return true;
-    }
+export interface CloudProviderInfo { kind: string; display_name: string }
+export async function listCloudProviders(): Promise<CloudProviderInfo[]> {
+  const res = await http.get<{ providers: CloudProviderInfo[] }>("/cloud/providers");
+  return res.data.providers;
+}
+
+export function packageBytesFromBase64(encoded: string): Uint8Array {
+  const g = globalThis as any;
+  if (typeof g.atob === "function") return Uint8Array.from(g.atob(encoded), (c: string) => c.charCodeAt(0));
+  if (g.Buffer) return g.Buffer.from(encoded, "base64");
+  return Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0));
+}
+export function packageBytesToBase64(bytes: Uint8Array): string {
+  const g = globalThis as any;
+  if (typeof g.btoa === "function") {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+    return g.btoa(binary);
   }
+  if (g.Buffer) return g.Buffer.from(bytes).toString("base64");
+  return btoa(String.fromCharCode(...bytes));
 }

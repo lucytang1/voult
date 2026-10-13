@@ -4,13 +4,18 @@ import { queryClient } from "./client";
 
 /**
  * Shared HTTP client for the vault API. Credentialed requests (session
- * cookie) are enabled via `withCredentials: true`. On a `SESSION_REQUIRED`
- * response the session is torn down (closes this vault's SQLite DB, deletes
- * this vault's device records, wipes volatile state) so a dead server session
- * can never leak one vault's local data into another's. The query cache is
- * in-memory only here; routing away from authenticated screens drops it.
- * There is no explicit logout — this is the only path back to
- * not_authenticated besides manual cookie removal.
+ * cookie) are enabled via `withCredentials: true`.
+ *
+ * On a `SESSION_REQUIRED` response the session is torn down: this vault's
+ * SQLite DB is closed, keys/plaintext are wiped, and the server session is
+ * marked missing so no further authorized call is attempted. What is NOT done
+ * is dropping the vault selection or deleting the local device material — a
+ * dead cookie is an authorization fact, not a change of identity. The user
+ * stays on their own vault's lock screen and re-authenticates with the master
+ * password (see `reauthenticateAndUnlock`).
+ *
+ * The query cache is in-memory only here; teardown clears it so no vault body
+ * outlives the session. There is no user-facing logout/deselect action.
  */
 export const http = axios.create({
   // Falls back to the same origin's /api root when served by the backend.

@@ -1,5 +1,7 @@
 # Optional Google Drive sync and cross-device vault flows
 
+> **Status: superseded.** The current implementation is server-side, provider-neutral disaster-recovery backup. See [`dropbox-provider-abstraction.md`](../dropbox-provider-abstraction.md) and `apps/server/src/cloud/`.
+
 ## 1. Scope and decisions
 
 This plan adds optional Google Drive storage and cross-device vault flows to the existing Voult codebase.

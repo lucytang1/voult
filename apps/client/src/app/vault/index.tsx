@@ -1,15 +1,24 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Pressable, Text, View, ScrollView, Modal, ActivityIndicator, TextInput } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
-import { useAppStore, setSession, setVaultKey, updateDecryptedVault, updateLockEpoch, updateVaultVersion } from "@/src/lib/state";
+import {
+  useAppStore,
+  selectVaultSession,
+  switchVaultOpen,
+  captureSelectionEpoch,
+  updateDecryptedVault,
+  updateLockEpoch,
+  updateVaultVersion,
+} from "@/src/lib/state";
+import { selectedVaultId } from "@/src/lib/state/vault-state";
 import { useVaultList, VaultSummary } from "@/src/lib/queries/vaults/query";
 import { openVaultFlow, requiresSwitchConfirmation } from "@/src/lib/vault/open";
-import { useGoogleStatus, useGoogleVaults, useLinkPendingGoogleToken, usePendingGoogleVaults, usePersistGoogleBinding } from "@/src/lib/google/queries";
+import { useCloudStatus, useCloudVaults, useLinkPendingCloudToken, usePendingCloudVaults, usePersistCloudBinding } from "@/src/lib/cloud/queries";
 import { GoogleDriveIcon } from "../../../assets/images/GoogleDriveIcon";
-import type { VaultDescriptor } from "@/src/lib/google/api";
-import { importVaultFromGoogle } from "@/src/lib/vault/import";
+import type { VaultDescriptor } from "@/src/lib/cloud/api";
+import { importVaultFromCloud } from "@/src/lib/vault/import";
 import { fetchSession } from "@/src/lib/queries/session/query";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services/client-state-service";
@@ -43,20 +52,21 @@ export default function VaultChooser() {
   const [googleImportError, setGoogleImportError] = useState<string | null>(null);
   const [googleImporting, setGoogleImporting] = useState(false);
   const [sessionRestoreError, setSessionRestoreError] = useState<string | null>(null);
-  const params = useLocalSearchParams<{ google_connected?: string; google_error?: string; google_error_detail?: string; google_pending_state?: string }>();
-  const pendingState = (params as any).google_pending_state as string | undefined
-    || (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("google_pending_state") || undefined : undefined);
-  const isGoogleCallback = !!pendingState || !!params.google_connected || !!params.google_error;
+  const handledConnectedCallback = useRef(false);
+  const params = useLocalSearchParams<{ cloud_connected?: string; cloud_error?: string; cloud_error_detail?: string; cloud_state?: string; provider?: string }>();
+  const pendingState = (params as any).cloud_state as string | undefined
+    || (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("cloud_state") || undefined : undefined);
+  const isGoogleCallback = !!pendingState || !!params.cloud_connected || !!params.cloud_error;
 
   const vaultListQuery = useVaultList(!!session, session?.vaultId);
-  const googleStatusQuery = useGoogleStatus(session?.vaultId ?? "pending", !!session || isGoogleCallback);
-  const pendingGoogleVaultsQuery = usePendingGoogleVaults(pendingState);
-  const googleVaultsQuery = useGoogleVaults(
+  const googleStatusQuery = useCloudStatus(session?.vaultId ?? "pending", !!session || isGoogleCallback);
+  const pendingGoogleVaultsQuery = usePendingCloudVaults(pendingState);
+  const googleVaultsQuery = useCloudVaults(
     session?.vaultId ?? "anonymous",
     !pendingState && !!googleStatusQuery.data?.connected,
   );
-  const linkPendingMutation = useLinkPendingGoogleToken();
-  const persistBindingMutation = usePersistGoogleBinding();
+  const linkPendingMutation = useLinkPendingCloudToken();
+  const persistBindingMutation = usePersistCloudBinding();
   const vaults = vaultListQuery.data ?? null;
   const loading = !!session && vaultListQuery.isPending;
   const error = sessionRestoreError ?? (vaultListQuery.error instanceof Error ? vaultListQuery.error.message : null);
@@ -71,8 +81,27 @@ export default function VaultChooser() {
   const googleVaultsError = pendingState ? pendingGoogleVaultsQuery.error : googleVaultsQuery.error;
   const googleError = googleVaultsError instanceof Error ? googleVaultsError.message : null;
 
+  // A session-bound OAuth was started by Settings or Create. Once consent has
+  // stored the credential, finish the requested provider switch/enrollment
+  // against this authenticated vault instead of leaving the user at a chooser
+  // that still reflects the previous binding.
+  useEffect(() => {
+    if (!session?.vaultId || !params.cloud_connected || !params.provider || pendingState || handledConnectedCallback.current) return;
+    handledConnectedCallback.current = true;
+    persistBindingMutation.mutateAsync({
+      vault_id: session.vaultId,
+      provider: params.provider,
+    }).then(() => {
+      queryClient.invalidateQueries({ queryKey: ["cloud"] });
+      router.replace("/home" as any);
+    }).catch((e: any) => {
+      setSessionRestoreError(e?.response?.data?.error_msg || e?.message || "Could not switch cloud provider");
+      handledConnectedCallback.current = false;
+    }).finally(() => persistBindingMutation.reset());
+  }, [session?.vaultId, params.cloud_connected, params.provider, pendingState]);
+
   // Allow pending Google callback without session (Case 1 cloud sync).
-  // Otherwise unauthenticated users belong on landing "/" — not vault-id login.
+  // Without a selected vault, users belong on landing "/" — not vault-id login.
   useEffect(() => {
     if (!session && !isGoogleCallback) {
       router.replace("/" as any);
@@ -82,14 +111,14 @@ export default function VaultChooser() {
   // Root bootstrap intentionally pauses on OAuth callback URLs. Restore the
   // server session here for an existing vault so the chooser can continue.
   useEffect(() => {
-    if (session || !params.google_connected || pendingState) return;
+    if (session || !params.cloud_connected || pendingState) return;
     fetchSession()
       .then((s) => {
-        setSession({ vaultId: s.vault_id, cryptoVersion: s.crypto_version });
+        selectVaultSession({ vaultId: s.vault_id, cryptoVersion: s.crypto_version });
         updateLockEpoch(s.lock_epoch ?? 0);
       })
       .catch((e) => setSessionRestoreError(e instanceof Error ? e.message : "Google sign-in session could not be restored"));
-  }, [session, params.google_connected, pendingState]);
+  }, [session, params.cloud_connected, pendingState]);
 
   const handleSelectVault = async (target: VaultSummary) => {
     if (!session) return;
@@ -102,27 +131,60 @@ export default function VaultChooser() {
     await performOpen(target, undefined);
   };
 
+  /**
+   * M3: switching is atomic around the selected id.
+   *
+   * Three things guard against cross-vault contamination:
+   *
+   *  1. `guard` — captured before the network round-trip and re-checked after.
+   *     If the user switched (or a peer did) while /auth + /get_vault were in
+   *     flight, this result is stale and must be dropped rather than installed.
+   *  2. `switchVaultOpen` — verifies the server authenticated the vault we
+   *     asked for and that the document belongs to it, then commits selection +
+   *     session + key + document + version in one state write.
+   *  3. Store-side epoch — anything else async (sync, queries) checks it too.
+   *
+   * On any failure nothing is written, so the previous vault keeps its state
+   * and the user sees a coherent locked-or-unlocked screen.
+   */
   const performOpen = async (target: VaultSummary, password?: string) => {
     setSwitching(true);
     setSwitchError(null);
+    const guard = captureSelectionEpoch();
     try {
-      const previousVaultId = session?.vaultId ?? null;
+      const previousVaultId = selectedVaultId(useAppStore.getState().vault);
       const result = await openVaultFlow({ vaultId: target.vault_id, masterPassword: password });
-      // Single-vault invariant: opening a different vault abandons the old
-      // one's in-memory state and ciphertext cache (its device records and
-      // OPFS file stay namespaced for its next unlock). initSQLite releases
-      // the old handle before opening the new file.
+
+      // A switch happened while we were opening. Drop this result entirely —
+      // installing it would put vault `target`'s key under whatever vault is
+      // now selected.
+      if (!guard.stillCurrent()) {
+        console.warn("Vault open discarded: selection changed while opening", {
+          requested: target.vault_id,
+        });
+        return;
+      }
+
+      // Abandon the old vault's ciphertext cache before the new document
+      // lands. Its device records and OPFS file stay namespaced for its own
+      // next unlock; initSQLite below releases the old handle.
       queryClient.removeQueries({ queryKey: ["vault"] });
       if (previousVaultId) queryClient.removeQueries({ queryKey: ["favicon", previousVaultId] });
-      queryClient.removeQueries({ queryKey: ["google"] });
-      setVaultKey(result.vaultKey);
-      setSession(result.session);
-      updateLockEpoch(result.lockEpoch);
-      updateDecryptedVault(result.decryptedVault);
-      updateVaultVersion(result.version);
+      queryClient.removeQueries({ queryKey: ["cloud"] });
+
+      switchVaultOpen({
+        requestedVaultId: target.vault_id,
+        session: result.session,
+        vaultKey: result.vaultKey,
+        decryptedVault: result.decryptedVault,
+        version: result.version,
+        lockEpoch: result.lockEpoch,
+      });
+
       await initSQLite(target.vault_id);
       await upsertVaultId(target.vault_id);
       await upsertVaultVersion(result.version);
+
       if (previousVaultId && previousVaultId !== target.vault_id) {
         // Tell other tabs to converge to the new vault (they re-check the
         // cookie authoritatively on receipt).
@@ -155,20 +217,30 @@ export default function VaultChooser() {
     if (!hasSession && pendingState) {
       setGoogleImporting(true);
       setGoogleImportError(null);
+      // An import that races a switch would otherwise install the imported
+      // vault's key under whatever is selected by the time it returns.
+      const guard = captureSelectionEpoch();
       try {
         // Case 1 (no session): vault may only exist on Drive — fetch package
         // via pending token, verify password locally, register on this server.
-        const result = await importVaultFromGoogle({
+        const result = await importVaultFromCloud({
           vaultId: googleImportTarget.vault_id,
           fileId: googleImportTarget.file_id,
           masterPassword: googleImportPassword,
           pendingState,
         });
-        setVaultKey(result.vaultKey);
-        setSession(result.session);
-        updateLockEpoch(result.lockEpoch);
-        updateDecryptedVault(result.decryptedVault);
-        updateVaultVersion(result.version);
+        if (!guard.stillCurrent()) {
+          console.warn("Vault import discarded: selection changed during import");
+          return;
+        }
+        switchVaultOpen({
+          requestedVaultId: googleImportTarget.vault_id,
+          session: result.session,
+          vaultKey: result.vaultKey,
+          decryptedVault: result.decryptedVault,
+          version: result.version,
+          lockEpoch: result.lockEpoch,
+        });
         await initSQLite(googleImportTarget.vault_id);
         await upsertVaultId(googleImportTarget.vault_id);
         await upsertVaultVersion(result.version);
@@ -185,7 +257,8 @@ export default function VaultChooser() {
         try {
           await persistBindingMutation.mutateAsync({
             vault_id: googleImportTarget.vault_id,
-            drive_file_id: googleImportTarget.file_id,
+            remote_file_id: googleImportTarget.file_id,
+            provider: params.provider ?? "google_drive",
           });
         } catch (e) {
           console.warn("Failed to persist Drive binding after import", e);
@@ -212,17 +285,23 @@ export default function VaultChooser() {
     setGoogleImporting(true);
     setGoogleImportError(null);
     try {
-      const result = await importVaultFromGoogle({
+      const result = await importVaultFromCloud({
         vaultId: googleImportTarget.vault_id,
         fileId: googleImportTarget.file_id,
         masterPassword: googleImportPassword,
         pendingState: pendingState || undefined,
       });
-      setVaultKey(result.vaultKey);
-      setSession(result.session);
-      updateLockEpoch(result.lockEpoch);
-      updateDecryptedVault(result.decryptedVault);
-      updateVaultVersion(result.version);
+      // Atomic: selection + session + key + document in one write, verified
+      // against the vault we asked to import. See `performOpen` for the full
+      // reasoning — the same three guards apply to an import.
+      switchVaultOpen({
+        requestedVaultId: googleImportTarget.vault_id,
+        session: result.session,
+        vaultKey: result.vaultKey,
+        decryptedVault: result.decryptedVault,
+        version: result.version,
+        lockEpoch: result.lockEpoch,
+      });
       await initSQLite(googleImportTarget.vault_id);
       await upsertVaultId(googleImportTarget.vault_id);
       await upsertVaultVersion(result.version);
@@ -279,10 +358,10 @@ export default function VaultChooser() {
         {googleConfigured === false && (
           <Text className="text-muted-text text-xs mt-2">Not configured – see .env.example</Text>
         )}
-        {params.google_error && (
+        {params.cloud_error && (
           <View className="bg-red-900/20 border border-red-800 rounded-lg p-3 mt-3">
-            <Text className="text-red-400 text-xs">Google error: {params.google_error}</Text>
-            {params.google_error_detail && <Text className="text-red-300 text-xs mt-1">Details: {params.google_error_detail}</Text>}
+            <Text className="text-red-400 text-xs">Google error: {params.cloud_error}</Text>
+            {params.cloud_error_detail && <Text className="text-red-300 text-xs mt-1">Details: {params.cloud_error_detail}</Text>}
           </View>
         )}
         {googleError && (

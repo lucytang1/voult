@@ -1,4 +1,7 @@
-//! Server-side construction of the encrypted Voult package that Drive stores.
+//! Server-side construction of the encrypted Voult package that a provider
+//! stores. Provider-neutral: the byte layout is a Voult contract, not a Drive
+//! one, which is what lets a vault backed up to one provider be restored by
+//! any client regardless of which provider it went to.
 //!
 //! The server is the write authority for vault ciphertext but never holds a key
 //! and never sees plaintext. It can therefore re-emit the package *exactly*
@@ -10,7 +13,7 @@
 //! The JSON shape must stay byte-compatible with the client's
 //! `createVoultPackage` (`apps/client/src/lib/crypto/vault.ts`) and
 //! `VoultPackage` (`apps/client/src/lib/state/type.ts`), because
-//! `importVaultFromGoogle` parses this document to restore a vault on a new
+//! the client's restore path parses this document to recover a vault on a new
 //! device. The unit tests below pin that contract.
 
 use serde::Serialize;
@@ -66,7 +69,7 @@ struct VoultPackage {
 /// Metadata the server can read out of a package document without decrypting
 /// anything. The outer envelope is plaintext by design — the *contents* are the
 /// ciphertext. Used to (a) verify a client-uploaded package belongs to the vault
-/// being enrolled and (b) learn which logical revision a Drive copy holds.
+/// being enrolled and (b) learn which logical revision a provider copy holds.
 #[derive(serde::Deserialize, Debug, PartialEq)]
 pub struct PackageHeader {
     #[serde(rename = "packageFormatVersion")]
@@ -95,8 +98,8 @@ pub fn parse_header(bytes: &[u8], expected_vault_id: &str) -> Result<PackageHead
 /// Serializes the committed server-side vault state as an encrypted package.
 ///
 /// Fails when the password-wrapped envelope is absent: without it the package
-/// is unrestorable on a new device, so writing it to Drive would be a backup in
-/// name only. That is the case for legacy `crypto_version = 1` vaults, which the
+/// is unrestorable on a new device, so writing it to a provider would be a
+/// backup in name only. That is the case for legacy `crypto_version = 1` vaults, which the
 /// client migrates to v2 on first password login.
 pub fn build(vault: &vault::Model) -> Result<Vec<u8>, &'static str> {
     let (Some(wrapped_vault_key), Some(wrap_iv)) = (
@@ -159,7 +162,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         // Field names are the client's camelCase contract; a rename here would
-        // silently break restore-from-Drive on another device.
+        // silently break provider-side restore on another device.
         assert_eq!(json["packageFormatVersion"], 1);
         assert_eq!(json["vaultId"], "11111111-2222-4333-8444-555555555555");
         assert_eq!(json["logicalRevision"], 7);

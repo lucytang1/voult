@@ -1,9 +1,9 @@
+mod cloud;
 mod datetime_codec;
 mod db;
 mod endpoints;
 mod entity;
 mod error;
-mod google;
 mod id_codec;
 mod session_auth;
 mod static_site;
@@ -27,7 +27,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use endpoints::{
-    auth, favicon, get_crypto_params, get_vault, google_endpoints, lock, logout, pair, register,
+    auth, cloud_endpoints, favicon, get_crypto_params, get_vault, lock, logout, pair, register,
     session_status, update_vault, update_vault_password, vaults,
 };
 use static_site::static_site;
@@ -94,7 +94,10 @@ fn resolve_session_cookie_key() -> String {
             log::info!("Using per-install session key at {}", key_path.display());
             return trimmed;
         }
-        log::warn!("Existing session key at {} is too short, regenerating", key_path.display());
+        log::warn!(
+            "Existing session key at {} is too short, regenerating",
+            key_path.display()
+        );
     }
 
     // Generate a new 64-byte random key, base64-encoded (88 chars)
@@ -109,10 +112,17 @@ fn resolve_session_cookie_key() -> String {
             Ok(()) => {
                 // Restrict to owner only (0600) on unix
                 let _ = fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600));
-                log::info!("Generated new per-install session key at {}", key_path.display());
+                log::info!(
+                    "Generated new per-install session key at {}",
+                    key_path.display()
+                );
             }
             Err(e) => {
-                log::warn!("Could not persist session key to {}: {}", key_path.display(), e);
+                log::warn!(
+                    "Could not persist session key to {}: {}",
+                    key_path.display(),
+                    e
+                );
             }
         }
     }
@@ -127,7 +137,8 @@ async fn main() -> std::io::Result<()> {
     let env = Environment::from_env();
     log::info!(
         "VOULT_ENV={} (is_dev: {})",
-        env::var(config::ENV_VOULT_ENV).unwrap_or_else(|_| "(unset, defaulting to production)".to_string()),
+        env::var(config::ENV_VOULT_ENV)
+            .unwrap_or_else(|_| "(unset, defaulting to production)".to_string()),
         env.is_dev()
     );
 
@@ -168,6 +179,7 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to run database migrations");
 
     let db_data = web::Data::new(db);
+    cloud::mirror::start_sweeper(db_data.get_ref().clone());
 
     // Credentialed requests (cookies) require explicit origins — never pair
     // `allow_any_origin()` with cookies.
@@ -233,9 +245,7 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/api")
                     // Vault/session/ciphertext responses must never sit in a
                     // cache (browser, proxy, or the extension's fetch cache).
-                    .wrap(
-                        DefaultHeaders::new().add(("Cache-Control", "no-store")),
-                    )
+                    .wrap(DefaultHeaders::new().add(("Cache-Control", "no-store")))
                     .service(register::register)
                     .service(auth::auth)
                     .service(favicon::favicon)
@@ -250,24 +260,25 @@ async fn main() -> std::io::Result<()> {
                     .service(update_vault_password::update_vault_password)
                     .service(vaults::create_vault)
                     .service(vaults::list_vaults)
-                    .service(google_endpoints::google_auth_start)
-                    .service(google_endpoints::google_oauth_callback)
-                    .service(google_endpoints::google_oauth_callback_legacy)
-                    .service(google_endpoints::google_status)
-                    .service(google_endpoints::google_disconnect)
-                    .service(google_endpoints::google_get_pending)
-                    .service(google_endpoints::google_get_binding)
-                    .service(google_endpoints::google_list_bindings)
-                    .service(google_endpoints::google_list_vaults)
-                    .service(google_endpoints::google_create_vault)
-                    .service(google_endpoints::google_read_vault)
-                    .service(google_endpoints::google_replace_vault)
-                    .service(google_endpoints::google_mirror_vault)
-                    .service(google_endpoints::google_upsert_binding)
-                    .service(google_endpoints::google_link_pending)
-                    .service(google_endpoints::google_list_vaults_pending)
-                    .service(google_endpoints::google_read_vault_pending)
-                    .service(google_endpoints::google_delete_vault),
+                    .service(cloud_endpoints::cloud_providers)
+                    .service(cloud_endpoints::cloud_credentials)
+                    .service(cloud_endpoints::cloud_auth_start)
+                    .service(cloud_endpoints::cloud_oauth_callback)
+                    .service(cloud_endpoints::cloud_status)
+                    .service(cloud_endpoints::cloud_disconnect)
+                    .service(cloud_endpoints::cloud_get_pending)
+                    .service(cloud_endpoints::cloud_get_binding)
+                    .service(cloud_endpoints::cloud_list_bindings)
+                    .service(cloud_endpoints::cloud_list_vaults)
+                    .service(cloud_endpoints::cloud_create_vault)
+                    .service(cloud_endpoints::cloud_read_vault)
+                    .service(cloud_endpoints::cloud_replace_vault)
+                    .service(cloud_endpoints::cloud_mirror_vault)
+                    .service(cloud_endpoints::cloud_upsert_binding)
+                    .service(cloud_endpoints::cloud_link_pending)
+                    .service(cloud_endpoints::cloud_list_vaults_pending)
+                    .service(cloud_endpoints::cloud_read_vault_pending)
+                    .service(cloud_endpoints::cloud_delete_vault),
             )
             .service(static_site(&static_dir))
     })

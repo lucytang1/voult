@@ -6,7 +6,9 @@ use actix_session::Session;
 pub const SESSION_VAULT_ID_KEY: &str = "vault_id";
 
 /// Reads the authenticated vault ID from the session, if present.
-pub fn session_vault_id(session: &Session) -> Result<Option<String>, actix_session::SessionGetError> {
+pub fn session_vault_id(
+    session: &Session,
+) -> Result<Option<String>, actix_session::SessionGetError> {
     session.get::<String>(SESSION_VAULT_ID_KEY)
 }
 

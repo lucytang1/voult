@@ -1,6 +1,8 @@
 # Phase 1: Multi-Device Vault Sync via Google Drive
 
-Status: draft
+> **Status: superseded.** The current implementation is server-side, provider-neutral disaster-recovery backup. See [`dropbox-provider-abstraction.md`](../dropbox-provider-abstraction.md) and `apps/server/src/cloud/`.
+
+Status: historical draft
 Scope: **vault item sync only** (+ minimal vault metadata required to bootstrap login on new devices). Signup remains email + password with no Google step (email verification skipped for Phase 1). Password change/rotation, other providers, sharing, and attachment sync are out of scope (later phases).
 
 ---

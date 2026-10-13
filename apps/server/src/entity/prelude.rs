@@ -3,8 +3,8 @@
 #![allow(unused_imports)]
 
 pub use super::cloud_binding::Entity as CloudBinding;
-pub use super::google_pending_token::Entity as GooglePendingToken;
-pub use super::google_token::Entity as GoogleToken;
+pub use super::cloud_pending_token::Entity as CloudPendingToken;
+pub use super::cloud_token::Entity as CloudToken;
 pub use super::oauth_state::Entity as OauthState;
 pub use super::pair_code::Entity as PairCode;
 pub use super::session::Entity as Session;

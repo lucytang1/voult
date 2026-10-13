@@ -55,7 +55,6 @@ export type {
   DecryptedVault,
   SessionState,
   LockMetadata,
-  AuthState,
   VaultResponse,
   UpdateVaultRequest,
   UpdateVaultResponse,

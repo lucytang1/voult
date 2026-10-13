@@ -75,11 +75,7 @@ pub async fn register(
     let vault_uuid = match Uuid::parse_str(&request.vault_id) {
         Ok(u) => u,
         Err(_) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid vault_id",
-                "INVALID_INPUT",
-            );
+            return error_response(StatusCode::BAD_REQUEST, "invalid vault_id", "INVALID_INPUT");
         }
     };
 

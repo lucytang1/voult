@@ -11,6 +11,10 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Migrations that discard data warn about it so an operator knows to re-link a
+# provider afterwards. Already a dependency of the server binary, so this adds no
+# new crate to the build graph.
+log = "0.4"
 
 [dependencies.sea-orm-migration]
 features = [

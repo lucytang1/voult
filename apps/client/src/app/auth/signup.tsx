@@ -6,8 +6,8 @@ import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { v4 as uuidv4 } from "uuid";
 import { useSignUp } from "@/src/lib/queries/SignUp/query";
 import {
-  setSession,
-  setVaultKey,
+  selectVaultSession,
+  commitVaultUnlock,
   updateDecryptedVault,
   updateLockEpoch,
   updateVaultVersion,
@@ -25,7 +25,7 @@ const TEST_VAULT_JSON = JSON.stringify(TEST_VAULT);
 export default function SignUp() {
   // Signup is only for signed-out users; authenticated users are bounced
   // to /lock (locked) or /home (unlocked).
-  useAuthGuard(["not_authenticated"]);
+  useAuthGuard(["no_vault"]);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -48,8 +48,10 @@ export default function SignUp() {
       // The vault id is generated client-side inside signupFlow — no email is
       // ever collected or sent to the server.
       const result = await signupFlow(password, TEST_VAULT_JSON, signupMutation.mutateAsync);
-      setVaultKey(result.vaultKey);
-      setSession(result.session);
+      // Select before installing the key: a newly created vault has no
+      // prior selection, and commitVaultUnlock needs one to install against.
+      selectVaultSession(result.session);
+      commitVaultUnlock(result.vaultKey);
       updateLockEpoch(result.lockEpoch);
       updateDecryptedVault(result.decryptedVault);
       updateVaultVersion(result.version);

@@ -7,6 +7,7 @@ import type {
   DecryptedVault,
   LockMetadata,
 } from "@voult/vault-core";
+import type { VaultState, ServerSessionStatus, VaultAvailability } from "./vault-state";
 export {
   VaultItemSchema,
   UpdateVaultItemSchema,
@@ -31,7 +32,6 @@ export type {
   DecryptedVault,
   SessionState,
   LockMetadata,
-  AuthState,
 } from "@voult/vault-core";
 
 // VoultPackage is web-app-local (cloud-package modeling); it stays here until
@@ -48,15 +48,50 @@ export interface VoultPackage {
 
 /** Zustand store shape (web-app-local; the extension mirrors a subset). */
 export interface AppState {
-  vaultKey: CryptoKey | null;
-  authKey: CryptoKey | null;
+  /**
+   * The app's primary state: which vault is selected and whether its key is in
+   * memory. This is the single source of truth for lock/unlock — there is
+   * deliberately no `isLocked` or `vaultKey` field alongside it, because two
+   * writable representations of one fact can disagree, and a disagreement here
+   * renders the wrong vault.
+   *
+   * Carries `vaultKey` inline when unlocked, so "unlocked without a key"
+   * cannot be constructed. Read it with `hasVaultKey()` / the `status` field,
+   * never by destructuring a parallel field.
+   */
+  vault: VaultState;
+  /**
+   * Whether the HttpOnly cookie currently authorizes API calls. Orthogonal to
+   * `vault`: the cookie is a transport/authorization fact, not an identity
+   * fact, and a dead cookie must not erase the selection. `unknown` until a
+   * definitive probe — a network failure never becomes `missing`.
+   */
+  serverSession: ServerSessionStatus;
+  /** Whether the selected vault still exists server-side. Recoverable, not a fourth state. */
+  availability: VaultAvailability;
+  /**
+   * Monotonic counter bumped on every selection change.
+   *
+   * M3's guard against cross-vault contamination. An async operation that
+   * started under vault A cannot know that a switch to B happened while it was
+   * awaiting the network; comparing vault ids is not enough, because a switch
+   * A→B→A would look unchanged to a naive check. Anything async captures the
+   * epoch when it starts and re-reads it before committing — see
+   * `captureSelectionEpoch()`.
+   */
+  selectionEpoch: number;
+  /**
+   * The server session (cookie-scoped vault + crypto version). Null once the
+   * cookie is known to be missing, in which case `vault` still holds the
+   * selection and `serverSession` is `missing`.
+   */
   session: SessionState | null;
+  authKey: CryptoKey | null;
   decryptedVault: DecryptedVault | null;
   vaultVersion: number | null;
   // Last server lock_epoch converged to (null = unknown / no session).
   // Survives lock (a lock publishes a new epoch); cleared with the session.
   lockEpoch: number | null;
-  isLocked: boolean;
   isSyncing: boolean;
   lockMetadata: LockMetadata | null;
 }

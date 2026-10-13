@@ -12,7 +12,7 @@ import {
 } from "../crypto/index.web";
 import { persistDeviceSecrets } from "../auth/utils";
 import { register } from "../queries/SignUp/query";
-import { readGoogleVaultPending, readGoogleVault } from "../google/api";
+import { readCloudVaultPending, readCloudVault } from "../cloud/api";
 import type { VoultPackage } from "../state/type";
 
 /**
@@ -29,7 +29,7 @@ import type { VoultPackage } from "../state/type";
  * If the vault already exists on server, the fast path just does the normal
  * passwordLoginFlow (server verifier check + device envelope).
  */
-export async function importVaultFromGoogle(args: {
+export async function importVaultFromCloud(args: {
   vaultId: string;
   fileId?: string;
   masterPassword: string;
@@ -57,10 +57,10 @@ export async function importVaultFromGoogle(args: {
   // Use pendingState token if we have no session (Case 1), else session-bound read.
   let pkgB64: string;
   if (args.pendingState) {
-    const res = await readGoogleVaultPending(args.pendingState, args.fileId!);
+    const res = await readCloudVaultPending(args.pendingState, args.fileId!);
     pkgB64 = res.package;
   } else {
-    const res = await readGoogleVault({ file_id: args.fileId });
+    const res = await readCloudVault({ file_id: args.fileId });
     pkgB64 = res.package;
   }
 

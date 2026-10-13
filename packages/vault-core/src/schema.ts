@@ -346,8 +346,13 @@ export interface LockMetadata {
   vaultKeyWrapIv: string;
 }
 
-/** The three top-level app states. */
-export type AuthState = "not_authenticated" | "locked" | "unlocked";
+// NOTE: the shared `AuthState` label union ("not_authenticated" | "locked" |
+// "unlocked") that used to live here has been removed. It described the *web
+// app's* routing and key handling, which the MV3 extension does not share (no
+// landing/lock/home routes, no first-run "no vault" state). The web app now
+// routes on `VaultState` in apps/client/src/lib/state/vault-state.ts, a
+// discriminated union that carries the vault id and key so they cannot
+// disagree.
 
 // --- Sync op payloads ----------------------------------------------------
 // Create carries a full VaultItem. Update carries only changed fields so two

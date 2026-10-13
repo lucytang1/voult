@@ -1,4 +1,5 @@
-import type { GoogleBinding, MirrorResult } from "./api";
+import type { CloudBinding, MirrorResult } from "./api";
+import { providerLabelForKind } from "./providers";
 
 /**
  * Turns real Drive backup state into what the user is actually told.
@@ -34,9 +35,10 @@ export const BACKUP_TITLE_COLOR: Record<Tone, string> = {
   error: "#f87171",
 };
 
-export function describeBackup(binding: GoogleBinding): BackupView {
+export function describeBackup(binding: CloudBinding): BackupView {
   const behind = binding.versions_behind ?? 0;
   const status = binding.sync_status;
+  const providerName = providerLabelForKind(binding.provider_kind);
 
   // Error and conflict states come first: they explain a stale or diverged
   // backup that a softer "pending" label would otherwise paper over.
@@ -46,7 +48,7 @@ export function describeBackup(binding: GoogleBinding): BackupView {
       tone: "error",
       title: "Backup conflict",
       detail:
-        "The copy in Google Drive changed since the last backup, so it was left alone rather than overwritten. Your vault on this device is unaffected.",
+        `The copy in ${providerName} changed since the last backup, so it was left alone rather than overwritten. Your vault on this device is unaffected.`,
     };
   }
   if (status === "auth_required") {
@@ -54,7 +56,7 @@ export function describeBackup(binding: GoogleBinding): BackupView {
       dot: "bg-red-500",
       tone: "error",
       title: "Backup paused",
-      detail: "Google access expired. Reconnect to resume backing up this vault.",
+      detail: `Access to ${providerName} expired. Reconnect to resume backing up this vault.`,
     };
   }
   if (status === "unlinked") {
@@ -66,8 +68,8 @@ export function describeBackup(binding: GoogleBinding): BackupView {
       tone: "warn",
       title: "Backup unavailable",
       detail: missing
-        ? "The backup file is missing from Google Drive. Your vault on this device is unaffected."
-        : "This vault is not linked to a Google Drive file.",
+        ? `The backup file is missing from ${providerName}. Your vault on this device is unaffected.`
+        : `This vault is not linked to a ${providerName} file.`,
     };
   }
   if (status === "error") {
@@ -86,7 +88,7 @@ export function describeBackup(binding: GoogleBinding): BackupView {
         status === "mirroring"
           ? "Backing up…"
           : `Backup is ${behind} ${behind === 1 ? "change" : "changes"} behind`,
-      detail: `Vault version ${binding.vault_version} on this device; Drive holds version ${
+      detail: `Vault version ${binding.vault_version} on this device; ${providerName} holds version ${
         binding.mirrored_vault_version ?? "none"
       }.`,
     };
@@ -128,16 +130,16 @@ export function describeMirrorResult(result: MirrorResult): MirrorFeedback {
       };
     case "conflict":
       return {
-        text: "The Drive copy changed since the last backup and was not overwritten.",
+        text: "The cloud copy changed since the last backup and was not overwritten.",
         tone: "error",
       };
     case "auth_required":
       return {
-        text: "Google access expired. Reconnect to resume backing up.",
+        text: "Cloud access expired. Reconnect to resume backing up.",
         tone: "error",
       };
     case "unlinked":
-      return { text: "This vault is not linked to a Google Drive file.", tone: "error" };
+      return { text: "This vault is not linked to a cloud backup file.", tone: "error" };
     case "unsupported":
       return {
         text: `This vault cannot be backed up yet (${result.reason}).`,
