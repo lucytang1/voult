@@ -6,13 +6,18 @@ import { useAppStore } from "@/src/lib/state";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { ExtensionPairing } from "@/src/lib/extension-pair";
 import { AutolockSection } from "@/src/lib/settings/autolock-section";
+import { DeviceUnlockSection } from "@/src/lib/settings/device-unlock-section";
+import { RecoveryKeySection } from "@/src/lib/settings/recovery-key-section";
 import {
-  useDisconnectGoogle,
-  useGoogleBinding,
-  useGoogleStatus,
-  useMirrorGoogleVault,
-} from "@/src/lib/google/queries";
-import { enableGoogleDriveForVault } from "@/src/lib/google/enableSync";
+  useDisconnectCloud,
+  useCloudBinding,
+  useCloudCredentials,
+  useCloudProviders,
+  useCloudStatus,
+  useMirrorCloudVault,
+} from "@/src/lib/cloud/queries";
+import { enableCloudForVault } from "@/src/lib/cloud/enableSync";
+import { providerLabelForKind } from "@/src/lib/cloud/providers";
 import {
   BACKUP_TITLE_COLOR,
   describeBackup,
@@ -21,7 +26,7 @@ import {
   describeMirrorResult,
   type BackupView,
   type MirrorFeedback,
-} from "@/src/lib/google/backup-status";
+} from "@/src/lib/cloud/backup-status";
 
 // The left rail, the page header and the content pane all read from this one
 // map, so adding a section is a single entry rather than three parallel edits.
@@ -35,7 +40,7 @@ const SECTIONS: Record<string, { label: string; title: string; description: stri
   provider: {
     label: "Provider",
     title: "Provider",
-    description: "Keep an encrypted backup in Google Drive.",
+    description: "Keep an encrypted backup with your cloud provider.",
     icon: Cloud,
   },
   security: {
@@ -50,30 +55,35 @@ type SectionId = keyof typeof SECTIONS;
 export default function Settings() {
   const router = useRouter();
   const session = useAppStore((state) => state.session);
-  const isLocked = useAppStore((state) => state.isLocked);
+  const isLocked = useAppStore((state) => state.vault.status !== "unlocked");
   const [googleActionLoading, setGoogleActionLoading] = useState(false);
   const [googleError, setGoogleError] = useState<string | null>(null);
   const [mirrorFeedback, setMirrorFeedback] = useState<MirrorFeedback | null>(null);
   const [section, setSection] = useState<SectionId>("extension");
+  const [requestedProvider, setRequestedProvider] = useState<string | null>(null);
 
   useAuthGuard(["unlocked"]);
 
-  const googleStatusQuery = useGoogleStatus(session?.vaultId ?? "anonymous", !!session?.vaultId && !isLocked);
-  const googleBindingQuery = useGoogleBinding(session?.vaultId, !!session?.vaultId && !isLocked);
+  const googleStatusQuery = useCloudStatus(session?.vaultId ?? "anonymous", !!session?.vaultId && !isLocked);
+  const providersQuery = useCloudProviders();
+  const credentialsQuery = useCloudCredentials(!!session?.vaultId && !isLocked);
+  const googleBindingQuery = useCloudBinding(session?.vaultId, !!session?.vaultId && !isLocked);
   const googleStatus = googleStatusQuery.data ?? null;
   const googleBinding = googleBindingQuery.data ?? null;
-  const googleConfigured = googleStatusQuery.isError
-    ? (googleStatusQuery.error as any)?.response?.data?.code !== "GOOGLE_NOT_CONFIGURED"
-    : googleStatusQuery.isSuccess ? true : null;
-  const disconnectGoogleMutation = useDisconnectGoogle();
-  const mirrorMutation = useMirrorGoogleVault(session?.vaultId);
+  const activeProviderKind = googleBinding?.provider_kind ?? providersQuery.data?.[0]?.kind;
+  const selectedProviderKind = requestedProvider ?? activeProviderKind;
+  const activeProviderLabel = activeProviderKind ? providerLabelForKind(activeProviderKind) : "cloud provider";
+  const selectedProviderLabel = selectedProviderKind ? providerLabelForKind(selectedProviderKind) : "cloud provider";
+  const googleConfigured = providersQuery.isSuccess ? providersQuery.data.length > 0 : null;
+  const disconnectCloudMutation = useDisconnectCloud();
+  const mirrorMutation = useMirrorCloudVault(session?.vaultId);
 
   const { icon: SectionIcon, ...sectionMeta } = SECTIONS[section];
 
   // Derived once so the status line, the detail line, and the "Back up now"
   // affordance all agree. Falls back to a pending view if the binding has not
   // loaded yet (e.g. right after connecting), rather than claiming "up to date".
-  const backupView: BackupView = googleBinding?.drive_file_id
+  const backupView: BackupView = googleBinding?.remote_file_id
     ? describeBackup(googleBinding)
     : describeBackupLoading();
 
@@ -86,10 +96,12 @@ export default function Settings() {
     setGoogleActionLoading(true);
     setGoogleError(null);
     try {
-      await enableGoogleDriveForVault(session.vaultId);
+      if (!selectedProviderKind) throw new Error("Cloud backup is not configured on this server.");
+      await enableCloudForVault(session.vaultId, selectedProviderKind);
+      setRequestedProvider(null);
       await refreshGoogle();
     } catch (e: any) {
-      const message = e?.response?.data?.error_msg || e?.message || "Failed to enable Google Drive";
+      const message = e?.response?.data?.error_msg || e?.message || "Failed to enable cloud backup";
       // The OAuth helper starts a browser redirect as part of this flow.
       if (!message.includes("Redirecting")) setGoogleError(message);
     } finally {
@@ -101,7 +113,7 @@ export default function Settings() {
     setGoogleActionLoading(true);
     setGoogleError(null);
     try {
-      await disconnectGoogleMutation.mutateAsync();
+      await disconnectCloudMutation.mutateAsync();
       await refreshGoogle();
     } catch (e: any) {
       setGoogleError(e?.response?.data?.error_msg || e?.message || "Failed to disconnect");
@@ -172,23 +184,53 @@ export default function Settings() {
         {section === "extension" ? (
           <ExtensionPairing />
         ) : section === "security" ? (
-          <AutolockSection />
+          <>
+            <AutolockSection />
+            <RecoveryKeySection />
+            <DeviceUnlockSection />
+          </>
         ) : (
+          <>
+          <View className="mb-4 rounded-2xl border border-border bg-card p-5">
+            <Text className="mb-3 text-sm font-semibold text-primary-text">Cloud provider</Text>
+            {providersQuery.isPending ? <Text className="text-sm text-muted-text">Loading providers…</Text> :
+              (providersQuery.data ?? []).length === 0 ? <Text className="text-sm text-muted-text">Cloud backup is not configured on this server.</Text> :
+              providersQuery.data?.map((provider) => {
+                const credential = credentialsQuery.data?.find((item) => item.kind === provider.kind);
+                const active = googleBinding?.provider_kind === provider.kind;
+                const selected = selectedProviderKind === provider.kind;
+                return <Pressable key={provider.kind} accessibilityRole="button" accessibilityState={{ selected }}
+                  className={`mb-2 flex-row items-center justify-between rounded-lg border px-4 py-3 ${selected ? "border-accent-line bg-surface" : "border-border"}`}
+                  onPress={() => setRequestedProvider(provider.kind)}>
+                  <View>
+                    <Text className="text-sm font-semibold text-primary-text">{providerLabelForKind(provider.kind)}</Text>
+                    <Text className="mt-1 text-xs text-muted-text">{active ? "Active backup" : credential ? `Connected${credential.email ? ` · ${credential.email}` : ""} · retained for switching` : "Not connected"}</Text>
+                  </View>
+                  <Text className="text-xs text-muted-text">{selected ? "Selected" : "Choose"}</Text>
+                </Pressable>;
+              })}
+            {selectedProviderKind && selectedProviderKind !== activeProviderKind && (
+              <Pressable className="mt-2 self-start rounded-lg bg-surface border border-border-strong px-4 py-2.5"
+                onPress={handleEnableGoogleDrive} disabled={googleActionLoading}>
+                <Text className="text-sm font-medium text-primary-text">{googleActionLoading ? "Switching…" : `Switch to ${selectedProviderLabel}`}</Text>
+              </Pressable>
+            )}
+          </View>
           <View className="rounded-2xl border border-border bg-card p-5">
             <View className="mb-1 flex-row items-center">
               <Cloud size={18} color="#c4b5fd" />
-              <Text className="ml-2 text-base font-semibold text-primary-text">Google Drive</Text>
+              <Text className="ml-2 text-base font-semibold text-primary-text">{activeProviderLabel}</Text>
             </View>
             <Text className="mb-4 text-sm text-muted-text">
-              Store an encrypted copy of this vault in your Google Drive app data.
+              Store an encrypted copy of this vault with {activeProviderLabel}.
             </Text>
 
             {googleConfigured === false ? (
-              <Text className="text-sm text-muted-text">Google Drive is not configured on this server.</Text>
-            ) : googleStatus?.connected && googleBinding?.drive_file_id ? (
+              <Text className="text-sm text-muted-text">Cloud backup is not configured on this server.</Text>
+            ) : googleStatus?.connected && googleBinding?.remote_file_id ? (
               <View>
                 {/* Real backup state, derived from cloud_binding — the server
-                    mirrors each committed vault write to Drive after the CAS,
+                    mirrors each committed vault write to the active provider after the CAS,
                     so this reflects whether that mirror actually kept up. */}
                 <View className="mb-2 flex-row items-center">
                   <View className={`mr-2 h-2 w-2 rounded-full ${backupView.dot}`} />
@@ -196,13 +238,13 @@ export default function Settings() {
                     {backupView.title}
                   </Text>
                 </View>
-                <Text className="text-sm text-muted-text">{googleStatus.email || "Google account connected"}</Text>
+                <Text className="text-sm text-muted-text">{googleStatus.email || `${activeProviderLabel} account connected`}</Text>
                 <Text className="mt-1 text-sm text-muted-text">{backupView.detail}</Text>
                 <Text className="mt-1 text-xs text-muted-text" numberOfLines={1}>
-                  Drive file: {googleBinding.drive_file_id}
+                  Remote file: {googleBinding.remote_file_id}
                 </Text>
                 {googleBinding.remote_revision && (
-                  <Text className="mt-1 text-xs text-muted-text">Drive revision: {googleBinding.remote_revision.slice(0, 8)}</Text>
+                  <Text className="mt-1 text-xs text-muted-text">Provider revision: {googleBinding.remote_revision.slice(0, 8)}</Text>
                 )}
 
                 {mirrorFeedback && (
@@ -219,7 +261,7 @@ export default function Settings() {
                     className="rounded-lg bg-surface border border-border-strong px-4 py-2"
                     onPress={handleBackupNow}
                     disabled={mirrorMutation.isPending || backupView.tone === "ok"}
-                    accessibilityLabel="Back up this vault to Google Drive now"
+                    accessibilityLabel={`Back up this vault to ${activeProviderLabel} now`}
                   >
                     <Text className="text-sm text-primary-text">
                       {mirrorMutation.isPending ? "Backing up…" : "Back up now"}
@@ -228,17 +270,17 @@ export default function Settings() {
                   <Pressable
                     className="rounded-lg border border-border-strong px-4 py-2"
                     onPress={handleDisconnectGoogle}
-                    disabled={googleActionLoading || disconnectGoogleMutation.isPending}
+                    disabled={googleActionLoading || disconnectCloudMutation.isPending}
                   >
                     <Text className="text-sm text-primary-text">
-                      {googleActionLoading || disconnectGoogleMutation.isPending ? "Disconnecting…" : "Disconnect Google Drive"}
+                      {googleActionLoading || disconnectCloudMutation.isPending ? "Disconnecting…" : `Disconnect ${activeProviderLabel}`}
                     </Text>
                   </Pressable>
                 </View>
               </View>
             ) : googleStatus?.connected ? (
               <View>
-                <Text className="mb-1 text-sm font-medium text-yellow-400">Google account connected</Text>
+                <Text className="mb-1 text-sm font-medium text-yellow-400">{activeProviderLabel} account connected</Text>
                 <Text className="mb-3 text-sm text-muted-text">{googleStatus.email} — backup is not enabled yet.</Text>
                 <Pressable
                   className="self-start rounded-lg bg-surface border border-border-strong px-4 py-2.5"
@@ -259,13 +301,14 @@ export default function Settings() {
                   disabled={googleActionLoading || googleStatusQuery.isPending}
                 >
                   <Text className="text-sm font-medium text-primary-text">
-                    {googleActionLoading ? "Connecting…" : "Connect Google Drive"}
+                    {googleActionLoading ? "Connecting…" : `Connect ${selectedProviderLabel}`}
                   </Text>
                 </Pressable>
               </View>
             )}
             {googleError && <Text className="mt-3 text-sm text-red-400">{googleError}</Text>}
           </View>
+          </>
         )}
       </ScrollView>
     </View>

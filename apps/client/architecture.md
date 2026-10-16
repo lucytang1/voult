@@ -143,15 +143,81 @@ applied by another:
 
 | Store | Namespace | Notes |
 |---|---|---|
-| SQLite (OPFS) | `file:voult-<vaultId>.db` | One database file per vault (`src/lib/sqlite/web/init-db.ts`). Holds that vault's `intent` log and `client_state`. Opened only after a session exists; closed on lock and logout. |
-| IndexedDB `voult` | Records keyed `vault:<vaultId>` | `device_key` + `device_envelope` stores in `src/lib/crypto/device-key.ts`. Logout deletes only the active vault's records. |
-| TanStack Query cache | In-memory only | Cleared on logout/401 via the centralized teardown path. |
-| Zustand store | In-memory only | Wiped on lock/logout. |
-| `sessionStorage["voult.lockedAt"]` | Profile-global (intentional) | Locking is profile-wide semantics, not vault-specific. Stores the *timestamp* of the last lock, not a boolean, so a reload stays locked only until the web autolock timeout lapses. |
+| SQLite (OPFS) | `file:voult-<vaultId>.db` | One database file per vault (`src/lib/sqlite/web/init-db.ts`). Holds that vault's `intent` log and `client_state`. Opened only after a vault key is in hand; closed on lock and on session loss. |
+| IndexedDB `voult` | Records keyed `vault:<vaultId>` | `device_key` + `device_envelope` stores in `src/lib/crypto/device-key.ts`. **Retained on session loss** (see below); deleted only on a real sign-out. |
+| TanStack Query cache | In-memory only | Cleared on lock and on 401 via the centralized teardown path. |
+| Zustand store | In-memory only | Wiped on lock. `vault: VaultState` is the single source of truth for selection and key presence. |
+| `localStorage["voult.selectedVault"]` | Profile-global | The selected vault id. Persisted so the app can restore *its* vault even when the session cookie is gone (M2). |
+| `localStorage["voult.lockRecord"]` | Profile-global | `{ vaultId, reason, lockedAt }` (`src/lib/state/selection-store.ts`). `reason` is `manual \| autolock \| peer \| session_expired`: the first three hold until an explicit unlock, `autolock` lapses after the window, `session_expired` forces a password re-auth. Replaces the old tab-scoped `sessionStorage["voult.lockedAt"]`. |
 | `localStorage["voult.autolock.*"]` | Device-global | Web + extension autolock timeouts (`src/lib/settings/index.ts`). Not vault data: deliberately readable while the vault is locked, which SQLite is not. |
 
-Teardown is centralized in `src/lib/auth/teardown.ts` and used by all exit
-paths (home logout, lock-screen logout, 401 interceptor): capture the vault id →
-close the per-vault SQLite handle → delete this vault's device records → wipe
-volatile state → clear the query cache. Sync additionally pins the vault id it
-started for and aborts mid-run if the session changes.
+Restart behaviour is decided by `decideRestore()` in `src/lib/state/vault-state.ts`,
+a pure function over `(selection, lock record, autolock setting, device key
+presence)` — so the policy is reviewable in one place rather than spread across
+the bootstrap.
+
+## Switching vaults (M3)
+
+Switching is **atomic around the selected id**. `switchVaultOpen()` in
+`src/lib/state/index.ts` verifies that the server authenticated the vault the
+user asked for (and that the decrypted document belongs to it), then commits
+selection + session + key + document + version + lock epoch in a **single**
+store write. The previous path issued five separate writes, so React could
+render an intermediate combination — briefly "unlocked with no data", or a
+selection for B carrying A's last decrypted document.
+
+Anything async that could outlive a switch captures a **selection epoch** first:
+
+```ts
+const guard = captureSelectionEpoch();
+const data = await fetchSomething();
+if (!guard.stillCurrent()) return; // a switch happened; drop the result
+commit(data);
+```
+
+`selectionEpoch` increments on every *identity* change. Comparing vault ids is
+not sufficient: a switch A→B→A leaves the id unchanged while the captured key
+and intents are still stale. Re-selecting the *same* vault deliberately does
+not bump it, so a routine re-auth or bootstrap restore does not abort a
+legitimate in-flight sync.
+
+Guarded call sites: `sync()` and its `adoptServerSnapshot`, the vault-open and
+cloud-import flows in `app/vault/index.tsx`, home's async decrypt effect, and
+`useGetVault`'s version write.
+
+`sync()` additionally pins on the **selection** rather than the session —
+M2 made `session` nullable while a vault is still selected, so the old
+`session?.vaultId` comparison would have stamped snapshots with an empty id
+after session loss.
+
+A failed switch writes nothing: the previous vault keeps its state, so the user
+lands on a coherent locked-or-unlocked screen instead of a half-switched one.
+
+OAuth: a **pending provider token never becomes a selection**. Pending state
+only lists candidate vaults and links a credential after an explicit,
+password-verified import. The only selection writes are a real cookie-backed
+session restore, a switch, and a create.
+
+## Session loss vs. sign-out (M2)
+
+These used to be the same code path and they are not the same thing:
+
+- **Session loss** (`SESSION_REQUIRED`, 401) is an *authorization* fact. The
+  cookie no longer permits API calls, but the user is still the owner of the
+  selected vault on this device. `teardownVaultSession()` therefore wipes keys
+  and plaintext, closes SQLite, clears the query cache, and marks
+  `serverSession: "missing"` — while **retaining the vault selection and the
+  local device key + envelope**. The user stays on `/lock` for their own vault
+  and re-authenticates with the master password
+  (`reauthenticateAndUnlock`), which re-establishes the session via the existing
+  verifier flow and then unwraps the key locally. Deleting the device material
+  here would silently downgrade every cookie expiry into a full password
+  re-entry, for no security gain.
+- **Sign-out** (`clearSessionState`) genuinely deselects: selection, lock record,
+  session, and keys all go. There is no user-facing logout button; this runs when
+  there is genuinely no vault left (e.g. cleared app data).
+
+A network outage is neither. It marks the session `unknown` and changes nothing
+else — offline is a normal state for the offline-first intent queue, and treating
+it as a revoked session would wipe the user's place in the app every time they
+worked on a plane.

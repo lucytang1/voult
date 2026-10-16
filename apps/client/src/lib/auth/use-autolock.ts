@@ -38,7 +38,7 @@ const CHECK_INTERVAL_MS = 5000;
 
 export function useAutolock(): void {
   const vaultId = useAppStore((s) => s.session?.vaultId ?? null);
-  const isLocked = useAppStore((s) => s.isLocked);
+  const isLocked = useAppStore((s) => s.vault.status !== "unlocked");
 
   useEffect(() => {
     if (typeof window === "undefined") return;

@@ -1,7 +1,6 @@
 import { passwordLoginFlow } from "../auth/flows/login";
 import { fetchCryptoParams } from "../queries/cryptoParams/query";
 import type { UnlockedSession } from "../auth/flows";
-import { http } from "../queries/http";
 import {
   createAuthKey,
   getAuthVerifierB64,
@@ -9,10 +8,13 @@ import {
   importVaultKey,
   unwrapKeyBytes,
   decrypt,
+  b64,
 } from "../crypto/index.web";
-import { persistDeviceSecrets } from "../auth/utils";
+import { persistDeviceSecrets, generateRecoveryMaterial } from "../auth/utils";
 import { register } from "../queries/SignUp/query";
-import { readGoogleVaultPending, readGoogleVault } from "../google/api";
+import type { RegisterRequest, RegisterResponse } from "../queries/SignUp/api.schema";
+import { readCloudVaultPending, readCloudVault } from "../cloud/api";
+import { commitVaultRegistration, type PendingVaultRegistration } from "./registration";
 import type { VoultPackage } from "../state/type";
 
 /**
@@ -29,12 +31,29 @@ import type { VoultPackage } from "../state/type";
  * If the vault already exists on server, the fast path just does the normal
  * passwordLoginFlow (server verifier check + device envelope).
  */
-export async function importVaultFromGoogle(args: {
+/**
+ * Result of inspecting the cloud vault.
+ *
+ * Two genuinely different situations, and conflating them is what caused the
+ * bug this module was restructured to fix:
+ *
+ *   - `unlocked` — the vault was already on this server, so the master password
+ *     was all that was needed and its recovery file has been dealt with before.
+ *   - `pending_registration` — the vault lived only as a Drive package. It does
+ *     NOT exist on this server yet, and it must not come into existence until
+ *     the user has a recovery file for it. Hence a *pending* value rather than
+ *     an unlocked session: there is genuinely nothing to unlock yet.
+ */
+export type CloudImportOutcome =
+  | { kind: "unlocked"; session: UnlockedSession }
+  | { kind: "pending_registration"; pending: PendingVaultRegistration };
+
+export async function importVaultFromCloud(args: {
   vaultId: string;
   fileId?: string;
   masterPassword: string;
   pendingState?: string;
-}): Promise<UnlockedSession> {
+}): Promise<CloudImportOutcome> {
   // If we have a pending Drive token (Case 1, no session), skip the server
   // DB check entirely — vault is not on this server yet, and calling
   // GET /get_crypto_params will just log a VAULT_NOT_FOUND error.
@@ -42,7 +61,13 @@ export async function importVaultFromGoogle(args: {
   if (shouldTryServerFirst) {
     try {
       const params = await fetchCryptoParams(args.vaultId);
-      return await passwordLoginFlow(args.vaultId, args.masterPassword, params.salt, params.iterations);
+      const session = await passwordLoginFlow(
+        args.vaultId,
+        args.masterPassword,
+        params.salt,
+        params.iterations,
+      );
+      return { kind: "unlocked", session };
     } catch (e: any) {
       const code = e?.response?.data?.code as string | undefined;
       // Only fallback on VAULT_NOT_FOUND; other errors (network, etc.) bubble up.
@@ -57,10 +82,10 @@ export async function importVaultFromGoogle(args: {
   // Use pendingState token if we have no session (Case 1), else session-bound read.
   let pkgB64: string;
   if (args.pendingState) {
-    const res = await readGoogleVaultPending(args.pendingState, args.fileId!);
+    const res = await readCloudVaultPending(args.pendingState, args.fileId!);
     pkgB64 = res.package;
   } else {
-    const res = await readGoogleVault({ file_id: args.fileId });
+    const res = await readCloudVault({ file_id: args.fileId });
     pkgB64 = res.package;
   }
 
@@ -131,56 +156,90 @@ export async function importVaultFromGoogle(args: {
   const authKey = await createAuthKey(args.masterPassword, salt, iterations);
   const vaultVerifier = await getAuthVerifierB64(authKey);
 
-  // Try to register this vault on this server instance so future
-  // get_crypto_params / get_vault succeed. If it already exists (race),
-  // fall back to password login.
+  // Recovery material for the row we are about to create here.
+  //
+  // The package deliberately carries only a `passwordKeyEnvelope` — recovery is
+  // per-vault and was never bundled, precisely so a compromised provider backup
+  // does not hand over a second route into the key. So a restore has to MINT a
+  // fresh recovery secret on this device. The user is handed the file through
+  // the same one-time interstitial as the create flow, BEFORE anything is
+  // registered.
+  const recovery = await generateRecoveryMaterial(vaultKeyRaw, pkg.vaultId);
+
+  const parsedItems = Array.isArray(decryptedVault.items) ? decryptedVault.items : [];
+
+  console.info("Vault package verified locally; nothing has been registered yet");
+
+  // Nothing has been sent to the server. The caller shows the recovery file,
+  // and only then calls `finishCloudImport`.
+  return {
+    kind: "pending_registration",
+    pending: {
+      vaultId: pkg.vaultId,
+      cryptoVersion: pkg.cryptoVersion ?? 2,
+      version: pkg.logicalRevision ?? 1,
+      request: {
+        vault_id: pkg.vaultId,
+        vault_verifier: vaultVerifier,
+        salt,
+        iterations,
+        vault: pkg.snapshot.ciphertext,
+        vaultiv: pkg.snapshot.iv,
+        crypto_version: pkg.cryptoVersion ?? 2,
+        vault_key_wrap: pkg.passwordKeyEnvelope.wrappedVaultKey,
+        vault_key_wrap_iv: pkg.passwordKeyEnvelope.iv,
+        recovery_verifier: b64(recovery.recoveryVerifier),
+        recovery_salt: recovery.recoverySalt,
+        recovery_wrap: recovery.recoveryWrap,
+        recovery_wrap_iv: recovery.recoveryWrapIv,
+      },
+      vaultKey,
+      vaultKeyRaw,
+      decryptedVault: { formatVersion: 1, vaultId: pkg.vaultId, items: parsedItems },
+      recoveryKey: recovery.recoveryKey,
+    },
+  };
+}
+
+/**
+ * Registers a restored vault — the second half, run once the user has the
+ * recovery file.
+ *
+ * Owns the VAULT_EXISTS race: another device may have registered this vault id
+ * between the fetch and the commit. That is not an error to surface, it is the
+ * server telling us to log in normally instead — the vault already exists, it
+ * already has recovery, and the file we just minted is for a vault that was
+ * never created here.
+ */
+export async function finishCloudImport(
+  pending: PendingVaultRegistration,
+  sendRegistration: (payload: RegisterRequest) => Promise<RegisterResponse> = register,
+  masterPassword?: string,
+): Promise<UnlockedSession> {
   try {
-    await register({
-      vault_id: pkg.vaultId,
-      vault_verifier: vaultVerifier,
-      salt,
-      iterations,
-      vault: pkg.snapshot.ciphertext,
-      vaultiv: pkg.snapshot.iv,
-      crypto_version: pkg.cryptoVersion ?? 2,
-      vault_key_wrap: pkg.passwordKeyEnvelope.wrappedVaultKey,
-      vault_key_wrap_iv: pkg.passwordKeyEnvelope.iv,
-    });
+    const committed = await commitVaultRegistration(pending, sendRegistration);
+    // Persist device envelope for silent unlock next time.
+    await persistDeviceSecrets(pending.vaultKeyRaw, pending.vaultId);
+    return {
+      session: committed.session,
+      vaultKey: committed.vaultKey,
+      decryptedVault: committed.decryptedVault,
+      version: committed.version,
+      lockEpoch: committed.lockEpoch,
+    };
   } catch (regErr: any) {
     const regCode = regErr?.response?.data?.code as string | undefined;
-    if (regCode === "VAULT_EXISTS") {
-      // Vault was created concurrently — just login normally.
-      const params = await fetchCryptoParams(args.vaultId);
-      return await passwordLoginFlow(args.vaultId, args.masterPassword, params.salt, params.iterations);
-    }
-    // If register failed for other reason, but we already decrypted the package,
-    // treat the Drive package as the local vault and still create a session
-    // locally? We must have a server session for the app to be "unlocked",
-    // so rethrow.
-    throw regErr;
+    if (regCode !== "VAULT_EXISTS") throw regErr;
+    // Created concurrently on another device — fall back to a normal login. The
+    // concurrent row is authoritative and carries its own recovery material;
+    // the file minted above belongs to nothing and is discarded with `pending`.
+    if (!masterPassword) throw regErr;
+    const params = await fetchCryptoParams(pending.vaultId);
+    return passwordLoginFlow(
+      pending.vaultId,
+      masterPassword,
+      params.salt,
+      params.iterations,
+    );
   }
-
-  // Persist device envelope for silent unlock next time.
-  await persistDeviceSecrets(vaultKeyRaw, pkg.vaultId);
-
-  // The register above established a session; record its lock epoch
-  // (fresh vault → 0) so the session-sync check has a baseline.
-  let lockEpoch = 0;
-  try {
-    const { fetchSession } = await import("../queries/session/query");
-    const session = await fetchSession();
-    lockEpoch = session.lock_epoch ?? 0;
-  } catch {
-    // Offline/legacy server — unlock still valid; sync check converges later.
-  }
-
-  // Build UnlockedSession from the Drive-decrypted data.
-  const parsedItems = Array.isArray(decryptedVault.items) ? decryptedVault.items : [];
-  return {
-    session: { vaultId: pkg.vaultId, cryptoVersion: pkg.cryptoVersion ?? 2 },
-    vaultKey,
-    decryptedVault: { formatVersion: 1, vaultId: pkg.vaultId, items: parsedItems },
-    version: pkg.logicalRevision ?? 1,
-    lockEpoch,
-  };
 }

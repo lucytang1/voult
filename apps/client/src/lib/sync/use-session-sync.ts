@@ -2,10 +2,12 @@ import { useEffect, useRef } from "react";
 import { router } from "expo-router";
 import type { QueryClient } from "@tanstack/react-query";
 import { fetchSession } from "../queries/session/query";
-import { isSessionRequired } from "../queries/http";
+import { isNetworkError, isSessionRequired } from "../queries/http";
 import { teardownVaultSession, lockVaultStorage as closeVaultDb } from "../auth/teardown";
 import {
   lockVaultStorage as lockVaultKeys,
+  markServerSessionActive,
+  markServerSessionUnknown,
   updateLockEpoch,
   useAppStore,
 } from "../state";
@@ -30,10 +32,15 @@ import {
  * - Unlock is per-device and never propagates: each side re-unwraps locally.
  *
  * Rules applied on every successful GET /session:
- * - 401 SESSION_REQUIRED → full scoped teardown (single-vault invariant: a
- *   dead session can never leak one vault's local data into another's).
+ * - 401 SESSION_REQUIRED → wipe keys/plaintext, close this vault's DB, mark the
+ *   server session missing — but keep the vault *selected* and route to /lock
+ *   for it. The selection and local device envelope survive; the master
+ *   password re-authenticates (see `reauthenticateAndUnlock`). This is the M2
+ *   change from routing to `/` and deleting the device key.
+ * - transport error → mark the session unknown, change nothing else. A network
+ *   outage is not evidence that the cookie is invalid.
  * - `vault_id` mismatch → another surface switched vaults → teardown the old
- *   vault and land unauthenticated; the new vault is adopted locked on its
+ *   vault and land with no selection; the new vault is adopted locked on its
  *   next unlock, never auto-unlocked.
  * - epoch bump → lock now (wipe keys, close this vault's DB, drop ciphertext
  *   cache, route to /lock). Unknown local epoch (null) adopts without wiping.
@@ -50,20 +57,31 @@ export function useSessionSync(queryClient?: QueryClient) {
       if (lockEpoch !== null && epoch <= lockEpoch) return;
       updateLockEpoch(epoch);
       // Already locked: epoch converged, nothing secret left to wipe.
-      if (useAppStore.getState().isLocked) return;
-      lockVaultKeys(null);
+      if (useAppStore.getState().vault.status !== "unlocked") return;
+      lockVaultKeys(null, "peer");
       queryClient?.removeQueries({ queryKey: ["vault"] });
       queryClient?.removeQueries({ queryKey: ["favicon", vaultId] });
-      queryClient?.removeQueries({ queryKey: ["google"] });
+      queryClient?.removeQueries({ queryKey: ["cloud"] });
       await closeVaultDb();
       postSessionEvent("locked", vaultId, epoch);
       router.replace("/lock" as any);
     };
 
-    const applyLoggedOut = async () => {
-      if (!useAppStore.getState().session) return;
+    /**
+     * M2: the session is gone, but the vault selection is not.
+     *
+     * This used to tear everything down and route to `/`, which made an expired
+     * cookie indistinguishable from a fresh install — the user lost their place
+     * in the app and had to rediscover their vault. Now teardown keeps the
+     * selection, and we route to `/lock` for *this* vault, where the master
+     * password re-establishes the session.
+     */
+    const applySessionLost = async () => {
+      const { vault } = useAppStore.getState();
+      if (vault.status === "no_vault") return;
       await teardownVaultSession(queryClient);
-      router.replace("/" as any);
+      postSessionEvent("locked", null, null);
+      router.replace("/lock" as any);
     };
 
     const checkSession = async () => {
@@ -75,6 +93,7 @@ export function useSessionSync(queryClient?: QueryClient) {
         const remote = await fetchSession();
         const current = useAppStore.getState();
         if (!current.session) return;
+        markServerSessionActive();
 
         // Single-vault invariant: the cookie now names a different vault
         // (peer logged in elsewhere). Tear down ours; adopt nothing.
@@ -96,11 +115,15 @@ export function useSessionSync(queryClient?: QueryClient) {
         }
       } catch (e) {
         if (isSessionRequired(e)) {
-          postSessionEvent("logged-out", null, null);
-          await applyLoggedOut();
+          await applySessionLost();
+        } else if (isNetworkError(e)) {
+          // Offline is a normal state for the intent queue, and it says nothing
+          // about whether the cookie is valid. Record it as unknown rather than
+          // missing so no teardown is triggered on a failed request.
+          markServerSessionUnknown();
         }
-        // Network errors are ignored: offline is a normal state for the
-        // intent queue, and unlock paths stay usable while disconnected.
+        // Other errors (e.g. 404) leave state untouched; the lock screen's
+        // unlock attempt surfaces them.
       } finally {
         inFlight.current = false;
       }
@@ -116,7 +139,7 @@ export function useSessionSync(queryClient?: QueryClient) {
           }
           break;
         case "logged-out":
-          void applyLoggedOut();
+          void applySessionLost();
           break;
         case "vault-switch":
           // Authoritative re-check: the cookie is the source of truth.

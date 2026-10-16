@@ -214,9 +214,7 @@ pub async fn pair_consume(
         );
     }
     let normalized = normalize_code(&payload.code);
-    if normalized.len() != CODE_LEN
-        || !normalized.bytes().all(|b| CODE_ALPHABET.contains(&b))
-    {
+    if normalized.len() != CODE_LEN || !normalized.bytes().all(|b| CODE_ALPHABET.contains(&b)) {
         // Same generic error as unknown/expired: no oracle for code shape.
         return error_response(
             StatusCode::NOT_FOUND,

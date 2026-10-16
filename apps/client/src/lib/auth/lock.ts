@@ -51,16 +51,18 @@ export interface LockOptions {
  */
 export async function lockVaultNow(options: LockOptions): Promise<void> {
   const { queryClient, reason } = options;
-  const { session, isLocked } = useAppStore.getState();
+  const { session, vault } = useAppStore.getState();
   if (!session) return;
   // Already locked: nothing secret is left in memory and the epoch is
   // converged. Re-locking would only bump the epoch for no reason.
-  if (isLocked) return;
+  if (vault.status !== "unlocked") return;
 
   // The ["vault"] cache holds VaultResponse, so the envelope lives under .vault.
   // Read it here rather than forcing every caller to thread it through — an
-  // idle lock fires with no component holding useGetVault's data.
-  const vault =
+  // idle lock fires with no component holding useGetVault's data. Named
+  // `envelope`, not `vault`: `vault` above is the vault state union, and the
+  // two are unrelated (this is the *server's* password-wrapped key).
+  const envelope =
     options.vault ??
     ((queryClient?.getQueriesData<VaultResponse>({ queryKey: ["vault"] })[0]?.[1]
       ?.vault as WrappedVaultKeyEnvelope | undefined) ?? null);
@@ -68,12 +70,12 @@ export async function lockVaultNow(options: LockOptions): Promise<void> {
   let metadata: LockMetadata | null = null;
   try {
     const params = await fetchCryptoParams(session.vaultId);
-    if (vault?.vault_key_wrap && vault?.vault_key_wrap_iv) {
+    if (envelope?.vault_key_wrap && envelope?.vault_key_wrap_iv) {
       metadata = {
         salt: params.salt,
         iterations: params.iterations,
-        vaultKeyWrap: vault.vault_key_wrap,
-        vaultKeyWrapIv: vault.vault_key_wrap_iv,
+        vaultKeyWrap: envelope.vault_key_wrap,
+        vaultKeyWrapIv: envelope.vault_key_wrap_iv,
       };
     }
   } catch (e) {
@@ -89,10 +91,10 @@ export async function lockVaultNow(options: LockOptions): Promise<void> {
     console.warn("Failed to publish lock, locked locally only", e);
   }
 
-  lockVaultKeys(metadata);
+  lockVaultKeys(metadata, reason === "idle" ? "autolock" : "manual");
   queryClient?.removeQueries({ queryKey: ["vault"] });
   queryClient?.removeQueries({ queryKey: ["favicon", session.vaultId] });
-  queryClient?.removeQueries({ queryKey: ["google"] });
+  queryClient?.removeQueries({ queryKey: ["cloud"] });
   await closeVaultDb();
 
   console.info(

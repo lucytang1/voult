@@ -151,8 +151,8 @@ pub async fn update_vault(
     // an accepted vault write into a 5xx or a slow response.
     let mirror_pool = pool.get_ref().clone();
     let mirror_vault_id = vault_id.clone();
-    crate::google::mirror::mark_pending(&mirror_pool, &mirror_vault_id).await;
-    crate::google::mirror::spawn_after_commit(mirror_pool, mirror_vault_id);
+    crate::cloud::mirror::mark_pending(&mirror_pool, &mirror_vault_id).await;
+    crate::cloud::mirror::spawn_after_commit(mirror_pool, mirror_vault_id);
 
     HttpResponse::Ok().json(UpdateVaultResponse {
         vault: new_vault,
@@ -171,9 +171,9 @@ mod tests {
     use crate::db::DbPool;
     use crate::endpoints::register;
     use crate::entity::vault::Entity as VaultEntity;
+    use actix_web::App;
     use actix_web::cookie::{Cookie, Key};
     use actix_web::test;
-    use actix_web::App;
     use migration::MigratorTrait;
     use sea_orm::{ActiveModelTrait, Database, EntityTrait, Set};
     use serde_json::json;
@@ -202,8 +202,10 @@ mod tests {
     async fn seed_binding(pool: &DbPool, file_id: Option<&str>) {
         let am = crate::entity::cloud_binding::ActiveModel {
             vault_id: Set(VAULT_ID.to_string()),
-            provider_kind: Set("google_drive".to_string()),
-            drive_file_id: Set(file_id.map(|s| s.to_string())),
+            provider_kind: Set(crate::cloud::provider::ProviderKind::GoogleDrive
+                .as_str()
+                .to_string()),
+            remote_file_id: Set(file_id.map(|s| s.to_string())),
             sync_status: Set("idle".to_string()),
             ..Default::default()
         };
@@ -254,6 +256,13 @@ mod tests {
                     "crypto_version": 2,
                     "vault_key_wrap": "d3JhcA==",
                     "vault_key_wrap_iv": "d2l2",
+                    // Recovery is mandatory at registration. These tests cover
+                    // vault writes and mirroring, not recovery, so opaque
+                    // stand-in values are enough to get a valid row.
+                    "recovery_verifier": "cmVjb3ZlcnktdmVyaWZpZXI=",
+                    "recovery_salt": "cmVjb3Zlcnktc2FsdA==",
+                    "recovery_wrap": "cmVjb3Zlcnktd3JhcA==",
+                    "recovery_wrap_iv": "cmVjdml2",
                 }))
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -308,7 +317,11 @@ mod tests {
         assert_eq!(body["version"], 4, "CAS must still advance the version");
 
         // And the write is genuinely durable.
-        let stored = VaultEntity::find_by_id(VAULT_ID).one(&pool).await.unwrap().unwrap();
+        let stored = VaultEntity::find_by_id(VAULT_ID)
+            .one(&pool)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.version, 4);
         assert_eq!(stored.vault, "bmV3LWNpcGhlcnRleHQ=");
     }
@@ -328,7 +341,12 @@ mod tests {
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["code"], "VERSION_CONFLICT");
         assert_eq!(
-            VaultEntity::find_by_id(VAULT_ID).one(&pool).await.unwrap().unwrap().version,
+            VaultEntity::find_by_id(VAULT_ID)
+                .one(&pool)
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
             3,
             "a rejected write must leave the stored version untouched"
         );
@@ -371,7 +389,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Drive the same code path the detached task would run, deterministically.
-        crate::google::mirror::mirror_now(&pool, VAULT_ID).await;
+        crate::cloud::mirror::mirror_now(&pool, VAULT_ID).await;
 
         let binding = crate::entity::cloud_binding::Entity::find_by_id(VAULT_ID)
             .one(&pool)
@@ -387,7 +405,12 @@ mod tests {
             "a failed mirror must not report the backup as current"
         );
         assert_eq!(
-            VaultEntity::find_by_id(VAULT_ID).one(&pool).await.unwrap().unwrap().version,
+            VaultEntity::find_by_id(VAULT_ID)
+                .one(&pool)
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
             4,
             "the vault write stands regardless of mirror outcome"
         );

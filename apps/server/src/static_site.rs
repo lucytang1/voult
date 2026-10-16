@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use actix_files::{Files, NamedFile};
-use actix_web::dev::{fn_service, ServiceRequest, ServiceResponse};
 use actix_web::HttpResponse;
+use actix_web::dev::{ServiceRequest, ServiceResponse, fn_service};
 
 const INDEX_FILE: &str = "index.html";
 

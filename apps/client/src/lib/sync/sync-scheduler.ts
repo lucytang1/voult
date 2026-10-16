@@ -16,8 +16,17 @@ class SyncScheduler {
   requestSync(trigger?: SyncTrigger): void {
     // Locked vaults have no key material; pending intents stay queued and
     // will sync on the first trigger after unlock. (sync() also self-bails.)
-    if (useAppStore.getState().isLocked) {
+    const { vault, serverSession } = useAppStore.getState();
+    if (vault.status !== "unlocked") {
       console.info("[SyncScheduler] skipping sync: vault is locked");
+      return;
+    }
+    // M2: an unlocked vault with a dead cookie cannot push anything — every
+    // call would 401. Skipping here avoids a pointless request storm and, more
+    // importantly, avoids the 401 interceptor re-running teardown in a loop
+    // while the user is on the lock screen re-authenticating.
+    if (serverSession !== "active") {
+      console.info("[SyncScheduler] skipping sync: server session not active");
       return;
     }
     if (this.running) {

@@ -1,10 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Pressable, Text, View, ActivityIndicator } from "react-native";
 import { useRouter } from "expo-router";
-import { GoogleDriveIcon } from "../../assets/images/GoogleDriveIcon";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
-import { redirectToGoogleAuth } from "@/src/lib/google/api";
-import { useStartGoogleAuth } from "@/src/lib/google/queries";
+import { listCloudProviders, redirectToCloudAuth, startCloudAuth, type CloudProviderInfo } from "@/src/lib/cloud/api";
+import { providerLabel, cloudProviderRegistry, CloudProviderFallbackIcon } from "@/src/lib/cloud/providers";
 
 /**
  * Landing / first-run entry (Case 1: no session).
@@ -17,52 +16,51 @@ import { useStartGoogleAuth } from "@/src/lib/google/queries";
  *
  * Note the deliberate asymmetry in the card's two calls to action: the
  * primary path (create a vault locally) is an outline, and the accent
- * fill is spent on the Google Drive import. "Local first" is the product,
+ * fill is spent on the cloud backup import. "Local first" is the product,
  * so it should not wear the loudest colour.
  *
  * When no session is present the user chooses exactly two options:
  *   1) Create a new vault locally -> enter master password -> vault created
  *      (can later enable cloud sync from Settings/Home).
- *   2) Use Cloud sync -> Google OAuth -> list Drive vaults -> select vault
+ *   2) Use Cloud sync -> cloud provider OAuth -> list provider vaults -> select vault
  *      -> enter master password -> decrypt & download locally.
  * No vault-id input is ever shown.
  */
 export default function Landing() {
   // Landing is only for signed-out users; locked users go to /lock,
   // unlocked users go straight to /home.
-  useAuthGuard(["not_authenticated"]);
+  useAuthGuard(["no_vault"]);
   const router = useRouter();
-  const [googleLoading, setGoogleLoading] = useState(false);
-  const [googleError, setGoogleError] = useState<string | null>(null);
-  const [googleAvailable, setGoogleAvailable] = useState<boolean | null>(null);
-  const googleAuth = useStartGoogleAuth();
+  const [cloudLoading, setCloudLoading] = useState(false);
+  const [cloudError, setCloudError] = useState<string | null>(null);
+  const [showProviderPicker, setShowProviderPicker] = useState(false);
+  const [providers, setProviders] = useState<CloudProviderInfo[] | null>(null);
 
-  const onGoogleDrive = async () => {
-    setGoogleError(null);
-    setGoogleLoading(true);
+  useEffect(() => {
+    let active = true;
+    listCloudProviders().then((items) => { if (active) setProviders(items); })
+      .catch(() => { if (active) setProviders([]); });
+    return () => { active = false; };
+  }, []);
+
+  const onCloudProvider = async (provider: CloudProviderInfo) => {
+    setCloudError(null);
+    setCloudLoading(true);
     try {
       // Start the pre-session (pending) OAuth flow — no email is sent. The
       // vault is imported later by vault id + master password in the chooser.
-      const { auth_url } = await googleAuth.mutateAsync();
-      googleAuth.reset();
-      redirectToGoogleAuth(auth_url);
+      const { auth_url } = await startCloudAuth(provider.kind);
+      redirectToCloudAuth(auth_url);
     } catch (e: any) {
-      const code = e?.response?.data?.code as string | undefined;
-      if (code === "GOOGLE_NOT_CONFIGURED") {
-        setGoogleAvailable(false);
-        setGoogleError("Google Drive is not configured on this server.");
-      } else {
-        setGoogleError(e?.response?.data?.error_msg || e?.message || "Failed to start Google Drive");
-      }
-      setGoogleLoading(false);
-      googleAuth.reset();
+      setCloudError(e?.response?.data?.error_msg || e?.message || `Failed to start ${providerLabel(provider)}`);
+      setCloudLoading(false);
     }
   };
 
   return (
     <View className="flex-1 flex-col bg-ground font-app md:flex-row">
       {/* Left — copy panel */}
-      <View className="flex-1 justify-center bg-ground px-6 py-12 md:px-[72px] md:py-[80px]">
+      <View className="flex-1 justify-center bg-ground px-6 py-12 md:px-18 md:py-20">
         <View>
           <Text className="text-[80px] font-normal leading-[68px] tracking-[-0.02em] text-primary-text">
             Voult
@@ -93,7 +91,7 @@ export default function Landing() {
             {/* Capped width so the sentence breaks onto two lines as in the
                 artboard instead of filling the card's full measure. */}
             <Text className="mx-auto max-w-[270px] text-center text-[14px] font-normal leading-[20px] text-muted-text">
-              Create a new vault or import from Drive to continue
+              Create a new vault or import an encrypted cloud backup to continue
             </Text>
           </View>
 
@@ -116,33 +114,51 @@ export default function Landing() {
             <View className="h-[1px] flex-1 bg-border" />
           </View>
 
-          {/* Google button — the accent fill */}
+          {/* Cloud backup button opens the configured provider picker. */}
           <Pressable
-            className={`w-full flex-row items-center justify-center gap-[10px] rounded-[10px] bg-accent px-5 py-3 ${
-              googleAvailable === false ? "opacity-60" : ""
-            }`}
-            onPress={onGoogleDrive}
-            disabled={googleLoading || googleAvailable === false}
+            className="w-full flex-row items-center justify-center gap-[10px] rounded-[10px] bg-accent px-5 py-3"
+            onPress={() => { setCloudError(null); setShowProviderPicker(true); }}
+            disabled={cloudLoading}
           >
-            {googleLoading ? (
+            {cloudLoading ? (
               <ActivityIndicator color="#F2F4F7" />
             ) : (
-              <>
-                {/* Drive badge — fixed-width slot so the label stays on one
-                    optical centre whether or not the icon renders. */}
-                <View className="h-6 w-6 shrink-0 items-center justify-center">
-                  <GoogleDriveIcon width={24} height={22} />
-                </View>
-                <Text className="text-[16px] font-semibold leading-6 text-primary-text">
-                  Continue with Google Drive
-                </Text>
-              </>
+              <Text className="text-[16px] font-semibold leading-6 text-primary-text">Continue with cloud backup</Text>
             )}
           </Pressable>
 
-          {googleError && (
-            <Text className="mt-4 text-center text-sm text-red-400">{googleError}</Text>
+          {showProviderPicker && (
+            <View className="mt-4 rounded-xl border border-border bg-surface p-4">
+              <Text className="mb-3 text-sm font-semibold text-primary-text">Choose a cloud provider</Text>
+              {providers === null ? <ActivityIndicator /> : providers.length === 0 ? (
+                <Text className="text-sm text-muted-text">Cloud backup is not configured on this server.</Text>
+              ) : providers.map((provider) => {
+                const Icon = cloudProviderRegistry[provider.kind]?.icon ?? CloudProviderFallbackIcon;
+                return <Pressable key={provider.kind} className="mb-2 flex-row items-center gap-3 rounded-lg border border-border px-4 py-3" onPress={() => onCloudProvider(provider)}>
+                  {Icon ? <Icon width={22} height={22} /> : null}
+                  <Text className="text-sm font-semibold text-primary-text">{providerLabel(provider)}</Text>
+                </Pressable>;
+              })}
+              <Pressable onPress={() => setShowProviderPicker(false)} className="mt-1 self-center px-3 py-2"><Text className="text-xs text-muted-text">Cancel</Text></Pressable>
+            </View>
           )}
+
+          {cloudError && (
+            <Text className="mt-4 text-center text-sm text-red-400">{cloudError}</Text>
+          )}
+
+          {/* Recovery. Present for a user who already has a vault on this
+              server but cannot get into it — a new machine with no device key
+              and a forgotten master password. Quiet by design: it is a recovery
+              path, not a normal way in. */}
+          <Pressable
+            className="mt-6 w-full items-center justify-center rounded-[10px] py-2"
+            onPress={() => router.push("/recover" as any)}
+          >
+            <Text className="text-[13px] font-normal text-muted-text">
+              Already have a vault? Recover it
+            </Text>
+          </Pressable>
         </View>
       </View>
     </View>

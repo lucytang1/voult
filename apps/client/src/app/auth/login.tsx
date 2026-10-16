@@ -4,12 +4,12 @@ import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 
 /**
  * Deprecated vault-id login.
- * The desired flow has no vault-id input: unauthenticated users go to "/"
+ * The desired flow has no vault-id input: users with no selected vault go to "/"
  * and choose "Create new vault" or "Continue with Google Drive" (then master
  * password). This route now redirects to "/".
  */
 export default function LogIn() {
-  useAuthGuard(["not_authenticated"]);
+  useAuthGuard(["no_vault"]);
   const router = useRouter();
 
   return (

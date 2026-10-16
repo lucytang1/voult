@@ -1,5 +1,8 @@
-import { useAppStore } from "../state";
-import { updateDecryptedVault, updateVaultVersion } from "../state";
+import { useAppStore, updateDecryptedVault, updateVaultVersion, captureSelectionEpoch } from "../state";
+import { selectedVaultId } from "../state/vault-state";
+
+/** The object returned by `captureSelectionEpoch()`. */
+type SelectionGuard = ReturnType<typeof captureSelectionEpoch>;
 import {
   getlocalVaultVersion,
   upsertVaultVersion,
@@ -45,8 +48,16 @@ const loadItemsFromResponse = async (
 };
 
 //updates the vault state with the server snapshot
-const adoptServerSnapshot = async (items: VaultItem[], version: number) => {
-  const vaultId = useAppStore.getState().session?.vaultId ?? "";
+const adoptServerSnapshot = async (items: VaultItem[], version: number, guard?: SelectionGuard) => {
+  // Read the id from the selection, not the session: M2 made the session
+  // nullable while a vault is still selected, so `session?.vaultId` would
+  // stamp snapshots with an empty id after session loss.
+  const vaultId = selectedVaultId(useAppStore.getState().vault) ?? "";
+  // A snapshot fetched under one vault must never be adopted after a switch.
+  if (guard && !guard.stillCurrent()) {
+    console.warn("[Sync] dropping server snapshot: selection changed");
+    return;
+  }
   updateDecryptedVault({ formatVersion: 1, vaultId, items });
   updateVaultVersion(version);
   await upsertVaultVersion(version);
@@ -56,23 +67,35 @@ const isVersionConflict = (error: unknown) =>
   (error as { response?: { status?: number } })?.response?.status === 409;
 
 export async function sync() {
-  const { vaultKey, session } = useAppStore.getState();
+  const { vault, serverSession } = useAppStore.getState();
+  const vaultKey = vault.status === "unlocked" ? vault.vaultKey : null;
+  const vaultId = selectedVaultId(vault);
 
-  if (!vaultKey || !session) {
+  if (!vaultKey || !vaultId) {
     console.error("Sync prerequisites are missing");
     return;
   }
+  // No live cookie means every call would 401. Queued intents stay durable and
+  // sync on the first trigger after the session is re-established.
+  if (serverSession !== "active") {
+    console.info("[Sync] skipping: server session not active");
+    return;
+  }
 
-  // Pin the vault this sync run belongs to. If the session changes mid-flight
-  // (vault switch, server-forced 401), abort instead of uploading or
-  // resolving another vault's intents.
-  const syncVaultId = session.vaultId;
-  const sessionChanged = () =>
-    useAppStore.getState().session?.vaultId !== syncVaultId;
+  // Pin this run to the vault selection that started it. M3: use the selection
+  // epoch rather than comparing ids, because a switch A→B→A leaves the id
+  // unchanged while this run's key and intents are stale. The epoch changes on
+  // every transition, so it catches that case too.
+  const guard = captureSelectionEpoch();
+  const selectionChanged = () => {
+    if (guard.stillCurrent()) return false;
+    console.warn("[Sync] aborted: vault selection changed mid-run", { vaultId });
+    return true;
+  };
 
   for (let attempt = 1; attempt <= MAX_SYNC_RETRIES; attempt++) {
-    if (sessionChanged()) {
-      console.warn("Sync aborted: session changed mid-run", { vaultId: syncVaultId });
+    if (selectionChanged()) {
+      console.warn("Sync aborted before push: selection changed mid-run", { vaultId });
       return;
     }
     // Server unreachable is a normal offline state, not an error: pending
@@ -95,7 +118,7 @@ export async function sync() {
     // Server ahead (or rolled back) with no local edits: adopt the snapshot.
     if (!pendingIntents.length) {
       if (localVersion !== serverVersion) {
-        await adoptServerSnapshot(serverItems, serverVersion);
+        await adoptServerSnapshot(serverItems, serverVersion, guard);
       }
       return;
     }
@@ -114,7 +137,7 @@ export async function sync() {
     // Nothing changed (all intents were already reflected, dropped, or
     // quarantined): adopt the snapshot and clear the resolved intents.
     if (!merged.changed) {
-      await adoptServerSnapshot(serverItems, serverVersion);
+      await adoptServerSnapshot(serverItems, serverVersion, guard);
       if (merged.resolvedIds.length) {
         await markIntentsSynced(merged.resolvedIds);
       }
@@ -125,8 +148,8 @@ export async function sync() {
       JSON.stringify({ items: merged.items }),
       vaultKey,
     );
-    if (sessionChanged()) {
-      console.warn("Sync aborted before push: session changed mid-run", { vaultId: syncVaultId });
+    if (selectionChanged()) {
+      console.warn("Sync aborted before push: selection changed mid-run", { vaultId });
       return;
     }
     let response: Awaited<ReturnType<typeof updateVault>>;
@@ -153,12 +176,12 @@ export async function sync() {
 
     // Success: adopt the server's stored vault, advance the base version,
     // and mark the merged intents synced.
-    if (sessionChanged()) {
-      console.warn("Sync aborted after push: session changed mid-run", { vaultId: syncVaultId });
+    if (selectionChanged()) {
+      console.warn("Sync aborted after push: selection changed mid-run", { vaultId });
       return;
     }
     const syncedItems = await loadItemsFromResponse(response, vaultKey);
-    await adoptServerSnapshot(syncedItems, response.version);
+    await adoptServerSnapshot(syncedItems, response.version, guard);
     await markIntentsSynced(merged.resolvedIds);
     return;
   }

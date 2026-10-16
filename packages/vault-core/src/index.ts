@@ -19,6 +19,18 @@ export {
   generateDeviceKey,
   derivePasswordWrappingKey,
   createAuthKey,
+  RECOVERY_SECRET_BYTES,
+  RECOVERY_KEY_CHARS,
+  RECOVERY_WRAP_INFO,
+  RECOVERY_VERIFY_LABEL,
+  RECOVERY_PROOF_LABEL,
+  generateRecoverySecret,
+  formatRecoveryKey,
+  parseRecoveryKey,
+  deriveRecoveryWrapKey,
+  computeRecoveryVerifier,
+  computeRecoveryProof,
+  recoveryAad,
 } from "./crypto.js";
 
 export {
@@ -55,7 +67,6 @@ export type {
   DecryptedVault,
   SessionState,
   LockMetadata,
-  AuthState,
   VaultResponse,
   UpdateVaultRequest,
   UpdateVaultResponse,
@@ -65,7 +76,23 @@ export { mergeVault } from "./merge.js";
 export type { MergeVaultResult, PendingIntent } from "./merge.js";
 
 export {
+  buildRecoveryPdf,
+  parseRecoveryPdf,
+  recoveryPdfFileName,
+  serializePayload,
+  RecoveryPdfError,
+  RECOVERY_PDF_MAGIC,
+  RECOVERY_PDF_MAX_BYTES,
+} from "./recovery-pdf.js";
+export type {
+  BuildRecoveryPdfOptions,
+  RecoveryPdfPayload,
+  RecoveryPdfErrorCode,
+} from "./recovery-pdf.js";
+
+export {
   isValidVaultId,
+  VAULT_ID_PATTERN,
   canonicalizeOrigin,
   originOfUrl,
   rankOriginMatch,

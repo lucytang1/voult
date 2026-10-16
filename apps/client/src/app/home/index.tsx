@@ -1,4 +1,4 @@
-import { useAppStore, updateDecryptedVault, addVaultItem, updateVaultItem, deleteVaultItem } from "@/src/lib/state";
+import { useAppStore, updateDecryptedVault, captureSelectionEpoch, addVaultItem, updateVaultItem, deleteVaultItem } from "@/src/lib/state";
 import { useEffect, useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Pressable, Text, TextInput, View, ScrollView, Modal, Image } from "react-native";
@@ -259,9 +259,10 @@ function SsoMethodEditor({
 }
 
 export default function Home() {
-  const vaultKey = useAppStore((state) => state.vaultKey);
+  const vault = useAppStore((state) => state.vault);
+  const vaultKey = vault.status === "unlocked" ? vault.vaultKey : null;
   const session = useAppStore((state) => state.session);
-  const isLocked = useAppStore((state) => state.isLocked);
+  const isLocked = vault.status !== "unlocked";
   const isSyncing = useAppStore((state) => state.isSyncing);
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -421,8 +422,16 @@ export default function Home() {
   const vaultData = getVault.data?.vault;
   useEffect(() => {
     if (!vaultData || !vaultKey) return;
+    // M3: a response fetched under vault A must not be adopted after a switch
+    // to B. `decrypt` is async, so without this the plaintext of A can land in
+    // the store after B is selected — rendering A's items under B.
+    const guard = captureSelectionEpoch();
     decrypt(vaultData.vault, vaultData.vaultiv, vaultKey)
       .then((plain) => {
+        if (!guard.stillCurrent()) {
+          console.warn("Discarding decrypted vault: selection changed");
+          return;
+        }
         const parsed = JSON.parse(plain) as DecryptedVault;
         updateDecryptedVault(parsed);
         // Never log the decrypted vault: it holds plaintext passwords.
