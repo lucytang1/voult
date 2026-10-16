@@ -65,7 +65,10 @@ export async function passwordLoginFlow(
       cryptoVersion: vault.crypto_version,
     },
     vaultKey,
-    decryptedVault: parseVaultJson(plain),
+    // The document is stamped with the vault we authenticated as — the store's
+    // switch guard rejects a mismatched id, so an unstamped document would make
+    // every open fail here rather than silently install under the wrong vault.
+    decryptedVault: parseVaultJson(plain, vaultId),
     version: vault.version,
     lockEpoch,
   };

@@ -4,11 +4,16 @@
 // on `site` display text, path, query, title, or favicon. A lookalike host
 // only ever matches itself.
 
-const UUID_PATTERN =
+/**
+ * A vault id is a client-generated UUID (see `crypto.ts`). Exported because the
+ * recovery-PDF parser has to *extract* one out of a document, not merely test
+ * it — and a second copy of this pattern is a second thing to keep in sync.
+ */
+export const VAULT_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function isValidVaultId(vaultId: string): boolean {
-  return UUID_PATTERN.test(vaultId);
+  return VAULT_ID_PATTERN.test(vaultId);
 }
 
 /** Dev-loopback hosts allowed over http (plus literal loopback IPs). */

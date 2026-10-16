@@ -27,8 +27,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use endpoints::{
-    auth, cloud_endpoints, favicon, get_crypto_params, get_vault, lock, logout, pair, register,
-    session_status, update_vault, update_vault_password, vaults,
+    auth, cloud_endpoints, favicon, get_crypto_params, get_vault, lock, logout, pair, recovery,
+    register, session_status, update_vault, update_vault_password, vaults,
 };
 use static_site::static_site;
 
@@ -181,6 +181,12 @@ async fn main() -> std::io::Result<()> {
     let db_data = web::Data::new(db);
     cloud::mirror::start_sweeper(db_data.get_ref().clone());
 
+    // Clear recovery challenges orphaned by a crash or a restart. They carry a
+    // hard TTL and are swept on every insert too, so this is tidiness rather
+    // than correctness — but it means a restart never resurrects rows that can
+    // no longer be honoured.
+    recovery::prune_expired_challenges(db_data.get_ref()).await;
+
     // Credentialed requests (cookies) require explicit origins — never pair
     // `allow_any_origin()` with cookies.
     let cors_origins: Vec<String> = config::optional_env(config::ENV_CORS_ORIGINS)
@@ -207,6 +213,12 @@ async fn main() -> std::io::Result<()> {
         );
     }
 
+    // Built ONCE, outside the `HttpServer::new` closure. That closure runs once
+    // per worker, so constructing the throttle inside it would hand every worker
+    // its own budget and let a single client spend 10x the intended allowance.
+    // `web::Data` is an Arc, so cloning it into each worker shares one instance.
+    let recovery_throttle = web::Data::new(recovery::ChallengeThrottle::default());
+
     log::info!("Starting server at http://localhost:8080");
     HttpServer::new(move || {
         let mut cors = Cors::default()
@@ -231,6 +243,7 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .app_data(db_data.clone())
+            .app_data(recovery_throttle.clone())
             // Required by sqlite-wasm OPFS (SharedArrayBuffer). Mirrors the
             // client's public/_headers.
             .wrap(
@@ -246,6 +259,10 @@ async fn main() -> std::io::Result<()> {
                     // Vault/session/ciphertext responses must never sit in a
                     // cache (browser, proxy, or the extension's fetch cache).
                     .wrap(DefaultHeaders::new().add(("Cache-Control", "no-store")))
+                    // Body-level failures (missing required field, malformed
+                    // JSON, oversized body) answer with the same
+                    // {"error_msg","code"} envelope the handlers use.
+                    .app_data(endpoints::json_config())
                     .service(register::register)
                     .service(auth::auth)
                     .service(favicon::favicon)
@@ -257,6 +274,16 @@ async fn main() -> std::io::Result<()> {
                     .service(lock::lock)
                     .service(pair::pair_start)
                     .service(pair::pair_consume)
+                    // Vault recovery (case 3). All three are unauthenticated by
+                    // design — the recovering user has a paper recovery key and
+                    // no session. Only `rewrap` writes, and it establishes the
+                    // session itself.
+                    .service(recovery::recovery_challenge)
+                    .service(recovery::recovery_unlock)
+                    .service(recovery::recovery_rewrap)
+                    // Rotation is session-required: it is a deliberate change to a
+                    // live vault made from inside the app, not a stranded user.
+                    .service(recovery::recovery_regenerate)
                     .service(update_vault_password::update_vault_password)
                     .service(vaults::create_vault)
                     .service(vaults::list_vaults)

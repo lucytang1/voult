@@ -27,8 +27,8 @@ import {
   commitVaultUnlock,
   useAppStore,
 } from "../state";
-import { derivePasswordKeys as deriveVerifier } from "./utils";
-import type { SessionState, DecryptedVault, VaultItem } from "../state/type";
+import { derivePasswordKeys as deriveVerifier, parseVaultJson } from "./utils";
+import type { SessionState, DecryptedVault } from "../state/type";
 
 export interface UnlockedSession {
   session: SessionState;
@@ -37,11 +37,6 @@ export interface UnlockedSession {
   version: number;
   // Server lock_epoch observed at unlock time (see POST /api/lock).
   lockEpoch: number;
-}
-
-function parseVaultJson(plain: string, vaultId: string): DecryptedVault {
-  const parsed = JSON.parse(plain) as { items?: VaultItem[] };
-  return { formatVersion: 1, vaultId, items: parsed.items ?? [] };
 }
 
 /** Derive the vaultVerifier + password wrapping key for a password. */

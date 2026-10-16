@@ -157,6 +157,18 @@ export default function Lock() {
       >
         <Text className="text-muted-text text-xs">Use a different vault</Text>
       </Pressable>
+
+      {/* Case 3. The vault id travels with the link, which the bootstrap uses to
+          route here; the recovery file itself supplies the vault it belongs to,
+          so nothing has to be typed. */}
+      <Pressable
+        className="w-full rounded-md py-2 items-center mt-2"
+        onPress={() => router.push(`/recover?recover=${vaultId ?? ""}` as any)}
+      >
+        <Text className="text-muted-text text-xs">
+          Forgot your master password?
+        </Text>
+      </Pressable>
     </View>
   );
 }

@@ -2453,6 +2453,7 @@ dependencies = [
  "dirs",
  "dotenvy",
  "env_logger",
+ "hmac",
  "log",
  "migration",
  "rand 0.8.5",

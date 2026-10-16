@@ -7,6 +7,7 @@ import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { ExtensionPairing } from "@/src/lib/extension-pair";
 import { AutolockSection } from "@/src/lib/settings/autolock-section";
 import { DeviceUnlockSection } from "@/src/lib/settings/device-unlock-section";
+import { RecoveryKeySection } from "@/src/lib/settings/recovery-key-section";
 import {
   useDisconnectCloud,
   useCloudBinding,
@@ -185,6 +186,7 @@ export default function Settings() {
         ) : section === "security" ? (
           <>
             <AutolockSection />
+            <RecoveryKeySection />
             <DeviceUnlockSection />
           </>
         ) : (

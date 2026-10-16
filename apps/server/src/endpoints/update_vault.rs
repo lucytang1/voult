@@ -256,6 +256,13 @@ mod tests {
                     "crypto_version": 2,
                     "vault_key_wrap": "d3JhcA==",
                     "vault_key_wrap_iv": "d2l2",
+                    // Recovery is mandatory at registration. These tests cover
+                    // vault writes and mirroring, not recovery, so opaque
+                    // stand-in values are enough to get a valid row.
+                    "recovery_verifier": "cmVjb3ZlcnktdmVyaWZpZXI=",
+                    "recovery_salt": "cmVjb3Zlcnktc2FsdA==",
+                    "recovery_wrap": "cmVjb3Zlcnktd3JhcA==",
+                    "recovery_wrap_iv": "cmVjdml2",
                 }))
                 .to_request();
             let resp = test::call_service(&app, req).await;

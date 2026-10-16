@@ -18,7 +18,10 @@ import { openVaultFlow, requiresSwitchConfirmation } from "@/src/lib/vault/open"
 import { useCloudStatus, useCloudVaults, useLinkPendingCloudToken, usePendingCloudVaults, usePersistCloudBinding } from "@/src/lib/cloud/queries";
 import { GoogleDriveIcon } from "../../../assets/images/GoogleDriveIcon";
 import type { VaultDescriptor } from "@/src/lib/cloud/api";
-import { importVaultFromCloud } from "@/src/lib/vault/import";
+import { importVaultFromCloud, finishCloudImport } from "@/src/lib/vault/import";
+import { describeCommitError, type PendingVaultRegistration } from "@/src/lib/vault/registration";
+import { register } from "@/src/lib/queries/SignUp/query";
+import { RecoveryKeyInterstitial } from "@/src/lib/components/recovery-key-interstitial";
 import { fetchSession } from "@/src/lib/queries/session/query";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services/client-state-service";
@@ -52,6 +55,14 @@ export default function VaultChooser() {
   const [googleImportError, setGoogleImportError] = useState<string | null>(null);
   const [googleImporting, setGoogleImporting] = useState(false);
   const [sessionRestoreError, setSessionRestoreError] = useState<string | null>(null);
+  // Set when a Drive import CREATED this vault on this server. A fresh recovery
+  // key was minted for it (the package never carries one), and the user must
+  // save it before we finish. Null on every other path.
+  // A vault restored from Drive that has NOT been registered yet: fully
+  // prepared, nothing on the server. `importedPassword` is kept alongside it
+  // only so a VAULT_EXISTS race at commit time can fall back to a normal login.
+  const [importedPending, setImportedPending] = useState<PendingVaultRegistration | null>(null);
+  const [importedPassword, setImportedPassword] = useState<string | null>(null);
   const handledConnectedCallback = useRef(false);
   const params = useLocalSearchParams<{ cloud_connected?: string; cloud_error?: string; cloud_error_detail?: string; cloud_state?: string; provider?: string }>();
   const pendingState = (params as any).cloud_state as string | undefined
@@ -110,8 +121,16 @@ export default function VaultChooser() {
 
   // Root bootstrap intentionally pauses on OAuth callback URLs. Restore the
   // server session here for an existing vault so the chooser can continue.
+  //
+  // The ref guard is for StrictMode's double-invoked effects: the two writes are
+  // idempotent, but two concurrent GET /session calls would be a wasted request
+  // on every OAuth return, and one of them could land after the user has moved
+  // on. It survives the simulated remount, so it means "once per mount".
+  const restoredSession = useRef(false);
   useEffect(() => {
     if (session || !params.cloud_connected || pendingState) return;
+    if (restoredSession.current) return;
+    restoredSession.current = true;
     fetchSession()
       .then((s) => {
         selectVaultSession({ vaultId: s.vault_id, cryptoVersion: s.crypto_version });
@@ -222,8 +241,9 @@ export default function VaultChooser() {
       const guard = captureSelectionEpoch();
       try {
         // Case 1 (no session): vault may only exist on Drive — fetch package
-        // via pending token, verify password locally, register on this server.
-        const result = await importVaultFromCloud({
+        // via pending token and verify the password locally. Nothing is
+        // registered yet; that happens after the recovery file is saved.
+        const outcome = await importVaultFromCloud({
           vaultId: googleImportTarget.vault_id,
           fileId: googleImportTarget.file_id,
           masterPassword: googleImportPassword,
@@ -233,6 +253,17 @@ export default function VaultChooser() {
           console.warn("Vault import discarded: selection changed during import");
           return;
         }
+
+        // A vault that is not on this server yet comes back as pending: stop
+        // here so the user gets a recovery file for it BEFORE the row exists.
+        if (outcome.kind === "pending_registration") {
+          setGoogleImportError(null);
+          setImportedPending(outcome.pending);
+          setImportedPassword(googleImportPassword);
+          return;
+        }
+
+        const result = outcome.session;
         switchVaultOpen({
           requestedVaultId: googleImportTarget.vault_id,
           session: result.session,
@@ -266,6 +297,9 @@ export default function VaultChooser() {
           persistBindingMutation.reset();
         }
         setGoogleImportTarget(null);
+        // The vault now exists on this server (or did already). If this import created
+        // it, the recovery file has already been saved — see the interstitial —
+        // so there is nothing left to stop for.
         router.replace("/home" as any);
         return;
       } catch (e: any) {
@@ -285,12 +319,22 @@ export default function VaultChooser() {
     setGoogleImporting(true);
     setGoogleImportError(null);
     try {
-      const result = await importVaultFromCloud({
+      const outcome = await importVaultFromCloud({
         vaultId: googleImportTarget.vault_id,
         fileId: googleImportTarget.file_id,
         masterPassword: googleImportPassword,
         pendingState: pendingState || undefined,
       });
+
+      // A vault that only exists as a Drive package comes back pending: nothing
+      // is registered until the user has a recovery file for it.
+      if (outcome.kind === "pending_registration") {
+        setImportedPending(outcome.pending);
+        setImportedPassword(googleImportPassword);
+        return;
+      }
+
+      const result = outcome.session;
       // Atomic: selection + session + key + document in one write, verified
       // against the vault we asked to import. See `performOpen` for the full
       // reasoning — the same three guards apply to an import.
@@ -317,6 +361,57 @@ export default function VaultChooser() {
       setGoogleImporting(false);
     }
   };
+
+  /**
+   * Registers a restored vault, once the user has saved its recovery file.
+   *
+   * Same rule as vault creation: the row cannot exist before the file that opens
+   * it. On failure `importedPending` is kept so a retry re-registers the same
+   * vault id with the same recovery key, keeping the downloaded file valid.
+   */
+  const onConfirmImportedRecoveryFile = async () => {
+    if (!importedPending) return;
+    setGoogleImporting(true);
+    setGoogleImportError(null);
+    try {
+      const result = await finishCloudImport(importedPending, register, importedPassword ?? undefined);
+      setImportedPending(null);
+      setImportedPassword(null);
+      switchVaultOpen({
+        requestedVaultId: result.session.vaultId,
+        session: result.session,
+        vaultKey: result.vaultKey,
+        decryptedVault: result.decryptedVault,
+        version: result.version,
+        lockEpoch: result.lockEpoch,
+      });
+      await initSQLite(result.session.vaultId);
+      await upsertVaultId(result.session.vaultId);
+      await upsertVaultVersion(result.version);
+      setGoogleImportTarget(null);
+      router.replace("/home" as any);
+    } catch (e: any) {
+      console.warn("Restored vault could not be registered", e);
+      setGoogleImportError(describeCommitError(e));
+    } finally {
+      setGoogleImporting(false);
+    }
+  };
+
+  // Mandatory interstitial for an import that has NOT yet registered this vault.
+// Nothing is on the server while this is showing: pressing Continue is what
+// creates the row, and by then the recovery file already exists.
+if (importedPending) {
+    return (
+      <RecoveryKeyInterstitial
+        recoveryKey={importedPending.recoveryKey}
+        vaultId={importedPending.vaultId}
+        busy={googleImporting}
+        error={googleImportError}
+        onContinue={onConfirmImportedRecoveryFile}
+      />
+    );
+  }
 
   if (!session && !isGoogleCallback) {
     return (

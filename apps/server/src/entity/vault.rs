@@ -20,6 +20,42 @@ pub struct Model {
     pub crypto_version: i32,
     pub vault_key_wrap: Option<String>,
     pub vault_key_wrap_iv: Option<String>,
+    // --- Vault recovery (case 3) -----------------------------------------
+    //
+    // A second envelope type wrapping `vaultKeyRaw` under K_rec, derived from
+    // the user's 160-bit paper recovery secret. Recovery exists from vault
+    // creation; there is no enable step and no disabled state.
+    //
+    // recovery_verifier = HMAC-SHA256(K_rec, "recovery-verify-v1"). It is the
+    // second authentication path: the server recomputes the expected proof from
+    // it without ever holding the secret or K_rec. Unlike vault_verifier it is
+    // not password-derived, so a DB dump gives an attacker nothing to brute
+    // force, and it is only ever presented bound to a fresh server challenge,
+    // so it is not replayable either.
+    //
+    // recovery_enabled is DERIVED: `recovery_verifier IS NOT NULL`. Both vault
+    // creation endpoints reject a vault that arrives without it, so no row can
+    // reach the no-recovery state through the API.
+    pub recovery_verifier: Option<String>,
+    // HKDF salt for K_rec (16 B, base64). Needed before the client can derive
+    // K_rec, so it is served pre-auth by GET /get_crypto_params.
+    pub recovery_salt: Option<String>,
+    // AES-GCM envelope: recovery_wrap holds vaultKeyRaw DIRECTLY, never
+    // HKDF(PBKDF2(password)) — Rule R1. That is what lets the password
+    // credential be rotated during recovery without destroying the recovery
+    // path. Must be unwrapped with AAD utf8("voult-env|v2|<vault_id>|recovery")
+    // so it cannot be transplanted onto another vault's row.
+    pub recovery_wrap: Option<String>,
+    pub recovery_wrap_iv: Option<String>,
+    // When recovery was established. Always set at registration; the column is
+    // only nullable because SQLite cannot ALTER NOT NULL without a default.
+    pub recovery_created_at: Option<DateTimeUtc>,
+    // CAS counter for the one irreversible write in recovery
+    // (POST /recovery/rewrap). Starts at 0; that UPDATE is guarded on it so two
+    // concurrent recoveries cannot both win. Independent of `version`, which is
+    // the document CAS counter used by sync — bumping it here would invalidate
+    // every pending sync intent's base_version for no reason.
+    pub credential_version: i32,
     // Global lock signal for web ↔ extension consistency. Monotonic counter,
     // bumped by POST /api/lock; peers compare it in GET /session and wipe
     // local keys on a bump. Non-sensitive: never key material or plaintext.

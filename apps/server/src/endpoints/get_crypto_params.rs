@@ -15,6 +15,23 @@ pub struct GetCryptoParamsRequest {
 pub struct GetCryptoParamsResponse {
     pub salt: String,
     pub iterations: i32,
+    /// HKDF salt for the recovery wrapping key, base64. A recovering client
+    /// needs it before it can derive K_rec, and this endpoint is already
+    /// reachable without a session.
+    ///
+    /// Widening this response leaks strictly nothing new: the endpoint already
+    /// returns `salt`/`iterations` pre-auth and already answers
+    /// VAULT_NOT_FOUND, i.e. it is already a vault-existence oracle (flagged P1
+    /// at ROADMAP:69). A dedicated `GET /api/recovery/params` would have added a
+    /// *second* unauthenticated oracle for the same fact.
+    ///
+    /// `recovery_wrap` / `recovery_verifier` are deliberately NOT exposed here —
+    /// neither is an input to recovery, and releasing the envelope pre-auth
+    /// would widen this endpoint from a params endpoint into a ciphertext one.
+    pub recovery_salt: Option<String>,
+    /// Whether this vault has recovery configured. Derived from
+    /// `recovery_verifier IS NOT NULL` — not a stored column.
+    pub has_recovery: bool,
 }
 
 #[derive(Serialize)]
@@ -70,6 +87,11 @@ pub async fn get_crypto_params(
     let response = GetCryptoParamsResponse {
         salt: vault.salt,
         iterations: vault.iterations,
+        // A vault can only be missing these if it predates the recovery
+        // migration, so absent recovery_salt here still yields
+        // has_recovery = false rather than a misleading true.
+        recovery_salt: vault.recovery_salt,
+        has_recovery: vault.recovery_verifier.is_some(),
     };
     HttpResponse::Ok().json(response)
 }

@@ -3,7 +3,7 @@ import { Slot } from "expo-router";
 import "../../global.css";
 import { initSQLite } from "../lib/sqlite/web/init-db";
 import { useSessionSync } from "../lib/sync/use-session-sync";
-import { useEffect } from "react";
+import { StrictMode, useEffect, useRef } from "react";
 import {
   selectVaultSession,
   commitVaultUnlock,
@@ -52,12 +52,36 @@ export default function RootLayout() {
   useSessionSync(queryClient);
   useAutolock();
 
+  // React's StrictMode mounts, tears down, and remounts every component once in
+  // development, which double-invokes effects. The bootstrap below must not run
+  // twice: it can call `initSQLite`, which closes the current OPFS handle before
+  // opening the next one, so two interleaved runs can leave a leaked handle and a
+  // stale `dbId`. A ref survives the simulated remount (the component instance is
+  // the same), so it is the correct guard — a module-level flag would also
+  // suppress a genuine re-bootstrap after a real remount.
+  const bootstrapped = useRef(false);
+
   useEffect(() => {
+    if (bootstrapped.current) return;
+    bootstrapped.current = true;
     const bootstrap = async () => {
       // Skip auto-restore while handling the provider-neutral OAuth callback —
       // the vault chooser at /vault handles that UX.
       if (typeof window !== "undefined" && window.location.search.includes("cloud_state")) {
         return;
+      }
+
+      // An explicit recovery link wins over every restore rule below.
+      // `?recover=<vault_id>` is how a stranded user (or the extension) reaches
+      // the recovery screen: it must not be bounced to /lock or /home by the
+      // bootstrap, because those screens assume a working password path.
+      if (typeof window !== "undefined") {
+        const recoverTarget = new URLSearchParams(window.location.search).get("recover");
+        if (recoverTarget) {
+          console.info("Bootstrap: explicit recovery link, skipping auto-restore");
+          router.navigate(`/recover?recover=${encodeURIComponent(recoverTarget)}` as any);
+          return;
+        }
       }
 
       try {
@@ -169,8 +193,10 @@ export default function RootLayout() {
   }, []);
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <Slot />
-    </QueryClientProvider>
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <Slot />
+      </QueryClientProvider>
+    </StrictMode>
   );
 }

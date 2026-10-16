@@ -17,12 +17,21 @@ pub struct CreateVaultRequest {
     pub iterations: i32,
     #[serde(default)]
     pub crypto_version: Option<i32>,
-    #[serde(default)]
-    pub vault_key_wrap: Option<String>,
-    #[serde(default)]
-    pub vault_key_wrap_iv: Option<String>,
+    pub vault_key_wrap: String,
+    pub vault_key_wrap_iv: String,
     #[serde(default)]
     pub vault_verifier: Option<String>,
+    // --- Recovery (case 3) ------------------------------------------------
+    // Required, exactly as on POST /register. This endpoint writes a complete
+    // vault row, so leaving these optional would open a second way to create a
+    // vault that can never be recovered — the exact state recovery exists to
+    // prevent. Currently unreferenced by the client (see §M2), but the route is
+    // live and session-authenticated, so the invariant is enforced here rather
+    // than relying on nobody calling it.
+    pub recovery_verifier: String,
+    pub recovery_salt: String,
+    pub recovery_wrap: String,
+    pub recovery_wrap_iv: String,
 }
 #[derive(Serialize)]
 pub struct CreateVaultResponse {
@@ -72,6 +81,24 @@ pub async fn create_vault(
             "INVALID_INPUT",
         );
     }
+    if req.vault_key_wrap.trim().is_empty() || req.vault_key_wrap_iv.trim().is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "vault_key_wrap and vault_key_wrap_iv required",
+            "INVALID_INPUT",
+        );
+    }
+    if req.recovery_verifier.trim().is_empty()
+        || req.recovery_salt.trim().is_empty()
+        || req.recovery_wrap.trim().is_empty()
+        || req.recovery_wrap_iv.trim().is_empty()
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "recovery_verifier, recovery_salt, recovery_wrap and recovery_wrap_iv required",
+            "INVALID_INPUT",
+        );
+    }
     let vault_uuid = match &req.vault_id {
         Some(raw) => match Uuid::parse_str(raw) {
             Ok(id) if id.to_string() == vault_id_sess => id,
@@ -105,8 +132,13 @@ pub async fn create_vault(
         vault_verifier: Set(req.vault_verifier.unwrap_or_default()),
         version: Set(1),
         crypto_version: Set(cv),
-        vault_key_wrap: Set(req.vault_key_wrap),
-        vault_key_wrap_iv: Set(req.vault_key_wrap_iv),
+        vault_key_wrap: Set(Some(req.vault_key_wrap)),
+        vault_key_wrap_iv: Set(Some(req.vault_key_wrap_iv)),
+        recovery_verifier: Set(Some(req.recovery_verifier)),
+        recovery_salt: Set(Some(req.recovery_salt)),
+        recovery_wrap: Set(Some(req.recovery_wrap)),
+        recovery_wrap_iv: Set(Some(req.recovery_wrap_iv)),
+        recovery_created_at: Set(Some(chrono::Utc::now())),
         ..Default::default()
     };
     let inserted = match am.insert(pool.get_ref()).await {

@@ -2,7 +2,10 @@ import { useState } from "react";
 import { Pressable, Text, TextInput, View, Switch } from "react-native";
 import { useRouter } from "expo-router";
 import { selectVaultSession, commitVaultUnlock, updateDecryptedVault, updateLockEpoch, updateVaultVersion } from "@/src/lib/state";
-import { createVaultFlow } from "@/src/lib/vault/create";
+import { prepareVaultFlow, type CreateVaultResult } from "@/src/lib/vault/create";
+import { commitVaultRegistration, describeCommitError, type PendingVaultRegistration } from "@/src/lib/vault/registration";
+import { persistDeviceSecrets } from "@/src/lib/auth/utils";
+import { RecoveryKeyInterstitial } from "@/src/lib/components/recovery-key-interstitial";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services/client-state-service";
 import { v4 as uuidv4 } from "uuid";
@@ -36,8 +39,70 @@ export default function CreateVault() {
 
   const canSubmit = password.length >= 8 && password === confirm && !creating;
 
-  const [phase, setPhase] = useState<"idle" | "creatingLocal" | "authorizing" | "creatingRemote" | "verifying">("idle");
+  const [phase, setPhase] = useState<"idle" | "creatingLocal" | "showingRecoveryKey" | "authorizing" | "creatingRemote" | "verifying">("idle");
   const signupMutation = useSignUp();
+  // The vault, fully derived but NOT yet registered. Nothing about it exists on
+  // the server while this is set — that is the point. The interstitial is where
+  // the user gets the recovery file, and pressing Continue is what registers it.
+  const [prepared, setPrepared] = useState<PendingVaultRegistration | null>(null);
+  // Set the moment /register succeeds, so a retry after a local-setup failure
+  // does not register a second time.
+  const [committed, setCommitted] = useState<CreateVaultResult | null>(null);
+
+  /**
+   * Second half of creation, run once the vault is registered and the user has
+   * the recovery file.
+   *
+   * The device key is enrolled HERE and not in `prepareVaultFlow`, so a vault
+   * never ends up with a working device key but a recovery file nobody saved.
+   */
+  const finishCreation = async (result: CreateVaultResult, connectDrive: boolean) => {
+    const vaultId = result.session.vaultId;
+    // Give this device a key so the next unlock is a local unwrap.
+    await persistDeviceSecrets(result.vaultKeyRaw, vaultId);
+    // Wire the newly created vault into local state and open its store so
+    // /home has a valid session + database.
+    selectVaultSession(result.session);
+    commitVaultUnlock(result.vaultKey);
+    updateLockEpoch(result.lockEpoch);
+    updateDecryptedVault(result.decryptedVault);
+    updateVaultVersion(result.version);
+    await initSQLite(vaultId);
+    await upsertVaultId(vaultId);
+    await upsertVaultVersion(result.version);
+    // The raw key bytes are no longer needed; drop our reference so they can be
+    // collected now rather than at some indeterminate later point.
+    result.vaultKeyRaw.fill(0);
+    setPrepared(null);
+
+    // If user opted to connect cloud provider now (§6.2), continue to remote
+    if (connectDrive && googleConfigured) {
+      setPhase("authorizing");
+      try {
+        setPhase("creatingRemote");
+        if (!chosenProviderKind) throw new Error("Cloud backup is not configured on this server.");
+        await enableCloudForVault(vaultId, chosenProviderKind);
+        setPhase("verifying");
+        // Brief verify pause – enable already does read-back validation
+        setPhase("idle");
+      } catch (e: any) {
+        // Keep local vault intact, offer retry/continue local-only per spec §6.2
+        const msg = e?.message || String(e);
+        if (msg.includes("Redirecting")) {
+          // OAuth redirect already initiated – keep vault usable
+          setPhase("authorizing");
+          return;
+        }
+        console.warn("cloud provider connect failed, keeping local vault", e);
+        setError(`Vault created locally, but cloud backup failed: ${msg}. You can retry via Home → Enable cloud backup.`);
+        setPhase("idle");
+        setTimeout(() => router.replace("/home" as any), 2000);
+        return;
+      }
+    }
+    setPhase("idle");
+    router.replace("/home" as any);
+  };
 
   const onCreate = async () => {
     if (!canSubmit) {
@@ -49,56 +114,72 @@ export default function CreateVault() {
     setCreating(true);
     setPhase("creatingLocal");
     try {
-      // §6.2: Complete local vault creation first; cloud backup is optional.
+      // §6.2: local preparation first; cloud backup is optional.
+      //
+      // Nothing is registered here. The vault id, both envelopes and the
+      // recovery secret are all derived locally, and the server hears about
+      // this vault only when the user continues past the interstitial with the
+      // recovery file in hand.
       const starter = { items: [] as VaultItem[] };
-      const created = await createVaultFlow(password, starter, signupMutation.mutateAsync);
-      const vaultId = created.vaultId;
-      // Wire the newly created vault into local state and open its store so
-      // /home has a valid session + database.
-      selectVaultSession(created.session);
-      commitVaultUnlock(created.vaultKey);
-      updateLockEpoch(created.lockEpoch);
-      updateDecryptedVault(created.decryptedVault);
-      updateVaultVersion(created.version);
-      await initSQLite(vaultId);
-      await upsertVaultId(vaultId);
-      await upsertVaultVersion(created.version);
-      // If user opted to connect cloud provider now (§6.2), continue to remote
-      if (connectDrive && googleConfigured) {
-        setPhase("authorizing");
-        try {
-          setPhase("creatingRemote");
-          if (!chosenProviderKind) throw new Error("Cloud backup is not configured on this server.");
-          await enableCloudForVault(vaultId, chosenProviderKind);
-          setPhase("verifying");
-          // Brief verify pause – enable already does read-back validation
-          setPhase("idle");
-        } catch (e: any) {
-          // Keep local vault intact, offer retry/continue local-only per spec §6.2
-          const msg = e?.message || String(e);
-          if (msg.includes("Redirecting")) {
-            // OAuth redirect already initiated – keep vault usable
-            setPhase("authorizing");
-            return;
-          }
-          console.warn("cloud provider connect failed, keeping local vault", e);
-          setError(`Vault created locally, but cloud backup failed: ${msg}. You can retry via Home → Enable cloud backup.`);
-          setPhase("idle");
-          setTimeout(() => router.replace("/home" as any), 2000);
-          return;
-        }
-      }
-      setPhase("idle");
-      router.replace("/home" as any);
+      const prepared = await prepareVaultFlow(password, starter);
+      setPrepared(prepared);
+      setPhase("showingRecoveryKey");
     } catch (e) {
-      console.error("Create vault failed", e);
+      console.error("Preparing vault failed", e);
       setError(e instanceof Error ? e.message : "Failed to create vault");
       setPhase("idle");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  /**
+   * The single irreversible step, run from the interstitial.
+   *
+   * By now the recovery file exists on the user's disk, which is the whole
+   * reason the register call was deferred this long: a `vault` row must never
+   * exist before the file that opens it does.
+   *
+   * On failure the prepared vault is deliberately KEPT, so pressing Continue
+   * again re-registers the same vault id and the same recovery key — the PDF
+   * already saved must stay valid.
+   */
+  const onConfirmRecoveryFile = async () => {
+    if (!prepared) return;
+    setCreating(true);
+    setError(null);
+    try {
+      // A previous Continue may have got past the register call and then failed
+      // during local setup. Re-registering would come back VAULT_EXISTS, so the
+      // committed result is reused and only the local half is retried.
+      if (committed) {
+        await finishCreation(committed, connectDrive);
+        return;
+      }
+      const result = await commitVaultRegistration(prepared, signupMutation.mutateAsync);
+      setCommitted(result);
+      await finishCreation(result, connectDrive);
+    } catch (e) {
+      console.error("Vault creation failed", e);
+      setError(describeCommitError(e, { alreadyRegistered: committed !== null }));
     } finally {
       signupMutation.reset();
       setCreating(false);
     }
   };
+
+  // The interstitial replaces the form entirely — there is no path back to it.
+  if (prepared) {
+    return (
+      <RecoveryKeyInterstitial
+        recoveryKey={prepared.recoveryKey}
+        vaultId={prepared.vaultId}
+        busy={creating}
+        error={error}
+        onContinue={onConfirmRecoveryFile}
+      />
+    );
+  }
 
   return (
     <View className="flex-1 bg-ground px-6 py-8">

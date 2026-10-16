@@ -152,6 +152,12 @@ mod tests {
             crypto_version: 2,
             vault_key_wrap: Some("d3JhcA==".to_string()),
             vault_key_wrap_iv: Some("d2l2".to_string()),
+            recovery_verifier: Some("cmVjb3ZlcnktdmVyaWZpZXI=".to_string()),
+            recovery_salt: Some("cmVjb3Zlcnktc2FsdA==".to_string()),
+            recovery_wrap: Some("cmVjb3Zlcnktd3JhcA==".to_string()),
+            recovery_wrap_iv: Some("cmVjdml2".to_string()),
+            recovery_created_at: Some(chrono::Utc::now()),
+            credential_version: 0,
             lock_epoch: 0,
         }
     }
@@ -200,5 +206,72 @@ mod tests {
         legacy.vault_key_wrap = None;
         legacy.vault_key_wrap_iv = None;
         assert_eq!(build(&legacy), Err(ERR_LEGACY_CRYPTO));
+    }
+
+    /// A package mirrored after POST /recovery/rewrap must carry the NEW
+    /// password envelope. That is correct, not a bug: recovery rotates the
+    /// password credential, so restoring this backup needs the new password and
+    /// must reject the old one. Pins that `build` reads the row's current
+    /// envelope rather than anything cached from before the rewrap.
+    #[test]
+    fn package_after_rewrap_carries_the_new_password_envelope() {
+        let mut post = sample_vault();
+        // What rewrap writes: new salt/iterations/verifier + new envelope.
+        post.salt = "bmV3LXNhbHQ=".to_string();
+        post.iterations = 120_000;
+        post.vault_verifier = "bmV3LXZlcmlmaWVy".to_string();
+        post.vault_key_wrap = Some("bmV3LWdyYXA=".to_string());
+        post.vault_key_wrap_iv = Some("bmV3LWl2".to_string());
+        // ...and what it must NOT touch.
+        post.vault = "Y2lwaGVydGV4dA==".to_string();
+        post.vaultiv = "aXY=".to_string();
+        post.version = 7;
+        post.lock_epoch = 0;
+        post.credential_version = 1;
+
+        let json: serde_json::Value =
+            serde_json::from_slice(&build(&post).expect("package builds")).unwrap();
+
+        assert_eq!(json["cryptoParameters"]["salt"], "bmV3LXNhbHQ=");
+        assert_eq!(json["cryptoParameters"]["iterations"], 120_000);
+        assert_eq!(json["passwordKeyEnvelope"]["wrappedVaultKey"], "bmV3LWdyYXA=");
+        assert_eq!(json["passwordKeyEnvelope"]["iv"], "bmV3LWl2");
+        // Ciphertext and revision are untouched by a credential rotation.
+        assert_eq!(json["snapshot"]["ciphertext"], "Y2lwaGVydGV4dA==");
+        assert_eq!(json["logicalRevision"], 7);
+    }
+
+    /// Recovery material is per-vault and deliberately absent from the backup
+    /// format. A package is only ever restored with the master password, so
+    /// shipping the recovery envelope would widen the zero-knowledge boundary
+    /// for no benefit — and it would mean a compromised provider backup holds a
+    /// second route into the vault key.
+    #[test]
+    fn package_never_carries_recovery_material() {
+        let bytes = build(&sample_vault()).expect("package builds");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        for forbidden in [
+            "recoveryVerifier",
+            "recoverySalt",
+            "recoveryWrap",
+            "recoveryWrapIv",
+            "recovery_wrap",
+            "recovery_verifier",
+        ] {
+            assert!(
+                json.get(forbidden).is_none(),
+                "package leaked recovery field {forbidden}"
+            );
+        }
+        // Belt and braces: none of the recovery values appear anywhere at all.
+        let text = String::from_utf8(bytes).unwrap();
+        for secret in [
+            "cmVjb3ZlcnktdmVyaWZpZXI=",
+            "cmVjb3Zlcnktd3JhcA==",
+            "cmVjdml2",
+        ] {
+            assert!(!text.contains(secret), "package leaked recovery value");
+        }
     }
 }
