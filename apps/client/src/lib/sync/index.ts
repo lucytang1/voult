@@ -17,12 +17,15 @@ import { VaultItem } from "../state/type";
 import { updateVault, fetchVault } from "../queries/vault/query";
 import { isNetworkError } from "../queries/http";
 import { mergeVault } from "./merge";
+import { parseVaultJson } from "../auth/utils";
+import { clearPendingVaultName, readPendingVaultName } from "../vault/name";
 
 const MAX_SYNC_RETRIES = 3;
 
-//returns the decrypted vault and vault version from the server
+//returns the decrypted document and vault version from the server
 const loadVaultFromServer = async (
   vaultKey: CryptoKey,
+  vaultId: string,
 ) => {
   const response = await fetchVault();
   const decryptedVault = await decrypt(
@@ -30,25 +33,30 @@ const loadVaultFromServer = async (
     response.vault.vaultiv,
     vaultKey,
   );
-  const parsedVault = JSON.parse(decryptedVault) as { items?: VaultItem[] };
-  return { items: parsedVault.items ?? [], version: response.vault.version };
+  return { doc: parseVaultJson(decryptedVault, vaultId), version: response.vault.version };
 };
 
-const loadItemsFromResponse = async (
+const loadDocumentFromResponse = async (
   response: Awaited<ReturnType<typeof updateVault>>,
   vaultKey: CryptoKey,
+  vaultId: string,
 ) => {
   const syncedVaultJson = await decrypt(
     response.vault,
     response.vaultiv,
     vaultKey,
   );
-  const parsed = JSON.parse(syncedVaultJson) as { items?: VaultItem[] };
-  return parsed.items ?? [];
+  // The server echoes the document it stored. Parsing it (rather than keeping
+  // only the item list) is what makes the name round-trip visible locally.
+  return parseVaultJson(syncedVaultJson, vaultId);
 };
 
 //updates the vault state with the server snapshot
-const adoptServerSnapshot = async (items: VaultItem[], version: number, guard?: SelectionGuard) => {
+const adoptServerSnapshot = async (
+  doc: { name: string; items: VaultItem[] },
+  version: number,
+  guard?: SelectionGuard,
+) => {
   // Read the id from the selection, not the session: M2 made the session
   // nullable while a vault is still selected, so `session?.vaultId` would
   // stamp snapshots with an empty id after session loss.
@@ -58,7 +66,12 @@ const adoptServerSnapshot = async (items: VaultItem[], version: number, guard?: 
     console.warn("[Sync] dropping server snapshot: selection changed");
     return;
   }
-  updateDecryptedVault({ formatVersion: 1, vaultId, items });
+  updateDecryptedVault({ formatVersion: 1, vaultId, name: doc.name, items: doc.items });
+  // A pending rename is confirmed once the server document agrees with it. If
+  // it does not (e.g. the intent is still queued), the marker stays so the
+  // optimistic label survives an unlock that happened before this sync.
+  const pending = readPendingVaultName(vaultId);
+  if (pending && pending === doc.name) clearPendingVaultName(vaultId);
   updateVaultVersion(version);
   await upsertVaultVersion(version);
 };
@@ -103,7 +116,7 @@ export async function sync() {
     // trigger (network reconnect / focus) will retry.
     let serverSnapshot;
     try {
-      serverSnapshot = await loadVaultFromServer(vaultKey);
+      serverSnapshot = await loadVaultFromServer(vaultKey, vaultId);
     } catch (error) {
       if (isNetworkError(error)) {
         console.info("[Sync] Server unreachable; intents remain queued for next online sync");
@@ -111,20 +124,20 @@ export async function sync() {
       }
       throw error;
     }
-    const { items: serverItems, version: serverVersion } = serverSnapshot;
+    const { doc: serverDoc, version: serverVersion } = serverSnapshot;
     const localVersion = await getlocalVaultVersion();
     const pendingIntents = await fetchPendingIntents();
 
     // Server ahead (or rolled back) with no local edits: adopt the snapshot.
     if (!pendingIntents.length) {
       if (localVersion !== serverVersion) {
-        await adoptServerSnapshot(serverItems, serverVersion, guard);
+        await adoptServerSnapshot(serverDoc, serverVersion, guard);
       }
       return;
     }
 
     // Replay local intents on top of the server snapshot (idempotent, per-op).
-    const merged = await mergeVault(serverItems, pendingIntents, vaultKey);
+    const merged = await mergeVault(serverDoc, pendingIntents, vaultKey);
 
     if (merged.quarantinedIds.length) {
       await Promise.all(
@@ -137,7 +150,7 @@ export async function sync() {
     // Nothing changed (all intents were already reflected, dropped, or
     // quarantined): adopt the snapshot and clear the resolved intents.
     if (!merged.changed) {
-      await adoptServerSnapshot(serverItems, serverVersion, guard);
+      await adoptServerSnapshot(serverDoc, serverVersion, guard);
       if (merged.resolvedIds.length) {
         await markIntentsSynced(merged.resolvedIds);
       }
@@ -145,7 +158,7 @@ export async function sync() {
     }
 
     const encryptedVault = await encrypt(
-      JSON.stringify({ items: merged.items }),
+      JSON.stringify({ name: merged.name, items: merged.items }),
       vaultKey,
     );
     if (selectionChanged()) {
@@ -180,8 +193,8 @@ export async function sync() {
       console.warn("Sync aborted after push: selection changed mid-run", { vaultId });
       return;
     }
-    const syncedItems = await loadItemsFromResponse(response, vaultKey);
-    await adoptServerSnapshot(syncedItems, response.version, guard);
+    const syncedDoc = await loadDocumentFromResponse(response, vaultKey, vaultId);
+    await adoptServerSnapshot(syncedDoc, response.version, guard);
     await markIntentsSynced(merged.resolvedIds);
     return;
   }

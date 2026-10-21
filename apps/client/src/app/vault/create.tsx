@@ -6,12 +6,12 @@ import { prepareVaultFlow, type CreateVaultResult } from "@/src/lib/vault/create
 import { commitVaultRegistration, describeCommitError, type PendingVaultRegistration } from "@/src/lib/vault/registration";
 import { persistDeviceSecrets } from "@/src/lib/auth/utils";
 import { RecoveryKeyInterstitial } from "@/src/lib/components/recovery-key-interstitial";
+import { VaultNameStep } from "@/src/lib/components/vault-name-step";
+import { DEFAULT_VAULT_NAME } from "@/src/lib/vault/name";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services/client-state-service";
-import { v4 as uuidv4 } from "uuid";
 import { useCloudProviders, useCloudStatus } from "@/src/lib/cloud/queries";
 import { useAppStore } from "@/src/lib/state";
-import type { VaultItem } from "@/src/lib/state/type";
 import { useSignUp } from "@/src/lib/queries/SignUp/query";
 import { enableCloudForVault } from "@/src/lib/cloud/enableSync";
 import { providerLabelForKind } from "@/src/lib/cloud/providers";
@@ -30,6 +30,10 @@ export default function CreateVault() {
   const [creating, setCreating] = useState(false);
   const [connectDrive, setConnectDrive] = useState(false);
   const [chosenProvider, setChosenProvider] = useState<string | null>(null);
+  // Onboarding step: master password -> name -> recovery file. The name is
+  // pre-filled, so a user who does not care can press Continue straight away.
+  const [step, setStep] = useState<"password" | "name">("password");
+  const [vaultName, setVaultName] = useState(DEFAULT_VAULT_NAME);
   const currentVaultId = useAppStore((s) => s.session?.vaultId);
   const googleStatusQuery = useCloudStatus(currentVaultId ?? "anonymous");
   const providersQuery = useCloudProviders();
@@ -104,6 +108,16 @@ export default function CreateVault() {
     router.replace("/home" as any);
   };
 
+  const goToName = () => {
+    if (!canSubmit) {
+      if (password !== confirm) setError("Passwords do not match.");
+      else if (password.length < 8) setError("Master password must be at least 8 characters.");
+      return;
+    }
+    setError(null);
+    setStep("name");
+  };
+
   const onCreate = async () => {
     if (!canSubmit) {
       if (password !== confirm) setError("Passwords do not match.");
@@ -120,8 +134,9 @@ export default function CreateVault() {
       // recovery secret are all derived locally, and the server hears about
       // this vault only when the user continues past the interstitial with the
       // recovery file in hand.
-      const starter = { items: [] as VaultItem[] };
-      const prepared = await prepareVaultFlow(password, starter);
+      // A new vault is created EMPTY: no demo entries, no seeded credentials.
+      // Everything the vault holds is something the user added themselves.
+      const prepared = await prepareVaultFlow(password, vaultName);
       setPrepared(prepared);
       setPhase("showingRecoveryKey");
     } catch (e) {
@@ -174,9 +189,28 @@ export default function CreateVault() {
       <RecoveryKeyInterstitial
         recoveryKey={prepared.recoveryKey}
         vaultId={prepared.vaultId}
+        name={prepared.decryptedVault.name}
         busy={creating}
         error={error}
         onContinue={onConfirmRecoveryFile}
+      />
+    );
+  }
+
+  if (step === "name") {
+    return (
+      <VaultNameStep
+        value={vaultName}
+        onChange={setVaultName}
+        onContinue={onCreate}
+        onBack={() => {
+          setError(null);
+          setStep("password");
+        }}
+        busy={creating}
+        error={error}
+        submitLabel={connectDrive ? "Create & connect" : "Create vault"}
+        title="Name your vault"
       />
     );
   }
@@ -238,11 +272,11 @@ export default function CreateVault() {
 
       <Pressable
         className={`w-full rounded-lg py-3 items-center ${canSubmit ? "bg-accent-line" : "bg-surface"}`}
-        onPress={onCreate}
+        onPress={goToName}
         disabled={!canSubmit}
       >
         <Text className={`${canSubmit ? "text-primary-text" : "text-muted-text"} font-medium`}>
-          {phase === "creatingLocal" ? "Creating vault…" : phase === "authorizing" ? "Authorizing…" : phase === "creatingRemote" ? "Creating provider file…" : phase === "verifying" ? "Verifying…" : connectDrive ? "Create & connect" : "Create vault"}
+          {phase === "creatingLocal" ? "Creating vault…" : phase === "authorizing" ? "Authorizing…" : phase === "creatingRemote" ? "Creating provider file…" : phase === "verifying" ? "Verifying…" : "Continue"}
         </Text>
       </Pressable>
 

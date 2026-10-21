@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { FileDown, KeyRound, Printer } from "lucide-react";
+import { FileDown, KeyRound } from "lucide-react";
 import { useAppStore } from "@/src/lib/state";
 import { useGetCryptoParams } from "@/src/lib/queries/cryptoParams/query";
 import { useRecoveryChallengeMutation, useRecoveryRegenerateMutation, useRecoveryUnlockMutation } from "@/src/lib/queries/recovery/mutations";
 import { describeRecoveryError } from "@/src/lib/auth/flows/recover";
-import { downloadRecoveryFile, printRecoveryFile, readRecoveryFile } from "@/src/lib/auth/recovery-file";
+import { downloadRecoveryFile, readRecoveryFile } from "@/src/lib/auth/recovery-file";
 import { RecoveryFilePicker } from "@/src/lib/components/recovery-file-picker";
 import {
     b64,
@@ -46,6 +46,7 @@ export function RecoveryKeySection() {
         s.vault.status === "no_vault" ? null : s.vault.vaultId,
     );
     const unlocked = useAppStore((s) => s.vault.status === "unlocked");
+    const vaultName = useAppStore((s) => s.decryptedVault?.name);
     const [stage, setStage] = useState<"idle" | "proving" | "showing">("idle");
     const [newKey, setNewKey] = useState<string | null>(null);
     const [confirmed, setConfirmed] = useState(false);
@@ -178,9 +179,9 @@ export function RecoveryKeySection() {
     };
 
     if (stage === "showing" && newKey) {
-        const payload = { vaultId, recoveryKey: newKey };
+        const payload = { vaultId, recoveryKey: newKey, name: vaultName };
         return (
-            <View className="mt-6 mb-4 rounded-2xl border border-border bg-card p-5">
+            <View className="mt-6 mb-4 rounded-2xl bg-surface1 overflow-hidden p-5">
                 <Text className="mb-2 text-sm font-semibold text-primary-text">
                     Your new recovery file
                 </Text>
@@ -191,26 +192,12 @@ export function RecoveryKeySection() {
 
                 <Pressable
                     accessibilityRole="button"
-                    className="w-full rounded-lg bg-accent-line py-3 items-center flex-row justify-center mb-2"
+                    className="w-full rounded-lg bg-accent-line py-3 items-center flex-row justify-center"
                     onPress={() => setFileName(downloadRecoveryFile(payload))}
                 >
                     <FileDown size={16} color="#0b0d10" />
                     <Text className="text-primary-text font-medium text-sm ml-2">
                         Download recovery file
-                    </Text>
-                </Pressable>
-
-                <Pressable
-                    accessibilityRole="button"
-                    className="w-full rounded-lg bg-surface border border-border-strong py-3 items-center flex-row justify-center"
-                    onPress={() => {
-                        printRecoveryFile(payload);
-                        setFileName("print dialog");
-                    }}
-                >
-                    <Printer size={16} color="#a1a1aa" />
-                    <Text className="text-primary-text font-medium text-sm ml-2">
-                        Print it instead
                     </Text>
                 </Pressable>
 
@@ -228,7 +215,7 @@ export function RecoveryKeySection() {
                 >
                     <View
                         className={`w-5 h-5 rounded border items-center justify-center mr-3 ${
-                            confirmed ? "border-accent-line bg-accent" : "border-border-strong"
+                            confirmed ? "border-accent-line bg-accent" : "border-hairline-accent"
                         }`}
                     >
                         {confirmed ? <Text className="text-xs text-primary-text">✓</Text> : null}
@@ -264,7 +251,7 @@ export function RecoveryKeySection() {
 
     if (stage === "proving") {
         return (
-            <View className="mt-6 mb-4 rounded-2xl border border-border bg-card p-5">
+            <View className="mt-6 mb-4 rounded-2xl bg-surface1 overflow-hidden p-5">
                 <Text className="mb-2 text-sm font-semibold text-primary-text">
                     Rotate recovery file
                 </Text>
@@ -287,7 +274,7 @@ export function RecoveryKeySection() {
                 ) : null}
 
                 <Pressable
-                    className="mt-4 w-full rounded-lg bg-surface border border-border-strong px-4 py-2.5 items-center"
+                    className="mt-4 w-full rounded-lg bg-surface border border-hairline-accent px-4 py-2.5 items-center"
                     onPress={cancel}
                     disabled={busy}
                 >
@@ -298,7 +285,7 @@ export function RecoveryKeySection() {
     }
 
     return (
-        <View className="mt-6 mb-4 rounded-2xl border border-border bg-card p-5">
+        <View className="mt-6 mb-4 rounded-2xl bg-surface1 overflow-hidden p-5">
             <View className="mb-2 flex-row items-center">
                 <KeyRound size={16} color="#a1a1aa" />
                 <Text className="ml-2 text-sm font-semibold text-primary-text">
@@ -311,7 +298,7 @@ export function RecoveryKeySection() {
                     : "Checking recovery status…"}
             </Text>
             <Pressable
-                className="self-start rounded-lg bg-surface border border-border-strong px-4 py-2.5"
+                className="self-start rounded-lg bg-accent border border-hairline-accent px-4 py-2.5"
                 onPress={startRotation}
                 disabled={!hasRecovery}
             >

@@ -7,8 +7,15 @@
 //! and never sees plaintext. It can therefore re-emit the package *exactly*
 //! because every field is ciphertext or public crypto metadata the server
 //! already stores: `vault.vault` (AES-GCM ciphertext), `vault.vaultiv`,
-//! `salt`, `iterations`, `crypto_version`, and the password-wrapped vault-key
-//! envelope. Building a backup is a re-serialization, never a decryption.
+//! `salt`, `iterations`, `crypto_version`, the password-wrapped vault-key
+//! envelope, and the recovery envelope. Building a backup is a re-serialization,
+//! never a decryption.
+//!
+//! The recovery envelope is part of the *vault*, not of whichever server row
+//! happens to exist. Shipping it is what makes one recovery file work on every
+//! instance of a vault id: import registers these exact values instead of
+//! minting a fresh secret, so the file the user saved at creation keeps working
+//! after a restore onto another server.
 //!
 //! The JSON shape must stay byte-compatible with the client's
 //! `createVoultPackage` (`apps/client/src/lib/crypto/vault.ts`) and
@@ -21,14 +28,18 @@ use serde::Serialize;
 use crate::entity::vault;
 
 /// Bump only in lockstep with `PACKAGE_FORMAT_VERSION` in
-/// `apps/client/src/lib/crypto/vault.ts`.
-const PACKAGE_FORMAT_VERSION: u32 = 1;
+/// `apps/client/src/lib/crypto/vault.ts`. Version 2 added `recoveryEnvelope`.
+const PACKAGE_FORMAT_VERSION: u32 = 2;
 
 /// Why a package could not be produced. These are surfaced verbatim to the
 /// client as `sync_status`/`last_mirror_error`, so they stay short, stable, and
 /// free of provider detail, ciphertext, or key material.
 pub const ERR_MISSING_ENVELOPE: &str = "MISSING_KEY_ENVELOPE";
 pub const ERR_LEGACY_CRYPTO: &str = "LEGACY_CRYPTO_VERSION";
+/// The row has no recovery material, so a package built from it could not
+/// reproduce the vault's recovery path. Every row created through the API
+/// carries recovery, so this is a defensive guard rather than a real state.
+pub const ERR_MISSING_RECOVERY: &str = "MISSING_RECOVERY";
 
 #[derive(Serialize)]
 struct CryptoParameters {
@@ -49,6 +60,27 @@ struct PasswordKeyEnvelope {
     iv: String,
 }
 
+/// The recovery material, carried so the vault's recovery key is portable.
+///
+/// Every field is already public-ish metadata the server stores for the vault:
+/// the HKDF salt, the non-invertible HMAC verifier, and the AES-GCM envelope
+/// holding `vaultKeyRaw` under `K_rec`. None of it is a secret the server holds
+/// alone, and none of it can be opened without the recovery file the user kept.
+#[derive(Serialize)]
+struct RecoveryEnvelope {
+    /// HKDF salt (base64) for `K_rec`. Served pre-auth by
+    /// `GET /get_crypto_params`; carried here so a restore keeps the same salt.
+    salt: String,
+    /// `HMAC-SHA256(K_rec, "recovery-verify-v1")`, base64. The server's second
+    /// authentication path, which it validates without holding the secret.
+    verifier: String,
+    /// AES-GCM envelope of `vaultKeyRaw` under `K_rec` (Rule R1: raw key, not a
+    /// password-derived key), AAD-bound to the vault id.
+    #[serde(rename = "wrappedVaultKey")]
+    wrapped_vault_key: String,
+    iv: String,
+}
+
 #[derive(Serialize)]
 struct VoultPackage {
     #[serde(rename = "packageFormatVersion")]
@@ -64,6 +96,8 @@ struct VoultPackage {
     snapshot: Snapshot,
     #[serde(rename = "passwordKeyEnvelope")]
     password_key_envelope: PasswordKeyEnvelope,
+    #[serde(rename = "recoveryEnvelope")]
+    recovery_envelope: RecoveryEnvelope,
 }
 
 /// Metadata the server can read out of a package document without decrypting
@@ -101,6 +135,9 @@ pub fn parse_header(bytes: &[u8], expected_vault_id: &str) -> Result<PackageHead
 /// is unrestorable on a new device, so writing it to a provider would be a
 /// backup in name only. That is the case for legacy `crypto_version = 1` vaults, which the
 /// client migrates to v2 on first password login.
+///
+/// Also fails when recovery material is absent, so a restored vault always keeps
+/// its original recovery file rather than silently acquiring a new one.
 pub fn build(vault: &vault::Model) -> Result<Vec<u8>, &'static str> {
     let (Some(wrapped_vault_key), Some(wrap_iv)) = (
         vault.vault_key_wrap.as_ref(),
@@ -111,6 +148,21 @@ pub fn build(vault: &vault::Model) -> Result<Vec<u8>, &'static str> {
         } else {
             ERR_MISSING_ENVELOPE
         });
+    };
+
+    let (
+        Some(recovery_salt),
+        Some(recovery_verifier),
+        Some(recovery_wrap),
+        Some(recovery_wrap_iv),
+    ) = (
+        vault.recovery_salt.as_ref(),
+        vault.recovery_verifier.as_ref(),
+        vault.recovery_wrap.as_ref(),
+        vault.recovery_wrap_iv.as_ref(),
+    )
+    else {
+        return Err(ERR_MISSING_RECOVERY);
     };
 
     let pkg = VoultPackage {
@@ -129,6 +181,12 @@ pub fn build(vault: &vault::Model) -> Result<Vec<u8>, &'static str> {
         password_key_envelope: PasswordKeyEnvelope {
             wrapped_vault_key: wrapped_vault_key.clone(),
             iv: wrap_iv.clone(),
+        },
+        recovery_envelope: RecoveryEnvelope {
+            salt: recovery_salt.clone(),
+            verifier: recovery_verifier.clone(),
+            wrapped_vault_key: recovery_wrap.clone(),
+            iv: recovery_wrap_iv.clone(),
         },
     };
 
@@ -169,7 +227,7 @@ mod tests {
 
         // Field names are the client's camelCase contract; a rename here would
         // silently break provider-side restore on another device.
-        assert_eq!(json["packageFormatVersion"], 1);
+        assert_eq!(json["packageFormatVersion"], 2);
         assert_eq!(json["vaultId"], "11111111-2222-4333-8444-555555555555");
         assert_eq!(json["logicalRevision"], 7);
         assert_eq!(json["cryptoVersion"], 2);
@@ -179,6 +237,13 @@ mod tests {
         assert_eq!(json["snapshot"]["iv"], "aXY=");
         assert_eq!(json["passwordKeyEnvelope"]["wrappedVaultKey"], "d3JhcA==");
         assert_eq!(json["passwordKeyEnvelope"]["iv"], "d2l2");
+        assert_eq!(json["recoveryEnvelope"]["salt"], "cmVjb3Zlcnktc2FsdA==");
+        assert_eq!(json["recoveryEnvelope"]["verifier"], "cmVjb3ZlcnktdmVyaWZpZXI=");
+        assert_eq!(
+            json["recoveryEnvelope"]["wrappedVaultKey"],
+            "cmVjb3Zlcnktd3JhcA=="
+        );
+        assert_eq!(json["recoveryEnvelope"]["iv"], "cmVjdml2");
     }
 
     #[test]
@@ -206,6 +271,20 @@ mod tests {
         legacy.vault_key_wrap = None;
         legacy.vault_key_wrap_iv = None;
         assert_eq!(build(&legacy), Err(ERR_LEGACY_CRYPTO));
+    }
+
+    /// A package without recovery material could restore a vault that no longer
+    /// answers to the user's original recovery file, so it is refused rather
+    /// than written.
+    #[test]
+    fn missing_recovery_is_rejected() {
+        let mut v = sample_vault();
+        v.recovery_wrap = None;
+        assert_eq!(build(&v), Err(ERR_MISSING_RECOVERY));
+
+        let mut no_verifier = sample_vault();
+        no_verifier.recovery_verifier = None;
+        assert_eq!(build(&no_verifier), Err(ERR_MISSING_RECOVERY));
     }
 
     /// A package mirrored after POST /recovery/rewrap must carry the NEW
@@ -241,37 +320,21 @@ mod tests {
         assert_eq!(json["logicalRevision"], 7);
     }
 
-    /// Recovery material is per-vault and deliberately absent from the backup
-    /// format. A package is only ever restored with the master password, so
-    /// shipping the recovery envelope would widen the zero-knowledge boundary
-    /// for no benefit — and it would mean a compromised provider backup holds a
-    /// second route into the vault key.
+    /// Recovery material travels WITH the backup. A package is a portable
+    /// recovery kit: restoring it must reproduce the vault's recovery key, not
+    /// mint a fresh one, or the same vault id would answer to a different
+    /// recovery file on every server it is restored to.
     #[test]
-    fn package_never_carries_recovery_material() {
+    fn package_carries_recovery_material() {
         let bytes = build(&sample_vault()).expect("package builds");
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-        for forbidden in [
-            "recoveryVerifier",
-            "recoverySalt",
-            "recoveryWrap",
-            "recoveryWrapIv",
-            "recovery_wrap",
-            "recovery_verifier",
-        ] {
-            assert!(
-                json.get(forbidden).is_none(),
-                "package leaked recovery field {forbidden}"
-            );
-        }
-        // Belt and braces: none of the recovery values appear anywhere at all.
-        let text = String::from_utf8(bytes).unwrap();
-        for secret in [
-            "cmVjb3ZlcnktdmVyaWZpZXI=",
-            "cmVjb3Zlcnktd3JhcA==",
-            "cmVjdml2",
-        ] {
-            assert!(!text.contains(secret), "package leaked recovery value");
-        }
+        let envelope = json
+            .get("recoveryEnvelope")
+            .expect("package must carry the recovery envelope");
+        assert_eq!(envelope["salt"], "cmVjb3Zlcnktc2FsdA==");
+        assert_eq!(envelope["verifier"], "cmVjb3ZlcnktdmVyaWZpZXI=");
+        assert_eq!(envelope["wrappedVaultKey"], "cmVjb3Zlcnktd3JhcA==");
+        assert_eq!(envelope["iv"], "cmVjdml2");
     }
 }

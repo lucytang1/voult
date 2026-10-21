@@ -29,17 +29,6 @@ function requireDom(): void {
 }
 
 /**
- * Renders the recovery payload and hands the browser a download.
- *
- * Returns the file name so the UI can tell the user exactly what to look for —
- * a silent download that lands somewhere unexpected is a recovery file the
- * user cannot find when they need it.
- *
- * Triggered only from a real click. An automatic download (fired from a mount
- * effect, with no user gesture in the same task) is silently discarded by
- * Safari, and the user would be told they had saved a file they do not have.
- */
-/**
  * The artifact as a Blob.
  *
  * `new Uint8Array(bytes)` rather than passing `bytes` straight through: Blob
@@ -80,60 +69,6 @@ export function downloadRecoveryFile(payload: RecoveryPdfPayload): string {
   // tick as the click.
   window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
   return fileName;
-}
-
-/**
- * Prints the recovery payload, for someone who wants paper.
- *
- * Uses a hidden same-origin iframe rather than `window.open`, which popup
- * blockers refuse to let through in exactly the situation this matters — a
- * recovery attempt is often the first interaction after a long absence.
- *
- * Resolves as soon as the print dialog has been asked for; the iframe is
- * cleaned up separately, because there is no event for "the print dialog
- * closed" and tearing the document down too early cancels the print.
- */
-export function printRecoveryFile(payload: RecoveryPdfPayload): void {
-  requireDom();
-  const url = URL.createObjectURL(pdfBlob(payload));
-
-  const frame = document.createElement("iframe");
-  frame.title = "Recovery file";
-  frame.setAttribute("aria-hidden", "true");
-  frame.style.position = "fixed";
-  frame.style.right = "0";
-  frame.style.bottom = "0";
-  frame.style.width = "0";
-  frame.style.height = "0";
-  frame.style.border = "0";
-
-  let cleaned = false;
-  const cleanup = () => {
-    if (cleaned) return;
-    cleaned = true;
-    frame.remove();
-    URL.revokeObjectURL(url);
-  };
-  // The print dialog takes focus; getting it back is the closest thing to a
-  // "done" signal. The timeout is the backstop for a dialog dismissed in a way
-  // that never returns focus.
-  window.addEventListener("focus", cleanup, { once: true });
-  window.setTimeout(cleanup, 60_000);
-
-  frame.addEventListener("load", () => {
-    try {
-      frame.contentWindow?.focus();
-      frame.contentWindow?.print();
-    } catch (e) {
-      // A blocked or unavailable print dialog must not break the flow — the
-      // download button right next to it is the other half of this feature.
-      console.warn("Could not open the print dialog for the recovery file", e);
-      cleanup();
-    }
-  });
-
-  frame.src = url;
-  document.body.appendChild(frame);
 }
 
 /**

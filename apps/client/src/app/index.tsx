@@ -147,18 +147,6 @@ export default function Landing() {
             <Text className="mt-4 text-center text-sm text-red-400">{cloudError}</Text>
           )}
 
-          {/* Recovery. Present for a user who already has a vault on this
-              server but cannot get into it — a new machine with no device key
-              and a forgotten master password. Quiet by design: it is a recovery
-              path, not a normal way in. */}
-          <Pressable
-            className="mt-6 w-full items-center justify-center rounded-[10px] py-2"
-            onPress={() => router.push("/recover" as any)}
-          >
-            <Text className="text-[13px] font-normal text-muted-text">
-              Already have a vault? Recover it
-            </Text>
-          </Pressable>
         </View>
       </View>
     </View>

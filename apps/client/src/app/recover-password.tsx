@@ -14,6 +14,7 @@ import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services/client-state-service";
 import { queryClient } from "@/src/lib/queries/client";
+import { displayVaultName } from "@/src/lib/vault/name";
 
 /**
  * Recovery step 2 of 2 — choose a new master password and open the vault.
@@ -143,7 +144,7 @@ export default function RecoverPassword() {
             </Text>
             <Text className="text-muted-text text-sm mb-6 text-center max-w-md leading-5">
                 Step 2 of 2 — your recovery file is verified.
-                {vaultId ? ` Vault ${vaultId.slice(0, 8)}…` : ""}
+                {vaultId ? ` ${displayVaultName(vaultId)}` : ""}
             </Text>
 
             <TextInput

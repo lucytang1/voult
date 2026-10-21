@@ -7,6 +7,7 @@ import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { fetchSession } from "@/src/lib/queries/session/query";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { selectedVaultId } from "@/src/lib/state/vault-state";
+import { displayVaultName } from "@/src/lib/vault/name";
 import { Lock as LockIcon, AlertTriangle } from "lucide-react";
 
 /**
@@ -91,7 +92,7 @@ export default function Lock() {
         </View>
         <Text className="text-primary-text text-xl mb-1">Vault unavailable</Text>
         <Text className="text-muted-text text-sm mb-2 text-center">
-          {vaultId ? `Vault ${vaultId.slice(0, 8)}… ` : ""}
+          {vaultId ? `${displayVaultName(vaultId)} ` : ""}
           is no longer available on this server.
         </Text>
         <Text className="text-muted-text text-xs mb-6 text-center">
@@ -121,7 +122,7 @@ export default function Lock() {
       </View>
       <Text className="text-primary-text text-xl mb-1">Voult is locked</Text>
       <Text className="text-muted-text text-sm mb-6">
-        {vaultId ? `Vault ${vaultId.slice(0, 8)}…` : ""}
+        {vaultId ? displayVaultName(vaultId) : ""}
       </Text>
 
       {needsReauth ? (

@@ -36,7 +36,7 @@ describe("mergeVault with SSO sign-in methods", () => {
       sso: [{ provider: "google", account: "me@gmail.com" }],
       origin: "https://example.com",
     };
-    const res = await mergeVault([], [await intentFor("create", marker)], key);
+    const res = await mergeVault({ name: "Test vault", items: [] }, [await intentFor("create", marker)], key);
     assert.equal(res.changed, true);
     assert.equal(res.items.length, 1);
     assert.deepEqual(res.items[0].sso, [{ provider: "google", account: "me@gmail.com" }]);
@@ -52,7 +52,7 @@ describe("mergeVault with SSO sign-in methods", () => {
       sso: [{ provider: "google", account: "me@acme.com" }],
       origin: "https://example.com",
     };
-    const res = await mergeVault([], [await intentFor("create", both)], key);
+    const res = await mergeVault({ name: "Test vault", items: [] }, [await intentFor("create", both)], key);
     assert.equal(res.changed, true);
     assert.equal(res.items.length, 1);
     assert.equal(res.items[0].password, "pw-1");
@@ -69,7 +69,7 @@ describe("mergeVault with SSO sign-in methods", () => {
       origin: "https://example.com",
     };
     const res = await mergeVault(
-      [base],
+      { name: "Test vault", items: [base] },
       [
         await intentFor("update", {
           id: base.id,
@@ -93,7 +93,7 @@ describe("mergeVault with SSO sign-in methods", () => {
       origin: "https://example.com",
     };
     const intent = await intentFor("create", bad);
-    const res = await mergeVault([], [intent], key);
+    const res = await mergeVault({ name: "Test vault", items: [] }, [intent], key);
     assert.equal(res.changed, false);
     assert.deepEqual(res.items, []);
     assert.deepEqual(res.quarantinedIds, [intent.id]);
@@ -108,7 +108,7 @@ describe("mergeVault with SSO sign-in methods", () => {
       origin: "https://example.com",
     };
     const intent = await intentFor("create", bad);
-    const res = await mergeVault([], [intent], key);
+    const res = await mergeVault({ name: "Test vault", items: [] }, [intent], key);
     assert.equal(res.changed, false);
     assert.deepEqual(res.items, []);
     assert.deepEqual(res.quarantinedIds, [intent.id]);
@@ -130,7 +130,7 @@ describe("mergeVault with SSO sign-in methods", () => {
       origin: "https://notion.so",
     };
     const res = await mergeVault(
-      [],
+      { name: "Test vault", items: [] },
       [await intentFor("create", personal), await intentFor("create", work)],
       key,
     );

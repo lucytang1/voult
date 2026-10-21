@@ -18,10 +18,8 @@ import { openVaultFlow, requiresSwitchConfirmation } from "@/src/lib/vault/open"
 import { useCloudStatus, useCloudVaults, useLinkPendingCloudToken, usePendingCloudVaults, usePersistCloudBinding } from "@/src/lib/cloud/queries";
 import { GoogleDriveIcon } from "../../../assets/images/GoogleDriveIcon";
 import type { VaultDescriptor } from "@/src/lib/cloud/api";
-import { importVaultFromCloud, finishCloudImport } from "@/src/lib/vault/import";
-import { describeCommitError, type PendingVaultRegistration } from "@/src/lib/vault/registration";
-import { register } from "@/src/lib/queries/SignUp/query";
-import { RecoveryKeyInterstitial } from "@/src/lib/components/recovery-key-interstitial";
+import { importVaultFromCloud } from "@/src/lib/vault/import";
+import { displayVaultName, hasKnownVaultName } from "@/src/lib/vault/name";
 import { fetchSession } from "@/src/lib/queries/session/query";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services/client-state-service";
@@ -55,14 +53,6 @@ export default function VaultChooser() {
   const [googleImportError, setGoogleImportError] = useState<string | null>(null);
   const [googleImporting, setGoogleImporting] = useState(false);
   const [sessionRestoreError, setSessionRestoreError] = useState<string | null>(null);
-  // Set when a Drive import CREATED this vault on this server. A fresh recovery
-  // key was minted for it (the package never carries one), and the user must
-  // save it before we finish. Null on every other path.
-  // A vault restored from Drive that has NOT been registered yet: fully
-  // prepared, nothing on the server. `importedPassword` is kept alongside it
-  // only so a VAULT_EXISTS race at commit time can fall back to a normal login.
-  const [importedPending, setImportedPending] = useState<PendingVaultRegistration | null>(null);
-  const [importedPassword, setImportedPassword] = useState<string | null>(null);
   const handledConnectedCallback = useRef(false);
   const params = useLocalSearchParams<{ cloud_connected?: string; cloud_error?: string; cloud_error_detail?: string; cloud_state?: string; provider?: string }>();
   const pendingState = (params as any).cloud_state as string | undefined
@@ -240,10 +230,10 @@ export default function VaultChooser() {
       // vault's key under whatever is selected by the time it returns.
       const guard = captureSelectionEpoch();
       try {
-        // Case 1 (no session): vault may only exist on Drive — fetch package
-        // via pending token and verify the password locally. Nothing is
-        // registered yet; that happens after the recovery file is saved.
-        const outcome = await importVaultFromCloud({
+        // Case 1 (no session): vault may only exist on Drive — fetch the package
+        // via the pending token, verify the password locally, and register it
+        // here with the recovery material the package already carries.
+        const result = await importVaultFromCloud({
           vaultId: googleImportTarget.vault_id,
           fileId: googleImportTarget.file_id,
           masterPassword: googleImportPassword,
@@ -254,16 +244,6 @@ export default function VaultChooser() {
           return;
         }
 
-        // A vault that is not on this server yet comes back as pending: stop
-        // here so the user gets a recovery file for it BEFORE the row exists.
-        if (outcome.kind === "pending_registration") {
-          setGoogleImportError(null);
-          setImportedPending(outcome.pending);
-          setImportedPassword(googleImportPassword);
-          return;
-        }
-
-        const result = outcome.session;
         switchVaultOpen({
           requestedVaultId: googleImportTarget.vault_id,
           session: result.session,
@@ -297,9 +277,9 @@ export default function VaultChooser() {
           persistBindingMutation.reset();
         }
         setGoogleImportTarget(null);
-        // The vault now exists on this server (or did already). If this import created
-        // it, the recovery file has already been saved — see the interstitial —
-        // so there is nothing left to stop for.
+        // The vault now exists on this server (or already did). Recovery was
+        // established at creation and travels in the package, so a restore never
+        // pauses for a recovery step.
         router.replace("/home" as any);
         return;
       } catch (e: any) {
@@ -319,22 +299,17 @@ export default function VaultChooser() {
     setGoogleImporting(true);
     setGoogleImportError(null);
     try {
-      const outcome = await importVaultFromCloud({
+      // The vault may already be on this server (normal password login) or exist
+      // only as a provider package (verify + register here). Either way the
+      // result is an unlocked session, and recovery already exists from
+      // creation — there is no recovery step in an import.
+      const result = await importVaultFromCloud({
         vaultId: googleImportTarget.vault_id,
         fileId: googleImportTarget.file_id,
         masterPassword: googleImportPassword,
         pendingState: pendingState || undefined,
       });
 
-      // A vault that only exists as a Drive package comes back pending: nothing
-      // is registered until the user has a recovery file for it.
-      if (outcome.kind === "pending_registration") {
-        setImportedPending(outcome.pending);
-        setImportedPassword(googleImportPassword);
-        return;
-      }
-
-      const result = outcome.session;
       // Atomic: selection + session + key + document in one write, verified
       // against the vault we asked to import. See `performOpen` for the full
       // reasoning — the same three guards apply to an import.
@@ -362,57 +337,6 @@ export default function VaultChooser() {
     }
   };
 
-  /**
-   * Registers a restored vault, once the user has saved its recovery file.
-   *
-   * Same rule as vault creation: the row cannot exist before the file that opens
-   * it. On failure `importedPending` is kept so a retry re-registers the same
-   * vault id with the same recovery key, keeping the downloaded file valid.
-   */
-  const onConfirmImportedRecoveryFile = async () => {
-    if (!importedPending) return;
-    setGoogleImporting(true);
-    setGoogleImportError(null);
-    try {
-      const result = await finishCloudImport(importedPending, register, importedPassword ?? undefined);
-      setImportedPending(null);
-      setImportedPassword(null);
-      switchVaultOpen({
-        requestedVaultId: result.session.vaultId,
-        session: result.session,
-        vaultKey: result.vaultKey,
-        decryptedVault: result.decryptedVault,
-        version: result.version,
-        lockEpoch: result.lockEpoch,
-      });
-      await initSQLite(result.session.vaultId);
-      await upsertVaultId(result.session.vaultId);
-      await upsertVaultVersion(result.version);
-      setGoogleImportTarget(null);
-      router.replace("/home" as any);
-    } catch (e: any) {
-      console.warn("Restored vault could not be registered", e);
-      setGoogleImportError(describeCommitError(e));
-    } finally {
-      setGoogleImporting(false);
-    }
-  };
-
-  // Mandatory interstitial for an import that has NOT yet registered this vault.
-// Nothing is on the server while this is showing: pressing Continue is what
-// creates the row, and by then the recovery file already exists.
-if (importedPending) {
-    return (
-      <RecoveryKeyInterstitial
-        recoveryKey={importedPending.recoveryKey}
-        vaultId={importedPending.vaultId}
-        busy={googleImporting}
-        error={googleImportError}
-        onContinue={onConfirmImportedRecoveryFile}
-      />
-    );
-  }
-
   if (!session && !isGoogleCallback) {
     return (
       <View className="flex-1 items-center justify-center bg-ground">
@@ -423,6 +347,13 @@ if (importedPending) {
 
   const driveCount = googleVaults?.length ?? 0;
   const localCount = vaults?.length ?? 0;
+  // Names are labels, not identity, so duplicates are legal. Where two local
+  // entries would render identically (or a vault has no known name yet), show
+  // the short id as secondary text; otherwise the UUID stays out of the way.
+  const localVaultLabels = new Map((vaults ?? []).map((v) => [v.vault_id, displayVaultName(v.vault_id)]));
+  const duplicatedNames = new Set(
+    [...localVaultLabels.values()].filter((label, index, all) => all.indexOf(label) !== index),
+  );
 
   return (
     <View className="flex-1 bg-ground px-6 py-8 items-center">
@@ -470,7 +401,7 @@ if (importedPending) {
           ) : googleVaults && googleVaults.length > 0 ? (
             googleVaults.map((gv) => (
               <Pressable key={gv.file_id} className="bg-card rounded-[10px] p-4 mb-2 border border-border-strong active:border-accent-line" onPress={() => handleGoogleVaultSelect(gv)}>
-                <Text className="text-primary-text text-sm font-semibold">Vault {gv.vault_id.slice(0, 8)}… — {gv.name}</Text>
+                <Text className="text-primary-text text-sm font-semibold">{displayVaultName(gv.vault_id)}</Text>
                 <Text className="text-muted-text text-xs mt-1">{gv.modified_time ? new Date(gv.modified_time).toLocaleDateString() : ""} • {gv.size ? `${gv.size} bytes` : ""} • Rev {(gv.head_revision_id || gv.version || "").slice(0, 8)}</Text>
                 <Text className="text-accent-text text-xs mt-1.5">Tap to download & enter master password to import</Text>
               </Pressable>
@@ -494,31 +425,37 @@ if (importedPending) {
       ) : session && vaults && vaults.length > 0 ? (
         <ScrollView className="flex-1 w-full max-w-[880px]">
           <Text className="text-muted-text text-xs uppercase tracking-wider mb-2">Existing local vaults</Text>
-          {vaults.map((v) => (
-            <Pressable
-              key={v.vault_id}
-              className={`bg-card rounded-lg p-4 mb-3 border ${session.vaultId === v.vault_id ? "border-accent-line" : "border-border"}`}
-              onPress={() => handleSelectVault(v)}
-            >
-              <View className="flex-row justify-between items-start">
-                <View className="flex-1">
-                  <Text className="text-primary-text font-medium">Vault {v.vault_id.slice(0, 8)}…</Text>
-                  <Text className="text-muted-text text-xs mt-1">ID: {v.vault_id.slice(0, 12)}…</Text>
-                  <Text className="text-muted-text text-xs mt-1">
-                    Version {v.version} • {new Date(v.created_at).toLocaleDateString()}
-                  </Text>
+          {vaults.map((v) => {
+            const label = localVaultLabels.get(v.vault_id) ?? displayVaultName(v.vault_id);
+            const showId = !hasKnownVaultName(v.vault_id) || duplicatedNames.has(label);
+            return (
+              <Pressable
+                key={v.vault_id}
+                className={`bg-card rounded-lg p-4 mb-3 border ${session.vaultId === v.vault_id ? "border-accent-line" : "border-border"}`}
+                onPress={() => handleSelectVault(v)}
+              >
+                <View className="flex-row justify-between items-start">
+                  <View className="flex-1">
+                    <Text className="text-primary-text font-medium">{label}</Text>
+                    {showId ? (
+                      <Text className="text-muted-text text-xs mt-1">ID: {v.vault_id.slice(0, 12)}…</Text>
+                    ) : null}
+                    <Text className="text-muted-text text-xs mt-1">
+                      Version {v.version} • {new Date(v.created_at).toLocaleDateString()}
+                    </Text>
+                  </View>
+                  <View className={`px-2 py-1 rounded ${session.vaultId === v.vault_id ? "bg-accent-line" : "bg-surface"}`}>
+                    <Text className={`text-xs ${session.vaultId === v.vault_id ? "text-primary-text" : "text-muted-text"}`}>
+                      {session.vaultId === v.vault_id ? "Active" : "Open"}
+                    </Text>
+                  </View>
                 </View>
-                <View className={`px-2 py-1 rounded ${session.vaultId === v.vault_id ? "bg-accent-line" : "bg-surface"}`}>
-                  <Text className={`text-xs ${session.vaultId === v.vault_id ? "text-primary-text" : "text-muted-text"}`}>
-                    {session.vaultId === v.vault_id ? "Active" : "Open"}
-                  </Text>
-                </View>
-              </View>
-              {session.vaultId === v.vault_id && (
-                <Text className="text-accent-text text-xs mt-2">Currently unlocked</Text>
-              )}
-            </Pressable>
-          ))}
+                {session.vaultId === v.vault_id && (
+                  <Text className="text-accent-text text-xs mt-2">Currently unlocked</Text>
+                )}
+              </Pressable>
+            );
+          })}
         </ScrollView>
       ) : session ? (
         <View className="w-full max-w-[880px] bg-card rounded-lg p-6 items-center border border-border">
@@ -538,7 +475,7 @@ if (importedPending) {
             </Text>
             {switchTarget && (
               <View className="bg-surface rounded-lg p-3 mb-4">
-                <Text className="text-primary-text text-sm">Target: {switchTarget.vault_id.slice(0, 12)}…</Text>
+                <Text className="text-primary-text text-sm">Target: {displayVaultName(switchTarget.vault_id)}</Text>
               </View>
             )}
             <Text className="text-muted-text text-xs mb-4">If the vault is password-protected and device unlock fails, enter its master password.</Text>
@@ -567,7 +504,7 @@ if (importedPending) {
             <Text className="text-muted-text text-sm mb-1">This will download the encrypted vault and create a local copy.</Text>
             {googleImportTarget && (
               <View className="bg-surface rounded-lg p-3 mb-3">
-                <Text className="text-primary-text text-sm">Vault {googleImportTarget.vault_id.slice(0, 12)}…</Text>
+                <Text className="text-primary-text text-sm">{displayVaultName(googleImportTarget.vault_id)}</Text>
                 <Text className="text-muted-text text-xs">File {googleImportTarget.file_id.slice(0, 12)}… • {googleImportTarget.name}</Text>
               </View>
             )}

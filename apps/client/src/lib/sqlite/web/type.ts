@@ -16,4 +16,5 @@ export type operation_type = {
   create: "create";
   update: "update";
   delete: "delete";
+  rename: "rename";
 };

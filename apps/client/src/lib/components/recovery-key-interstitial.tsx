@@ -1,23 +1,24 @@
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { FileDown, Printer, ShieldCheck } from "lucide-react";
-import { downloadRecoveryFile, printRecoveryFile } from "@/src/lib/auth/recovery-file";
+import { FileDown, ShieldCheck } from "lucide-react";
+import { downloadRecoveryFile } from "@/src/lib/auth/recovery-file";
 
 /**
  * The mandatory recovery interstitial, shown once during vault creation.
  *
  * This screen **cannot be skipped**. There is no "remind me later" and no
- * countdown: the Continue button stays disabled until the "I saved it" checkbox
- * is ticked, and that checkbox is the only way through. A readability timeout
- * would be theatre — it would let a user past a gate whose entire purpose is
- * that they do not skip it.
+ * countdown: the Continue button stays disabled until the "Save my recovery
+ * file" checkbox is ticked, and that checkbox is the only way through. A
+ * readability timeout would be theatre — it would let a user past a gate whose
+ * entire purpose is that they do not skip it.
  *
  * The recovery key is issued as a **file**, not as text on a screen. A key on
  * screen has to be transcribed, and transcription is where recovery keys die;
- * a file can be printed, stored, moved to wherever the rest of the household's
- * documents live, and read back by this app on the day it is needed. So the key
- * is never rendered here, and never goes to the clipboard — the only copies
- * that exist are the file the user saves and the server's encrypted envelope.
+ * a file can be stored, moved to wherever the rest of the household's
+ * documents live, printed from there, and read back by this app on the day it
+ * is needed. So the key is never rendered here, and never goes to the clipboard
+ * — the only copies that exist are the file the user saves and the server's
+ * encrypted envelope.
  *
  * **Pressing Continue is what creates the vault.** Registration happens after
  * this screen, not before it, so that a `vault` row can never exist without the
@@ -39,6 +40,7 @@ import { downloadRecoveryFile, printRecoveryFile } from "@/src/lib/auth/recovery
 export function RecoveryKeyInterstitial({
     recoveryKey,
     vaultId,
+    name,
     onContinue,
     busy,
     error,
@@ -46,32 +48,50 @@ export function RecoveryKeyInterstitial({
     /** `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX` — never rendered, only written to a file. */
     recoveryKey: string;
     vaultId: string;
+    /** User-chosen display name, shown here and written into the PDF. */
+    name?: string;
     onContinue: () => void;
     busy?: boolean;
     /** Set when the commit failed. Continue stays enabled: the retry is safe. */
     error?: string | null;
 }) {
     const [confirmed, setConfirmed] = useState(false);
-    /** Set once a download or a print has been asked for. */
+    /** Set once a download has been asked for. */
     const [saved, setSaved] = useState(false);
     const [fileName, setFileName] = useState<string | null>(null);
 
-    const payload = { vaultId, recoveryKey };
+    const payload = { vaultId, recoveryKey, name };
 
     const onDownload = () => {
         setFileName(downloadRecoveryFile(payload));
         setSaved(true);
     };
 
-    const onPrint = () => {
-        printRecoveryFile(payload);
-        setSaved(true);
+    /**
+     * Ticking the box IS the save.
+     *
+     * Continue used to require a separate Download click *and* the checkbox,
+     * which bought nothing: it never checked that a file reached the disk, only
+     * that a click happened. Folding the download into the tick means the file
+     * can never go un-offered, without asking the user for two gestures that
+     * say the same thing — and it matches the rotation flow in Settings, where
+     * the confirmation alone is the gate.
+     *
+     * The tick is a real user gesture, so the browser will honour the download
+     * fired from it (the same reason `downloadRecoveryFile` refuses to fire
+     * outside a click). Guarded on `saved` so an already-downloaded file is not
+     * written a second time.
+     */
+    const onToggleConfirmed = () => {
+        const next = !confirmed;
+        setConfirmed(next);
+        if (next && !saved) onDownload();
     };
 
     // A failed commit leaves the error on screen but keeps Continue available:
     // the retry re-uses the same prepared vault id and recovery key, so the file
     // already saved stays valid.
-    const canContinue = saved && confirmed && !busy;
+    const canContinue = confirmed && !busy;
 
     return (
         <View className="flex-1 bg-ground px-6 py-10">
@@ -84,30 +104,19 @@ export function RecoveryKeyInterstitial({
             </Text>
             <Text className="text-muted-text text-sm mb-6 leading-5">
                 This is the only way back into this vault if you forget your master
-                password or lose this device. It is a single PDF — print it, or keep
-                it with your important documents. Nobody, including this server, can
-                recover it for you.
+                password or lose this device. It is a single PDF — keep it with your
+                important documents, or print it from there. Nobody, including this
+                server, can recover it for you.
             </Text>
 
             <Pressable
                 accessibilityRole="button"
-                className="w-full max-w-md rounded-xl bg-accent-line py-4 items-center flex-row justify-center mb-3"
+                className="w-full max-w-md rounded-xl bg-accent-line py-4 items-center flex-row justify-center"
                 onPress={onDownload}
             >
                 <FileDown size={18} color="#0b0d10" />
                 <Text className="text-primary-text font-medium ml-2">
                     Download recovery file
-                </Text>
-            </Pressable>
-
-            <Pressable
-                accessibilityRole="button"
-                className="w-full max-w-md rounded-xl bg-surface border border-border-strong py-4 items-center flex-row justify-center"
-                onPress={onPrint}
-            >
-                <Printer size={18} color="#a1a1aa" />
-                <Text className="text-primary-text font-medium ml-2">
-                    Print it instead
                 </Text>
             </Pressable>
 
@@ -118,9 +127,10 @@ export function RecoveryKeyInterstitial({
             ) : null}
 
             <Text className="text-muted-text text-xs mb-6 leading-4 mt-4">
-                Move it out of your Downloads folder — on most systems that folder is
-                backed up and scanned automatically, and this file opens your vault on
-                its own. It is offered once; if you lose it, you cannot have it back.
+                Or just tick the box below and the file downloads itself. Move it out
+                of your Downloads folder — on most systems that folder is backed up
+                and scanned automatically, and this file opens your vault on its own.
+                It is offered once; if you lose it, you cannot have it back.
             </Text>
 
             {error ? (
@@ -131,7 +141,7 @@ export function RecoveryKeyInterstitial({
                 accessibilityRole="checkbox"
                 accessibilityState={{ checked: confirmed }}
                 className="flex-row items-center mb-6"
-                onPress={() => setConfirmed((v) => !v)}
+                onPress={onToggleConfirmed}
             >
                 <View
                     className={`w-5 h-5 rounded border items-center justify-center mr-3 ${
@@ -141,7 +151,7 @@ export function RecoveryKeyInterstitial({
                     {confirmed ? <Text className="text-xs text-primary-text">✓</Text> : null}
                 </View>
                 <Text className="text-primary-text text-sm">
-                    I have saved my recovery file
+                    Save my recovery file
                 </Text>
             </Pressable>
 
@@ -163,7 +173,7 @@ export function RecoveryKeyInterstitial({
             </Text>
 
             <Text className="text-muted-text text-xs mt-6 text-center">
-                Vault {vaultId.slice(0, 8)}…
+                {name ? `${name} · ` : ""}Vault {vaultId.slice(0, 8)}…
             </Text>
         </View>
     );

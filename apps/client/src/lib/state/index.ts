@@ -26,6 +26,7 @@ import {
   persistSelectedVaultId,
   type StoredLockRecord,
 } from "./selection-store";
+import { cacheVaultName, DEFAULT_VAULT_NAME } from "../vault/name";
 
 const useAppStore = create<AppState>()((set) => ({
   vault: INITIAL_MODEL.vault,
@@ -161,8 +162,13 @@ const updateLockEpoch = (lockEpoch: number) =>
 // makes that reachable on 401; until then the two still agree.
 export const getVaultState = (): VaultState => useAppStore.getState().vault;
 
-const updateDecryptedVault = (decryptedVault: DecryptedVault) =>
+const updateDecryptedVault = (decryptedVault: DecryptedVault) => {
+  // Every install path (login, unlock, import, sync, switch) funnels through
+  // here, so this is the one place that keeps the pre-unlock display cache in
+  // step with the document that holds the canonical name.
+  cacheVaultName(decryptedVault.vaultId, decryptedVault.name);
   useAppStore.setState({ decryptedVault });
+};
 
 /**
  * The vault id to stamp onto a mutated document.
@@ -180,6 +186,7 @@ const addVaultItem = (item: CreateVaultItem) =>
     decryptedVault: {
       formatVersion: state.decryptedVault?.formatVersion ?? 1,
       vaultId: documentVaultId(state),
+      name: state.decryptedVault?.name ?? DEFAULT_VAULT_NAME,
       items: state.decryptedVault
         ? [...state.decryptedVault.items, item]
         : [item],
@@ -193,6 +200,7 @@ const updateVaultItem = (
     decryptedVault: {
       formatVersion: state.decryptedVault?.formatVersion ?? 1,
       vaultId: documentVaultId(state),
+      name: state.decryptedVault?.name ?? DEFAULT_VAULT_NAME,
       items:
         state.decryptedVault?.items.map((item) =>
           item.id === updateditem.id ? { ...item, ...updateditem.fields} : item,
@@ -205,12 +213,33 @@ const deleteVaultItem = (deleteitem: DeleteVaultItem) =>
     decryptedVault: {
       formatVersion: state.decryptedVault?.formatVersion ?? 1,
       vaultId: documentVaultId(state),
+      name: state.decryptedVault?.name ?? DEFAULT_VAULT_NAME,
       items:
         state.decryptedVault?.items.filter(
           (item) => !(item.id === deleteitem.id),
         ) ?? [],
     },
   }));
+
+/**
+ * Optimistically apply a rename to the in-memory document and its display
+ * cache. `lib/vault/rename.ts` owns the durable half (pending marker + intent);
+ * this exists so the store stays the single writer of `decryptedVault`.
+ */
+const updateVaultName = (name: string) =>
+  useAppStore.setState((state) => {
+    const vaultId = documentVaultId(state);
+    if (!vaultId) return state;
+    cacheVaultName(vaultId, name);
+    return {
+      decryptedVault: {
+        formatVersion: state.decryptedVault?.formatVersion ?? 1,
+        vaultId,
+        name,
+        items: state.decryptedVault?.items ?? [],
+      },
+    };
+  });
 
 // --- Lifecycle helpers (vault-native names) ------------------------------
 
@@ -476,6 +505,8 @@ const switchVaultOpen = (args: {
   // Durable write first: if the tab dies mid-switch, the persisted selection
   // must match what we are about to commit, not the vault we are leaving.
   persistSelectedVaultId(session.vaultId);
+  // Keep the pre-unlock label in step with the document we are installing.
+  cacheVaultName(decryptedVault.vaultId, decryptedVault.name);
 
   useAppStore.setState((state) => ({
     vault: commitUnlock({
@@ -520,4 +551,5 @@ export {
   addVaultItem,
   updateVaultItem,
   deleteVaultItem,
+  updateVaultName,
 };

@@ -9,10 +9,14 @@
 import { v4 as uuidv4 } from "uuid";
 import type { VaultItem } from "../state/type";
 import { VaultItemSchema } from "../state/type";
+import { DEFAULT_VAULT_NAME, MAX_VAULT_NAME_LENGTH } from "@voult/vault-core";
 
 // Portable format versions. Bump when the encrypted payload structure changes.
 export const VAULT_FORMAT_VERSION = 1;
-export const PACKAGE_FORMAT_VERSION = 1;
+// v2 added `recoveryEnvelope`: the vault's recovery material now travels with
+// the backup so a restore reproduces the same recovery key instead of minting a
+// fresh one. Server-side lockstep: `cloud/package.rs`.
+export const PACKAGE_FORMAT_VERSION = 2;
 
 // UUID v4 validation – the pattern used for vault_id throughout.
 const UUID_PATTERN =
@@ -49,18 +53,26 @@ export function generateVaultId(): string {
 export interface VaultDocument {
   formatVersion: number;
   vaultId: string;
+  /** User-facing label, encrypted with everything else. Never the identity. */
+  name: string;
   items: VaultItem[];
 }
 
-export function createEmptyVaultDocument(vaultId: string): VaultDocument {
+export function createEmptyVaultDocument(
+  vaultId: string,
+  name: string = DEFAULT_VAULT_NAME,
+): VaultDocument {
   assertValidVaultId(vaultId);
-  return { formatVersion: VAULT_FORMAT_VERSION, vaultId, items: [] };
+  return { formatVersion: VAULT_FORMAT_VERSION, vaultId, name, items: [] };
 }
 
 export function serializeVaultDocument(doc: VaultDocument): string {
   assertValidVaultId(doc.vaultId);
   if (doc.formatVersion !== VAULT_FORMAT_VERSION) {
     throw new Error(`Unsupported vault formatVersion: ${doc.formatVersion}`);
+  }
+  if (!doc.name.trim() || doc.name.length > MAX_VAULT_NAME_LENGTH) {
+    throw new Error("Vault document has an invalid name");
   }
   // Validate items eagerly so a corrupt doc never gets encrypted.
   for (const item of doc.items) {
@@ -73,13 +85,17 @@ export function serializeVaultDocument(doc: VaultDocument): string {
 }
 
 export function deserializeVaultDocument(plain: string): VaultDocument {
-  const parsed = JSON.parse(plain) as { formatVersion?: unknown; vaultId?: unknown; items?: unknown };
+  const parsed = JSON.parse(plain) as { formatVersion?: unknown; vaultId?: unknown; name?: unknown; items?: unknown };
   if (parsed.formatVersion !== VAULT_FORMAT_VERSION) {
     throw new Error(`Unsupported vault formatVersion: ${String(parsed.formatVersion)}`);
   }
   if (typeof parsed.vaultId !== "string" || !isValidVaultId(parsed.vaultId)) {
     throw new Error(`Vault document has invalid vaultId`);
   }
+  const name =
+    typeof parsed.name === "string" && parsed.name.trim()
+      ? parsed.name.trim().slice(0, MAX_VAULT_NAME_LENGTH)
+      : DEFAULT_VAULT_NAME;
   const items = Array.isArray(parsed.items) ? parsed.items : [];
   // Validate each item; quarantine callers should handle errors upstream, but
   // fail fast here to avoid persisting corrupt data.
@@ -91,7 +107,7 @@ export function deserializeVaultDocument(plain: string): VaultDocument {
     }
     validItems.push(result.data);
   }
-  return { formatVersion: parsed.formatVersion, vaultId: parsed.vaultId, items: validItems };
+  return { formatVersion: parsed.formatVersion, vaultId: parsed.vaultId, name, items: validItems };
 }
 
 /**
@@ -124,6 +140,14 @@ export interface VoultPackage {
   cryptoParameters: CryptoParameters;
   snapshot: { ciphertext: string; iv: string };
   passwordKeyEnvelope: { wrappedVaultKey: string; iv: string };
+  // Recovery material carried so a restore keeps the vault's original recovery
+  // key (see `packages/vault-core` recovery primitives and `cloud/package.rs`).
+  recoveryEnvelope: {
+    salt: string;
+    verifier: string;
+    wrappedVaultKey: string;
+    iv: string;
+  };
   // Integrity: the snapshot plaintext must contain the same vaultId and be
   // decryptable with the unwrapped vault key; AAD binding can be added later.
 }
@@ -138,6 +162,10 @@ export function createVoultPackage(args: {
   iv: string;
   wrappedVaultKey: string;
   wrappedVaultKeyIv: string;
+  recoverySalt: string;
+  recoveryVerifier: string;
+  recoveryWrappedVaultKey: string;
+  recoveryWrappedVaultKeyIv: string;
 }): VoultPackage {
   assertValidVaultId(args.vaultId);
   return {
@@ -148,5 +176,11 @@ export function createVoultPackage(args: {
     cryptoParameters: { salt: args.salt, iterations: args.iterations },
     snapshot: { ciphertext: args.ciphertext, iv: args.iv },
     passwordKeyEnvelope: { wrappedVaultKey: args.wrappedVaultKey, iv: args.wrappedVaultKeyIv },
+    recoveryEnvelope: {
+      salt: args.recoverySalt,
+      verifier: args.recoveryVerifier,
+      wrappedVaultKey: args.recoveryWrappedVaultKey,
+      iv: args.recoveryWrappedVaultKeyIv,
+    },
   };
 }

@@ -56,6 +56,42 @@ async fn selected_provider(pool: &DbPool, vault_id: &str) -> Option<ProviderKind
     }
 }
 
+/// True when a vault row with this id exists.
+async fn vault_exists(pool: &DbPool, vault_id: &str) -> bool {
+    matches!(
+        crate::entity::vault::Entity::find_by_id(vault_id.to_string())
+            .one(pool)
+            .await,
+        Ok(Some(_))
+    )
+}
+
+/// The session's vault id, but only if that vault still exists.
+///
+/// A cookie can outlive the vault it names — a deleted or recreated database,
+/// the same case `GET /session` fails closed on. Binding a foreign-key-bearing
+/// row (an `oauth_state`, a provider token) to the ghost id fails as a raw
+/// `FOREIGN KEY constraint failed`, which surfaces as a 500 for what is really
+/// "no session". An orphaned session is treated as no session and purged, so the
+/// caller takes its pre-session path.
+async fn live_session_vault_id(pool: &DbPool, session: &Session) -> Option<String> {
+    match session_vault_id(session) {
+        Ok(Some(id)) => {
+            if vault_exists(pool, &id).await {
+                Some(id)
+            } else {
+                log::warn!(
+                    "session names vault {} which does not exist; treating as no session",
+                    &id[..8.min(id.len())]
+                );
+                session.purge();
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 #[derive(Serialize)]
 struct ConfiguredProvider {
     kind: String,
@@ -148,11 +184,10 @@ pub async fn cloud_auth_start(
         }
     };
     // The session-bound path can mint state against a known vault; otherwise the
-    // pre-session import path, where the vault does not exist yet.
-    let vault_id_opt = match session_vault_id(&session) {
-        Ok(Some(id)) => Some(id),
-        _ => None,
-    };
+    // pre-session import path, where the vault does not exist yet. A stale
+    // cookie naming a deleted vault is treated as no session — see
+    // `live_session_vault_id`.
+    let vault_id_opt = live_session_vault_id(pool.get_ref(), &session).await;
 
     let (auth_url, state) =
         match oauth_flow::begin(pool.get_ref(), kind, vault_id_opt.as_deref()).await {
@@ -231,10 +266,7 @@ async fn cloud_oauth_callback_inner(
         return HttpResponse::BadRequest().body("missing state");
     };
 
-    let vault_id_opt = match session_vault_id(&session) {
-        Ok(Some(id)) => Some(id),
-        _ => None,
-    };
+    let vault_id_opt = live_session_vault_id(pool.get_ref(), &session).await;
 
     let redirect_err = |detail: &str| {
         HttpResponse::Found()

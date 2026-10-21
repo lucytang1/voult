@@ -17,6 +17,7 @@
 
 import {
   CRYPTO_VERSION,
+  DEFAULT_VAULT_NAME,
   b64,
   createAuthKey,
   decrypt,
@@ -985,13 +986,19 @@ async function pushSingleIntent(
 
   for (let attempt = 1; attempt <= MAX_SAVE_RETRIES; attempt++) {
     if (sessionChanged()) throw new Error("Session changed; save aborted.");
-    let serverItems: VaultItem[];
+    let serverDoc: { name: string; items: VaultItem[] };
     let serverVersion: number;
     try {
       const vaultData = await fetchVault(serverUrl);
       const plain = await decrypt(vaultData.vault.vault, vaultData.vault.vaultiv, key);
-      const parsed = JSON.parse(plain) as { items?: VaultItem[] };
-      serverItems = parsed.items ?? [];
+      // Preserve the document-level name: the extension must never strip a
+      // field it does not render, or a web-app rename would be lost on the next
+      // save from here.
+      const parsed = JSON.parse(plain) as { name?: string; items?: VaultItem[] };
+      serverDoc = {
+        name: typeof parsed.name === "string" && parsed.name.trim() ? parsed.name : DEFAULT_VAULT_NAME,
+        items: parsed.items ?? [],
+      };
       serverVersion = vaultData.vault.version;
     } catch (e) {
       if (isNetworkError(e)) {
@@ -1001,13 +1008,13 @@ async function pushSingleIntent(
       throw e;
     }
 
-    const merged = await mergeVault(serverItems, [intent], key);
+    const merged = await mergeVault(serverDoc, [intent], key);
     if (!merged.changed) {
       adoptSnapshot(merged.items, serverVersion);
       setPendingSave(null);
       return { saved: true, offline: false };
     }
-    const encrypted = await encrypt(JSON.stringify({ items: merged.items }), key);
+    const encrypted = await encrypt(JSON.stringify({ name: merged.name, items: merged.items }), key);
     if (sessionChanged()) throw new Error("Session changed; save aborted.");
     try {
       const response = await postUpdateVault(

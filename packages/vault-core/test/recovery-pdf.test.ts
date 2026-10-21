@@ -143,6 +143,18 @@ describe("recovery PDF — round trip", () => {
     const payload = serializePayload({ vaultId: VAULT_ID, recoveryKey: RECOVERY_KEY });
     assert.equal(text.split(payload).length - 1, 2);
   });
+
+  it("prints an optional vault name without changing what parses back", async () => {
+    const bytes = buildRecoveryPdf(
+      { vaultId: VAULT_ID, recoveryKey: RECOVERY_KEY, name: "Family vault" },
+      { createdAt: FIXED_DATE },
+    );
+    const text = latin1(bytes);
+    assert.ok(text.includes("Name: Family vault"), "name is visible on the page");
+    assert.ok(text.includes("/Title (Voult vault recovery: Family vault)"), "name in Info /Title");
+    // The name is informational: recovery still needs exactly id + key.
+    assert.deepEqual(await parseRecoveryPdf(bytes), { vaultId: VAULT_ID, recoveryKey: RECOVERY_KEY });
+  });
 });
 
 describe("recovery PDF — parsing hostile or wrong input", () => {
@@ -314,7 +326,7 @@ describe("recovery PDF — independent producer (ghostscript)", () => {
   const skip = has("ps2pdf") ? false : "ghostscript (ps2pdf) not installed";
   const opts = { skip } as const;
 
-  it("is readable after being re-produced by another PDF writer", async () => {
+  it("is readable after being re-produced by another PDF writer", opts, async () => {
     const dir = mkdtempSync(join(tmpdir(), "voult-recovery-pdf-"));
     const src = join(dir, "source.ps");
     const out = join(dir, "produced.pdf");
@@ -336,7 +348,7 @@ describe("recovery PDF — independent producer (ghostscript)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("survives being rewritten in place by a PDF editor", async () => {
+  it("survives being rewritten in place by a PDF editor", opts, async () => {
     // `gs -sDEVICE=pdfwrite` on OUR file is the closest available stand-in for
     // "opened in a reader and saved again".
     const dir = mkdtempSync(join(tmpdir(), "voult-recovery-pdf-"));

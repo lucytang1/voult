@@ -49,11 +49,10 @@ Note over C: PendingVaultRegistration holds everything incl. recoveryKey
 
 C->>U: interstitial: Save your recovery file (Continue disabled)
 rect rgb(40,30,40)
-U->>C: Download recovery file  (or Print)
+U->>C: tick "Save my recovery file" (or press Download) — download fires either way
 C->>C: buildRecoveryPdf(payload) → voult-recovery-kit.pdf
-C->>U: file saved (saved=true)
+C->>U: file downloaded (saved=true, confirmed=true)
 end
-U->>C: "I saved it" checkbox (confirmed=true)
 C->>S: POST /register (one, irreversible write)
 S-->>C: vault_id + OK
 C->>S: GET /session (lock_epoch baseline)
@@ -282,6 +281,33 @@ rotate).
 - All recovery I/O goes through `parseRecoveryPdf`/`buildRecoveryPdf` in
   `packages/vault-core/src/recovery-pdf.ts`; AAD is `recoveryAad(vaultId)`.
 - No plaintext ever crosses: verifier (hash), ciphertext envelopes only.
+
+---
+
+## 7. Restore from a provider backup keeps the same recovery key
+
+A vault's recovery material is a property of the **vault**, not of whichever
+server row happens to exist, so it travels in the backup. The `VoultPackage`
+carries a `recoveryEnvelope` (salt, verifier, wrap, wrap iv) alongside the
+password envelope (`apps/server/src/cloud/package.rs`,
+`apps/client/src/lib/state/type.ts`; `PACKAGE_FORMAT_VERSION = 2`).
+
+`importVaultFromCloud` therefore does **not** mint a recovery key and shows **no
+interstitial**: it verifies the master password locally, then registers the row
+with the package's exact recovery values (`apps/client/src/lib/vault/import.ts`).
+The file the user saved at creation keeps opening the vault on the new instance —
+one `vaultId`, one recovery file, everywhere.
+
+Because the mirror re-serializes the row every time
+(`cloud/mirror.rs` → `cloud/package.rs::build`), a rotation issued on any instance
+is reflected in the next backup, and `build` now refuses a row with no recovery
+material (`ERR_MISSING_RECOVERY`) rather than writing a backup that would restore
+into a different recovery key.
+
+Trade-off accepted: a provider backup *plus* the recovery file together can
+unwrap `vaultKeyRaw` without the server. The server's zero-knowledge boundary is
+unchanged (it still holds ciphertext only), and the recovery envelope is an
+AES-GCM box under a 160-bit random key, not something offline-crackable.
 
 Entry/run links: `lib/auth/flows/recover.ts`, `pages /recover`,
 `/recover-password`, `lib/settings/recovery-key-section.tsx`, and the server

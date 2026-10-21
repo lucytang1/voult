@@ -319,9 +319,20 @@ export function faviconForItem(item: { origin?: string; faviconUrl?: string }): 
 
 export const VAULT_DOCUMENT_FORMAT_VERSION = 1;
 
+/**
+ * The name a vault starts life with. Chosen during onboarding, then carried
+ * inside the encrypted document — the server never sees it.
+ */
+export const DEFAULT_VAULT_NAME = "My Vault";
+
+/** Longest accepted name, after trimming and whitespace collapse. */
+export const MAX_VAULT_NAME_LENGTH = 48;
+
 export interface DecryptedVault {
   formatVersion: number;
   vaultId: string;
+  /** User-facing label. Never the identity: `vaultId` still is. */
+  name: string;
   items: VaultItem[];
 }
 
@@ -359,6 +370,16 @@ export interface LockMetadata {
 // devices editing different fields of the same entry both survive a merge.
 // Origin/urls/faviconUrl ride the same per-field LWW path as
 // site/username/password.
+
+/**
+ * Document-level rename. Trimmed and bounded here as well as in the UI: an
+ * intent payload is user-controlled storage, and a malformed one must be
+ * quarantined rather than written into the document.
+ */
+export const RenameVaultSchema = z.object({
+  name: z.string().trim().min(1).max(MAX_VAULT_NAME_LENGTH),
+});
+export type RenameVault = z.infer<typeof RenameVaultSchema>;
 
 export const UpdateVaultItemSchema = z.object({
   id: z.uuid(),

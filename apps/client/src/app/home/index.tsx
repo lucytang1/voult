@@ -6,7 +6,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Shield, Lock as LockIcon, RefreshCw, Search, Pencil, Trash2, Mail, KeyRound, Eye, Globe, Zap, Clock, CalendarPlus, Settings } from "lucide-react";
 import { decrypt, encrypt } from "../../lib/crypto/index.web";
 import { useGetVault } from "../../lib/queries/vault/query";
-import type { DecryptedVault, VaultItem } from "../../lib/state/type";
+import type { VaultItem } from "../../lib/state/type";
+import { selectedVaultId } from "../../lib/state/vault-state";
 import { UpdateVaultItem, CreateVaultItem, DeleteVaultItem } from "@/src/lib/sync/type";
 import { CreateIntentPayload } from "@/src/lib/sqlite/web/services/intent-service";
 import { b64 } from "../../lib/crypto/index.web";
@@ -21,6 +22,8 @@ import { canonicalizeOrigin, normalizeAccount } from "@voult/vault-core";
 import { faviconForItem } from "@voult/vault-core";
 import { http } from "../../lib/queries/http";
 import type { SsoProvider, SsoSignIn } from "@voult/vault-core";
+import { parseVaultJson } from "../../lib/auth/utils";
+import { displayVaultName } from "../../lib/vault/name";
 
 // Device ids are cached per vault — a shared single value could attribute
 // one vault's intents to another after a vault switch.
@@ -271,6 +274,7 @@ export default function Home() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [hoveredAction, setHoveredAction] = useState<"lock" | "sync" | null>(null);
 
   // Add form state
   const [newSite, setNewSite] = useState("");
@@ -432,7 +436,7 @@ export default function Home() {
           console.warn("Discarding decrypted vault: selection changed");
           return;
         }
-        const parsed = JSON.parse(plain) as DecryptedVault;
+        const parsed = parseVaultJson(plain, session?.vaultId ?? selectedVaultId(useAppStore.getState().vault) ?? "");
         updateDecryptedVault(parsed);
         // Never log the decrypted vault: it holds plaintext passwords.
       })
@@ -475,7 +479,7 @@ export default function Home() {
   return (
     <View className="flex-1 flex-row">
       {/* Left Sidebar - Vaults */}
-      <View className="w-56 bg-ground border-r border-border flex-col">
+      <View className="w-56 bg-ground border-r border-hairline-accent flex-col">
         {/* Logo */}
         <View className="px-4 py-4  flex-row items-center">
           <Shield size={20} color="#D89AC6" style={{ marginRight: 8 }} />
@@ -504,19 +508,23 @@ export default function Home() {
         {/* Bottom Actions */}
         <View className="mt-auto border-t px-2 py-3 space-y-1">
           <Pressable
-            className="flex-row items-center px-3 py-2 rounded-lg hover:bg-surface"
+            className="flex-row items-center px-3 py-2 rounded-lg hover:bg-surface2"
             onPress={handleLock}
+            onHoverIn={() => setHoveredAction("lock")}
+            onHoverOut={() => setHoveredAction(null)}
           >
-            <LockIcon size={16} color="#9ca3af" style={{ marginRight: 12 }} />
-            <Text className="text-muted-text text-sm">Lock Voult</Text>
+            <LockIcon size={16} color={hoveredAction === "lock" ? "#F2F4F7" : "#9ca3af"} style={{ marginRight: 12 }} />
+            <Text className={hoveredAction === "lock" ? "text-primary-text text-sm" : "text-muted-text text-sm"}>Lock Voult</Text>
           </Pressable>
           <Pressable
-            className="flex-row items-center px-3 py-2 rounded-lg hover:bg-surface"
+            className="flex-row items-center px-3 py-2 rounded-lg hover:bg-surface2"
             disabled={isSyncing}
             onPress={() => syncScheduler.requestSync("forced")}
+            onHoverIn={() => setHoveredAction("sync")}
+            onHoverOut={() => setHoveredAction(null)}
           >
-            <RefreshCw size={16} color="#9ca3af" style={{ marginRight: 12 }} />
-            <Text className="text-muted-text text-sm">{isSyncing ? "Syncing..." : "Sync"}</Text>
+            <RefreshCw size={16} color={hoveredAction === "sync" ? "#F2F4F7" : "#9ca3af"} style={{ marginRight: 12 }} />
+            <Text className={hoveredAction === "sync" ? "text-primary-text text-sm" : "text-muted-text text-sm"}>{isSyncing ? "Syncing..." : "Sync"}</Text>
           </Pressable>
         </View>
 
@@ -525,14 +533,14 @@ export default function Home() {
           <View className="flex-row items-center">
             <View className="flex-1 min-w-0">
               <Text className="text-primary-text text-sm truncate">
-                {session?.vaultId ? `Vault ${session.vaultId.slice(0, 8)}…` : ""}
+                {displayVaultName(session?.vaultId, decryptedVault?.name)}
               </Text>
               <Text className="text-muted-text text-xs">Free</Text>
             </View>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Settings"
-              className="ml-2 p-2 rounded-lg hover:bg-surface"
+              className="ml-2 p-2 rounded-lg hover:bg-surface2"
               onPress={() => router.push("/settings" as any)}
             >
               <Settings size={17} color="#9ca3af" />
@@ -544,7 +552,7 @@ export default function Home() {
       {/* Middle Panel - Password List */}
       <View className="flex-1 flex-col bg-ground">
         {/* Search Bar */}
-        <View className="px-4 py-3 border-b border-border">
+        <View className="px-4 py-3 border-b border-hairline-accent">
           <View className="flex-row items-center bg-surface rounded-lg px-3 py-2">
             <Search size={16} color="#9ca3af" style={{ marginRight: 8 }} />
             <TextInput
@@ -558,11 +566,11 @@ export default function Home() {
         </View>
 
         {/* Filter Tabs */}
-        <View className="px-4 py-2 flex-row border-b border-border">
-          <Pressable className="px-4 py-1 rounded-full bg-surface border border-border-strong mr-2">
+        <View className="px-4 py-2 flex-row border-b border-hairline-accent">
+          <Pressable className="px-4 py-1 rounded-full bg-accent border border-hairline-accent mr-2">
             <Text className="text-primary-text text-sm font-medium">All ({filteredItems.length})</Text>
           </Pressable>
-          <Pressable className="px-4 py-1 rounded-full border border-border-strong">
+          <Pressable className="px-4 py-1 rounded-full border border-hairline-accent">
             <Text className="text-muted-text text-sm">Recent</Text>
           </Pressable>
         </View>
@@ -573,7 +581,7 @@ export default function Home() {
             <View className="flex-1 items-center justify-center py-12">
               <Text className="text-muted-text text-center">No items in your vault yet.</Text>
               <Pressable
-                className="mt-4 px-4 py-2 bg-surface border border-border-strong rounded-lg"
+                className="mt-4 px-4 py-2 bg-accent border border-hairline-accent rounded-lg"
                 onPress={() => setShowAddModal(true)}
               >
                 <Text className="text-primary-text">Add your first item</Text>
@@ -592,7 +600,7 @@ export default function Home() {
                       className={`flex-row items-center px-3 py-3 rounded-lg mb-1 ${
                         selectedItem?.id === item.id
                           ? "bg-accent-line/15 border border-accent-line/40"
-                          : "hover:bg-surface"
+                          : "hover:bg-surface2"
                       }`}
                       onPress={() => setSelectedItem(item)}
                     >
@@ -621,11 +629,11 @@ export default function Home() {
       </View>
 
       {/* Right Panel - Detail View */}
-      <View className="w-96 bg-panel border-l border-border flex-col">
+      <View className="w-96 bg-panel border-l border-hairline-accent flex-col">
         {selectedItem ? (
           <>
             {/* Header */}
-            <View className="px-6 py-4 border-b border-border flex-row items-center justify-between">
+            <View className="px-6 py-4 border-b border-hairline-accent flex-row items-center justify-between">
               <View className="flex-1 flex-row items-center">
                 <SiteIcon item={selectedItem} vaultId={session!.vaultId} size={44} />
                 <View className="flex-1">
@@ -635,7 +643,7 @@ export default function Home() {
               </View>
               <View className="flex-row items-center space-x-2">
                 <Pressable
-                  className="px-3 py-1.5 bg-surface border border-border-strong rounded-lg flex-row items-center"
+                  className="px-3 py-1.5 bg-accent border border-hairline-accent rounded-lg flex-row items-center"
                   onPress={() => {
                     setEditSite(selectedItem.site);
                     setEditUsername(selectedItem.username ?? "");
@@ -741,7 +749,7 @@ export default function Home() {
               </View>
 
               {/* Metadata */}
-              <View className="border-t border-border pt-4 mt-4">
+              <View className="border-t border-hairline-accent pt-4 mt-4">
                 <View className="mb-3">
                   <View className="flex-row items-center">
                     <Zap size={12} color="#9ca3af" style={{ marginRight: 4 }} />
@@ -784,7 +792,7 @@ export default function Home() {
         onRequestClose={() => setShowAddModal(false)}
       >
         <View className="flex-1 bg-black/60 items-center justify-center">
-          <View className="bg-card rounded-xl p-6 w-96 border border-border">
+          <View className="bg-surface1 rounded-xl p-6 w-96 border border-hairline-accent">
             <Text className="text-xl font-bold text-primary-text mb-4">Add New Item</Text>
             <Text className="text-muted-text text-xs mb-3">One item holds every way to sign in — set a password, link SSO, or both.</Text>
             <TextInput
@@ -836,7 +844,7 @@ export default function Home() {
                 <Text className="text-muted-text">Cancel</Text>
               </Pressable>
               <Pressable
-                className="px-4 py-2 bg-surface border border-border-strong rounded-lg"
+                className="px-4 py-2 bg-accent border border-hairline-accent rounded-lg"
                 onPress={() => {
                   // One item, multiple sign-in options: require a site plus a
                   // password and/or at least one SSO method — and every chosen
@@ -866,7 +874,7 @@ export default function Home() {
         onRequestClose={() => setShowEditModal(false)}
       >
         <View className="flex-1 bg-black/60 items-center justify-center">
-          <View className="bg-card rounded-xl p-6 w-96 border border-border">
+          <View className="bg-surface1 rounded-xl p-6 w-96 border border-hairline-accent">
             <Text className="text-xl font-bold text-primary-text mb-4">Edit Item</Text>
             <TextInput
               className="w-full bg-surface rounded-lg px-4 py-3 text-primary-text mb-3"
@@ -912,7 +920,7 @@ export default function Home() {
                 <Text className="text-muted-text">Cancel</Text>
               </Pressable>
               <Pressable
-                className="px-4 py-2 bg-surface border border-border-strong rounded-lg"
+                className="px-4 py-2 bg-accent border border-hairline-accent rounded-lg"
                 onPress={() => {
                   // Same gate as add: a selected provider with no account is not
                   // a storable sign-in method.
@@ -943,7 +951,7 @@ export default function Home() {
         onRequestClose={() => setShowDeleteConfirm(false)}
       >
         <View className="flex-1 bg-black/60 items-center justify-center">
-          <View className="bg-card rounded-xl p-6 w-80 border border-border">
+          <View className="bg-surface1 rounded-xl p-6 w-80 border border-hairline-accent">
             <Text className="text-xl font-bold text-primary-text mb-2">Delete Item</Text>
             <Text className="text-muted-text mb-6">
               Are you sure you want to delete this item? This action cannot be undone.

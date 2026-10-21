@@ -5,10 +5,11 @@ import { prepareVaultFlow, type CreateVaultResult } from "@/src/lib/vault/create
 import { commitVaultRegistration, describeCommitError, type PendingVaultRegistration } from "@/src/lib/vault/registration";
 import { persistDeviceSecrets } from "@/src/lib/auth/utils";
 import { RecoveryKeyInterstitial } from "@/src/lib/components/recovery-key-interstitial";
+import { VaultNameStep } from "@/src/lib/components/vault-name-step";
+import { DEFAULT_VAULT_NAME } from "@/src/lib/vault/name";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services/client-state-service";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
-import { v4 as uuidv4 } from "uuid";
 import { useSignUp } from "@/src/lib/queries/SignUp/query";
 import {
   selectVaultSession,
@@ -17,14 +18,6 @@ import {
   updateLockEpoch,
   updateVaultVersion,
 } from "../../lib/state";
-
-const TEST_VAULT = {
-  items: [
-    { id: uuidv4(), site: "Google", username: "test@example.com", password: "password", sso: [] },
-    { id: uuidv4(), site: "Facebook", username: "test@example.com", password: "password", sso: [] },
-    { id: uuidv4(), site: "Twitter", username: "test@example.com", password: "password", sso: [] },
-  ],
-};
 
 
 export default function SignUp() {
@@ -35,6 +28,10 @@ export default function SignUp() {
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // Onboarding is deliberately two steps: pick a name (pre-filled) after the
+  // password, before the recovery file. Naming is never a gate on creation.
+  const [step, setStep] = useState<"password" | "name">("password");
+  const [vaultName, setVaultName] = useState(DEFAULT_VAULT_NAME);
   const router = useRouter();
   const signupMutation = useSignUp();
   // The vault exists only in memory until the user saves the recovery file and
@@ -44,7 +41,7 @@ const [prepared, setPrepared] = useState<PendingVaultRegistration | null>(null);
   // does not register a second time.
   const [committed, setCommitted] = useState<CreateVaultResult | null>(null);
 
-  const onSubmit = async () => {
+  const onSubmit = () => {
     if (password !== confirm) {
       setError("Passwords do not match.");
       return;
@@ -54,6 +51,16 @@ const [prepared, setPrepared] = useState<PendingVaultRegistration | null>(null);
       return;
     }
     setError(null);
+    setStep("name");
+  };
+
+  /**
+   * Step 2. Everything here is still local: the vault id, key and envelopes are
+   * derived after the name is chosen, and nothing is sent to the server until
+   * the recovery file has been saved and Continue pressed on the interstitial.
+   */
+  const onPrepare = async () => {
+    setError(null);
     setSubmitting(true);
     try {
       // Local preparation only — the vault id is generated here on this device,
@@ -61,7 +68,9 @@ const [prepared, setPrepared] = useState<PendingVaultRegistration | null>(null);
       // server hears about this vault only after the user has the recovery
       // file, so a reload on the interstitial cannot leave a vault behind whose
       // recovery path is dead.
-      const prepared = await prepareVaultFlow(password, { items: TEST_VAULT.items });
+      // A new vault is created EMPTY: no demo entries, no seeded credentials.
+      // Everything the vault holds is something the user added themselves.
+      const prepared = await prepareVaultFlow(password, vaultName);
       setPrepared(prepared);
     } catch (err) {
       console.error("Vault preparation failed", err);
@@ -132,9 +141,27 @@ const [prepared, setPrepared] = useState<PendingVaultRegistration | null>(null);
       <RecoveryKeyInterstitial
         recoveryKey={prepared.recoveryKey}
         vaultId={prepared.vaultId}
+        name={prepared.decryptedVault.name}
         busy={submitting}
         error={error}
         onContinue={onConfirmRecoveryFile}
+      />
+    );
+  }
+
+  if (step === "name") {
+    return (
+      <VaultNameStep
+        value={vaultName}
+        onChange={setVaultName}
+        onContinue={onPrepare}
+        onBack={() => {
+          setError(null);
+          setStep("password");
+        }}
+        busy={submitting}
+        error={error}
+        submitLabel="Continue"
       />
     );
   }
@@ -166,9 +193,7 @@ const [prepared, setPrepared] = useState<PendingVaultRegistration | null>(null);
         onPress={onSubmit}
         disabled={submitting || !password || !confirm}
       >
-        <Text className="text-primary-text">
-          {submitting ? "Creating..." : "Create vault"}
-        </Text>
+        <Text className="text-primary-text">Continue</Text>
       </Pressable>
       {error ? <Text className="text-red-400 mt-3">{error}</Text> : null}
 

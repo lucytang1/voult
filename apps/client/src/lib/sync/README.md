@@ -91,11 +91,11 @@ One run, bounded at `MAX_SYNC_RETRIES = 3`:
         │
         ▼ (intents pending)
   ┌─ merge ───────────────────────────────────────────────────┐
-  │ mergeVault(serverItems, pendingIntents, vaultKey)         │
+  │ mergeVault(serverDoc, pendingIntents, vaultKey)            │
   │   deterministic order: created_at, then id                │
   │   per-op policy in packages/vault-core/src/merge.ts        │
   │                                                          │
-  │   → { items, changed, resolvedIds, quarantinedIds }       │
+  │   → { name, items, changed, resolvedIds, quarantinedIds }       │
   │                                                          │
   │ quarantinedIds → markIntentError (set error, stops        │
   │                  being selected by fetchPendingIntents)   │
@@ -106,7 +106,7 @@ One run, bounded at `MAX_SYNC_RETRIES = 3`:
         │                         return
         ▼
   ┌─ push ────────────────────────────────────────────────────┐
-  │ encrypt(JSON.stringify({ items: merged.items }), key)    │
+  │ encrypt(JSON.stringify({ name: merged.name, items: merged.items }), key)    │
   │ POST /update_vault { vault, vaultiv, version: serverVer } │
   │                                                          │
   │   network error → return (queue survives)                │
@@ -116,9 +116,9 @@ One run, bounded at `MAX_SYNC_RETRIES = 3`:
         │
         ▼
   ┌─ confirm & adopt ─────────────────────────────────────────┐
-  │ loadItemsFromResponse(response, key)                     │
+  │ loadDocumentFromResponse(response, key, vaultId)                     │
   │   decrypt the server's RESPONSE — never trust local guess │
-  │ adoptServerSnapshot(items, response.version)             │
+  │ adoptServerSnapshot(doc, response.version)             │
   │ markIntentsSynced(merged.resolvedIds)                    │
   └───────────────────────────────────────────────────────────┘
 ```

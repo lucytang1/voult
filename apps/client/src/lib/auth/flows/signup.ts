@@ -11,6 +11,7 @@ import {
 } from "../../crypto/index.web";
 import { derivePasswordKeys, generateRecoveryMaterial, parseVaultJson } from "../utils";
 import type { PendingVaultRegistration } from "../../vault/registration";
+import { normalizeVaultName } from "../../vault/name";
 
 /**
  * Vault creation, up to but NOT including the network.
@@ -36,8 +37,21 @@ import type { PendingVaultRegistration } from "../../vault/registration";
  */
 export async function prepareSignupFlow(
     password: string,
-    vaultJson: string,
+    requestedName: string,
 ): Promise<PendingVaultRegistration> {
+    const name = normalizeVaultName(requestedName);
+    if (!name) {
+        throw new Error("Vault names must be between 1 and 48 characters.");
+    }
+    // The name is part of the encrypted document from the very first write: it
+    // is the user's label for the vault, and the server must never see it.
+    //
+    // A new vault is ALWAYS empty. There is no seed list and no call-site
+    // freedom to add one: the document is written here, at creation, and every
+    // entry the user ever has is one they added themselves. (This used to be a
+    // `starter: { name, items }` argument, which let a screen ship three
+    // `test@example.com` / `password` rows into every real user's vault.)
+    const vaultJson = JSON.stringify({ name, items: [] });
     // The vault ID is generated client-side and never derived from any identity.
     const vaultId = uuid();
     const salt = newSaltB64();

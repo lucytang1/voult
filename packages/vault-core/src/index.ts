@@ -38,11 +38,14 @@ export {
   UpdateVaultItemSchema,
   DeleteVaultItemSchema,
   CreateVaultItemSchema,
+  RenameVaultSchema,
   SsoProviderSchema,
   SsoSignInSchema,
   OAUTH_IDP_HOSTS,
   SSO_PROVIDER_ACCOUNT_DOMAINS,
   VAULT_DOCUMENT_FORMAT_VERSION,
+  DEFAULT_VAULT_NAME,
+  MAX_VAULT_NAME_LENGTH,
   normalizeAccount,
   itemHasAccount,
   hasSsoSignIn,
@@ -62,6 +65,7 @@ export type {
   CreateVaultItem,
   UpdateVaultItem,
   DeleteVaultItem,
+  RenameVault,
   SsoProvider,
   SsoSignIn,
   DecryptedVault,
@@ -73,7 +77,7 @@ export type {
 } from "./schema.js";
 
 export { mergeVault } from "./merge.js";
-export type { MergeVaultResult, PendingIntent } from "./merge.js";
+export type { MergeVaultResult, PendingIntent, VaultDocumentLike } from "./merge.js";
 
 export {
   buildRecoveryPdf,

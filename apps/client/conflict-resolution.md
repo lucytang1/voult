@@ -83,12 +83,20 @@ Conflict resolution is only possible if these exist. Today they don't.
 | `update {id, fields}` | item absent (deleted by another device) | **drop + log** — deletes are sticky; an update can't resurrect a deliberately deleted entry |
 | `delete {id}` | item present | remove |
 | `delete {id}` | item absent | no-op (idempotent) |
+| `rename {name}` | document name differs | set the document name (last rename in replay order wins) |
+| `rename {name}` | name already equal | no-op |
 
 Three deliberate semantics, stated plainly:
 
 - **Local edits win on items that still exist.** Because merges are single-writer-per-version (CAS), "local wins" equals "**the device that syncs last wins per field**." This is the standard, understandable v1 semantic.
 - **Remote deletes win on items that were removed.** Absence means another device deliberately deleted it; we don't resurrect via a stale update. If the user genuinely wants the entry back, they re-create it (a fresh id), which inserts normally.
 - **Natural-key create conflicts keep both.** Choosing "newest" would silently discard data and orphan subsequent intents that reference the dropped id; keeping both loses nothing.
+
+The document **name** is the one non-item field with an op (`rename`). It is
+last-writer-wins over the replay order, which is safe for the same reason item
+updates are: merges are serialized by the version CAS, so two devices renaming
+concurrently cannot both win. The name is a label, not identity — `vaultId` is
+still what every other rule and guard uses.
 
 No rule relies on wall-clock across devices. `created_at` only orders writes *within a device* (safe); cross-device conflicts are resolved by the single-writer merge, not by timestamps. This sidesteps clock-skew entirely.
 

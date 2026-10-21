@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { prepareSignupFlow } from "../auth/flows/signup";
 import type { PendingVaultRegistration } from "./registration";
-import type { VaultItem } from "../state/type";
+import { cacheVaultName, DEFAULT_VAULT_NAME } from "./name";
 
 /**
  * Creates a brand-new vault (Flow C) — the local half only.
@@ -24,12 +24,14 @@ import type { VaultItem } from "../state/type";
  */
 export async function prepareVaultFlow(
     password: string,
-    // Typed as VaultItem so a starter item can't drift out of the schema (an
-    // item missing `sso` is fine — it defaults to [] — but a stale field name
-    // would silently produce an item the vault rejects at serialize time).
-    starter: { items: VaultItem[] } = { items: [] },
+    name: string = DEFAULT_VAULT_NAME,
 ): Promise<PendingVaultRegistration> {
-    return prepareSignupFlow(password, JSON.stringify({ items: starter.items }));
+    const prepared = await prepareSignupFlow(password, name);
+    // The document does not exist in the store until the commit succeeds, but
+    // the interstitial (and any chooser entry rendered meanwhile) already needs
+    // a label. Cache it now; the store will refresh it from the document.
+    cacheVaultName(prepared.vaultId, prepared.decryptedVault.name);
+    return prepared;
 }
 
 // Kept for any legacy callers expecting a uuid helper.

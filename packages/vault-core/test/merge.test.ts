@@ -11,6 +11,7 @@ import { mergeVault, type PendingIntent } from "../src/merge.js";
 import type { VaultItem } from "../src/schema.js";
 
 let key: CryptoKey;
+const NAME = "Test vault";
 
 before(async () => {
   key = await importVaultKey(generateVaultKeyRaw());
@@ -26,6 +27,8 @@ const item = (over: Partial<VaultItem> = {}): VaultItem => ({
   ...over,
 });
 
+const doc = (items: VaultItem[] = [], name = NAME) => ({ name, items });
+
 async function intentFor(operation: string, payload: unknown, createdAt = new Date().toISOString()): Promise<PendingIntent> {
   const enc = await encrypt(JSON.stringify(payload), key);
   return {
@@ -40,17 +43,18 @@ async function intentFor(operation: string, payload: unknown, createdAt = new Da
 describe("mergeVault", () => {
   it("inserts creates", async () => {
     const fresh = item();
-    const res = await mergeVault([], [await intentFor("create", fresh)], key);
+    const res = await mergeVault(doc(), [await intentFor("create", fresh)], key);
     assert.equal(res.changed, true);
     assert.equal(res.items.length, 1);
     assert.deepEqual(res.items[0], fresh);
+    assert.equal(res.name, NAME);
     assert.deepEqual(res.quarantinedIds, []);
   });
 
   it("replays of an existing id are no-ops (idempotent)", async () => {
     const fresh = item();
     const intent = await intentFor("create", fresh);
-    const res = await mergeVault([fresh], [intent], key);
+    const res = await mergeVault(doc([fresh]), [intent], key);
     assert.equal(res.changed, false);
     assert.equal(res.items.length, 1);
     assert.deepEqual(res.resolvedIds, [intent.id]);
@@ -60,7 +64,7 @@ describe("mergeVault", () => {
     const a = item({ id: uuid() });
     const b = item({ id: uuid(), password: "pw-2" });
     const res = await mergeVault(
-      [],
+      doc(),
       [await intentFor("create", a, "2026-01-01T00:00:00.000Z"), await intentFor("create", b, "2026-01-01T00:00:01.000Z")],
       key,
     );
@@ -70,7 +74,7 @@ describe("mergeVault", () => {
   it("updates merge per-field (LWW) and preserve origin", async () => {
     const base = item();
     const res = await mergeVault(
-      [base],
+      doc([base]),
       [await intentFor("update", { id: base.id, fields: { password: "pw-2" } })],
       key,
     );
@@ -82,7 +86,7 @@ describe("mergeVault", () => {
 
   it("updates of deleted items are dropped (deletes stick)", async () => {
     const res = await mergeVault(
-      [],
+      doc(),
       [await intentFor("update", { id: uuid(), fields: { password: "x" } })],
       key,
     );
@@ -92,11 +96,42 @@ describe("mergeVault", () => {
 
   it("deletes remove; deleting the absent is a no-op", async () => {
     const base = item();
-    const gone = await mergeVault([base], [await intentFor("delete", { id: base.id })], key);
+    const gone = await mergeVault(doc([base]), [await intentFor("delete", { id: base.id })], key);
     assert.equal(gone.changed, true);
     assert.deepEqual(gone.items, []);
-    const noop = await mergeVault([], [await intentFor("delete", { id: uuid() })], key);
+    const noop = await mergeVault(doc(), [await intentFor("delete", { id: uuid() })], key);
     assert.equal(noop.changed, false);
+  });
+
+  it("renames the document, last rename in replay order wins", async () => {
+    const res = await mergeVault(
+      doc([], "Old"),
+      [
+        await intentFor("rename", { name: "First" }, "2026-01-01T00:00:00.000Z"),
+        await intentFor("rename", { name: "Second" }, "2026-01-01T00:00:01.000Z"),
+      ],
+      key,
+    );
+    assert.equal(res.name, "Second");
+    assert.equal(res.changed, true);
+    assert.deepEqual(res.quarantinedIds, []);
+  });
+
+  it("a rename to the current name is a no-op", async () => {
+    const intent = await intentFor("rename", { name: NAME });
+    const res = await mergeVault(doc(), [intent], key);
+    assert.equal(res.changed, false);
+    assert.equal(res.name, NAME);
+    assert.deepEqual(res.resolvedIds, [intent.id]);
+  });
+
+  it("an empty or over-long rename is quarantined", async () => {
+    const empty = await intentFor("rename", { name: "   " });
+    const long = await intentFor("rename", { name: "x".repeat(49) });
+    const res = await mergeVault(doc(), [empty, long], key);
+    assert.deepEqual(new Set(res.quarantinedIds), new Set([empty.id, long.id]));
+    assert.equal(res.name, NAME);
+    assert.equal(res.changed, false);
   });
 
   it("undecryptable and malformed intents are quarantined, rest still apply", async () => {
@@ -116,14 +151,14 @@ describe("mergeVault", () => {
       payload_iv: b64(enc.iv),
       created_at: new Date().toISOString(),
     };
-    const res = await mergeVault([ ], [badDecrypt, badJson, await intentFor("create", good)], key);
+    const res = await mergeVault(doc(), [badDecrypt, badJson, await intentFor("create", good)], key);
     assert.deepEqual(new Set(res.quarantinedIds), new Set([badDecrypt.id, badJson.id]));
     assert.equal(res.items.length, 1);
     assert.equal(res.changed, true);
   });
 
   it("unknown operations are quarantined", async () => {
-    const res = await mergeVault([], [await intentFor("rename", { id: uuid() })], key);
+    const res = await mergeVault(doc(), [await intentFor("archive", { id: uuid() })], key);
     assert.equal(res.quarantinedIds.length, 1);
     assert.equal(res.changed, false);
   });
@@ -132,7 +167,7 @@ describe("mergeVault", () => {
     const base = item();
     const first = await intentFor("update", { id: base.id, fields: { password: "first" } }, "2026-01-01T00:00:00.000Z");
     const second = await intentFor("update", { id: base.id, fields: { password: "second" } }, "2026-01-01T00:00:01.000Z");
-    const res = await mergeVault([base], [second, first], key);
+    const res = await mergeVault(doc([base]), [second, first], key);
     assert.equal(res.items[0].password, "second");
   });
 });

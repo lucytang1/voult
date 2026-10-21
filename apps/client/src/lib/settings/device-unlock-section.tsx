@@ -39,7 +39,7 @@ export function DeviceUnlockSection() {
   };
 
   return (
-    <View className="mt-6 mb-4 rounded-2xl border border-border bg-card p-5">
+    <View className="mt-6 mb-4 rounded-2xl bg-surface1 overflow-hidden p-5">
       <Text className="mb-2 text-sm font-semibold text-primary-text">
         Unlock this device automatically
       </Text>
@@ -58,14 +58,14 @@ export function DeviceUnlockSection() {
           </Text>
           <View className="flex-row gap-2">
             <Pressable
-              className="rounded-lg bg-surface border border-border-strong px-4 py-2.5"
+              className="rounded-lg bg-surface border border-hairline-accent px-4 py-2.5"
               onPress={() => setConfirming(false)}
               disabled={busy}
             >
               <Text className="text-sm text-primary-text">Cancel</Text>
             </Pressable>
             <Pressable
-              className="rounded-lg border border-border px-4 py-2.5"
+              className="rounded-lg border border-hairline-accent px-4 py-2.5"
               onPress={revoke}
               disabled={busy}
             >
@@ -77,7 +77,7 @@ export function DeviceUnlockSection() {
         </View>
       ) : (
         <Pressable
-          className="self-start rounded-lg bg-surface border border-border-strong px-4 py-2.5"
+          className="self-start rounded-lg bg-accent border border-hairline-accent px-4 py-2.5"
           onPress={() => setConfirming(true)}
         >
           <Text className="text-sm text-primary-text">Forget this device</Text>

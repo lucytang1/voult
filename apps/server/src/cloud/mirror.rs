@@ -675,6 +675,10 @@ mod tests {
             crypto_version: Set(2),
             vault_key_wrap: Set(Some("d3JhcA==".to_string())),
             vault_key_wrap_iv: Set(Some("d2l2".to_string())),
+            recovery_verifier: Set(Some("cmVjb3ZlcnktdmVyaWZpZXI=".to_string())),
+            recovery_salt: Set(Some("cmVjb3Zlcnktc2FsdA==".to_string())),
+            recovery_wrap: Set(Some("cmVjb3Zlcnktd3JhcA==".to_string())),
+            recovery_wrap_iv: Set(Some("cmVjdml2".to_string())),
             ..Default::default()
         };
         am.insert(pool).await.expect("insert vault");

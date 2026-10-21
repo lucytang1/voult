@@ -16,6 +16,7 @@ import {
 } from "../crypto/device-key";
 
 import type { SessionState, DecryptedVault, VaultItem } from "../state/type";
+import { DEFAULT_VAULT_NAME, normalizeVaultName } from "../vault/name";
 
 /**
  * Parse a decrypted vault document into the store's `DecryptedVault`.
@@ -27,10 +28,16 @@ import type { SessionState, DecryptedVault, VaultItem } from "../state/type";
  * never render). A defaulted parameter here silently produced `""` and turned
  * that guard into a guaranteed throw on every list-driven vault open, so the
  * id must be passed explicitly by every caller.
+ *
+ * The display name is optional in stored documents: vaults created before
+ * names existed simply decode to the default, and become renameable in place.
+ * The name is never part of the identity check above.
  */
 export function parseVaultJson(plain: string, vaultId: string): DecryptedVault {
-  const parsed = JSON.parse(plain) as { items?: VaultItem[] };
-  return { formatVersion: 1, vaultId, items: parsed.items ?? [] };
+  const parsed = JSON.parse(plain) as { name?: unknown; items?: VaultItem[] };
+  const name =
+    typeof parsed.name === "string" ? normalizeVaultName(parsed.name) ?? DEFAULT_VAULT_NAME : DEFAULT_VAULT_NAME;
+  return { formatVersion: 1, vaultId, name, items: parsed.items ?? [] };
 }
 
 export interface UnlockedSession {

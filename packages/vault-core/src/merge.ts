@@ -6,6 +6,7 @@
 //  - update: per-field LWW onto items that still exist; updates of deleted
 //    items are dropped (deletes are sticky, no resurrection)
 //  - delete: no-op when already absent (idempotent)
+//  - rename: document-level last-writer-wins over the replay order
 //  - undecryptable / unparseable / unknown ops are quarantined, never abort
 //    the whole sync for one bad intent.
 //
@@ -16,6 +17,7 @@
 import {
   CreateVaultItemSchema,
   DeleteVaultItemSchema,
+  RenameVaultSchema,
   UpdateVaultItemSchema,
   normalizeAccount,
   type DeleteVaultItem,
@@ -33,7 +35,19 @@ export interface PendingIntent {
   created_at: string;
 }
 
+/**
+ * The parts of a vault document a merge touches: the item list and the
+ * document-level name. Kept structural so the web app, the extension and the
+ * tests can all pass their own document type.
+ */
+export interface VaultDocumentLike {
+  name: string;
+  items: VaultItem[];
+}
+
 export type MergeVaultResult = {
+  /** The merged document-level name, ready to be encrypted and pushed. */
+  name: string;
   /** The merged vault, ready to be encrypted and pushed. */
   items: VaultItem[];
   /** Intents that were resolved (applied / no-op / dropped). */
@@ -92,13 +106,14 @@ const applyDelete = (items: Map<string, VaultItem>, id: string): IntentOutcome =
 };
 
 // Replays pending intents onto the server snapshot in deterministic order
-// (created_at asc, then id asc for ties). Returns the merged vault.
+// (created_at asc, then id asc for ties). Returns the merged document.
 export async function mergeVault(
-  serverItems: VaultItem[],
+  serverDoc: VaultDocumentLike,
   pendingIntents: PendingIntent[],
   encKey: CryptoKey,
 ): Promise<MergeVaultResult> {
-  const items = new Map(serverItems.map((item) => [item.id, item]));
+  let name = serverDoc.name;
+  const items = new Map(serverDoc.items.map((item) => [item.id, item]));
   const resolvedIds: string[] = [];
   const quarantinedIds: string[] = [];
   let changed = false;
@@ -159,6 +174,21 @@ export async function mergeVault(
         outcome = applyDelete(items, payload.id);
         break;
       }
+      case "rename": {
+        const parsed = RenameVaultSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          console.error("Failed to parse rename intent payload", intent.id, parsed.error);
+          quarantinedIds.push(intent.id);
+          continue;
+        }
+        if (parsed.data.name === name) {
+          outcome = "noop";
+        } else {
+          name = parsed.data.name;
+          outcome = "applied";
+        }
+        break;
+      }
       default:
         console.error("Unknown intent operation", intent.id, intent.operation);
         quarantinedIds.push(intent.id);
@@ -173,5 +203,5 @@ export async function mergeVault(
     resolvedIds.push(intent.id);
   }
 
-  return { items: [...items.values()], resolvedIds, quarantinedIds, changed };
+  return { name, items: [...items.values()], resolvedIds, quarantinedIds, changed };
 }

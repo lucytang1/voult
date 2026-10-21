@@ -54,6 +54,35 @@ export interface CommittedVault extends UnlockedSession {
 }
 
 /**
+ * The single `POST /register` plus the lock-epoch baseline read, shared by
+ * every producer so the two halves cannot drift.
+ *
+ * Registration is the one irreversible write in vault creation. Callers differ
+ * only in where the request body came from — a locally prepared vault, or a
+ * package whose recovery material already exists in the user's hands.
+ *
+ * A fresh vault starts at lock_epoch 0; the read is best-effort, so an
+ * offline/legacy server still leaves the vault usable and the sync check
+ * converges later.
+ */
+export async function submitRegistration(
+  request: RegisterRequest,
+  sendRegistration: (payload: RegisterRequest) => Promise<RegisterResponse> = register,
+): Promise<{ response: RegisterResponse; lockEpoch: number }> {
+  const response = await sendRegistration(request);
+
+  let lockEpoch = 0;
+  try {
+    const session = await fetchSession();
+    lockEpoch = session.lock_epoch ?? 0;
+  } catch {
+    // Offline/legacy server — sync check converges later.
+  }
+
+  return { response, lockEpoch };
+}
+
+/**
  * The one irreversible write, and the only network call in vault creation.
  *
  * By the time this runs the recovery file has been downloaded and confirmed, so
@@ -67,17 +96,7 @@ export async function commitVaultRegistration(
   pending: PendingVaultRegistration,
   sendRegistration: (payload: RegisterRequest) => Promise<RegisterResponse> = register,
 ): Promise<CommittedVault> {
-  const response = await sendRegistration(pending.request);
-
-  // A fresh vault starts at lock_epoch 0; read it back so the session-sync
-  // check has a baseline. Best-effort — the vault is usable regardless.
-  let lockEpoch = 0;
-  try {
-    const session = await fetchSession();
-    lockEpoch = session.lock_epoch ?? 0;
-  } catch {
-    // Offline/legacy server — sync check converges later.
-  }
+  const { response, lockEpoch } = await submitRegistration(pending.request, sendRegistration);
 
   console.info("Vault registered after the recovery file was saved");
 

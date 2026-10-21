@@ -41,8 +41,8 @@ export function ExtensionPairing() {
   };
 
   return (
-    <View className="rounded-2xl border border-border bg-card p-5">
-      <Text className="text-primary-text text-base font-semibold mb-1">Browser extension</Text>
+    <View className="rounded-2xl bg-surface1 overflow-hidden p-5">
+      <Text className="text-primary-text text-sm font-semibold mb-1">Browser extension</Text>
       <Text className="text-muted-text text-sm mb-4">
         Pair your browser extension with this vault using a one-time code.
       </Text>
@@ -54,7 +54,7 @@ export function ExtensionPairing() {
               : "Pair without typing a vault ID."}
           </Text>
           <Pressable
-            className="self-start rounded-lg bg-surface border border-border-strong px-4 py-2.5 items-center"
+            className="self-start rounded-lg bg-accent border border-hairline-accent px-4 py-2.5 items-center"
             onPress={handleGenerate}
             disabled={pairing.isPending}
           >
@@ -77,7 +77,7 @@ export function ExtensionPairing() {
             In the extension, enter this code. Your master password is still required there.
           </Text>
           <Pressable
-            className="self-start rounded-lg bg-surface border border-border-strong px-4 py-2.5 items-center"
+            className="self-start rounded-lg bg-accent border border-hairline-accent px-4 py-2.5 items-center"
             onPress={handleGenerate}
             disabled={pairing.isPending}
           >

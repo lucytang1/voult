@@ -51,7 +51,7 @@ interface TimerRowProps {
 
 function TimerRow({ icon: Icon, label, description, minutes, onChange, footnote }: TimerRowProps) {
   return (
-    <View className="border-t border-border py-5 first:border-t-0 first:pt-0">
+    <View className="border-t-[0.1px] border-hairline py-5 first:border-t-0 first:pt-0">
       <View className="mb-1 flex-row items-center">
         <Icon size={16} color="#a1a1aa" />
         <Text className="ml-2 text-sm font-semibold text-primary-text">{label}</Text>
@@ -72,7 +72,7 @@ function TimerRow({ icon: Icon, label, description, minutes, onChange, footnote 
               className={`rounded-lg border px-3 py-1.5 ${
                 active
                   ? "border-accent-line bg-accent-line/20"
-                  : "border-border-strong bg-card hover:border-border-strong"
+                  : "border-hairline-accent bg-surface hover:border-hairline-accent"
               }`}
             >
               <Text className={`text-xs ${active ? "font-medium text-primary-text" : "text-muted-text"}`}>
@@ -102,10 +102,10 @@ export function AutolockSection() {
   );
 
   return (
-    <View className="rounded-2xl border border-border bg-card p-5">
+    <View className="rounded-2xl bg-surface1 overflow-hidden p-5">
       <View className="mb-1 flex-row items-center">
-        <Lock size={18} color="#c4b5fd" />
-        <Text className="ml-2 text-base font-semibold text-primary-text">Autolock</Text>
+        <Lock size={16} color="#a1a1aa" />
+        <Text className="ml-2 text-sm font-semibold text-primary-text">Autolock</Text>
       </View>
       <Text className="text-sm text-muted-text">
         Voult locks itself after you stop using it, so an unattended browser is never left with

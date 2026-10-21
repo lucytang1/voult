@@ -36,7 +36,7 @@ Defined in `src/lib/sqlite/web/migrations.ts`:
 - **`intent`**
   - `id TEXT PRIMARY KEY`
   - `operation TEXT NOT NULL`  
-    - e.g. `"create" | "update" | "delete"`
+    - `"create" | "update" | "delete" | "rename"`
   - `payload TEXT NOT NULL`  
     - encrypted, base64-encoded JSON describing the operation
   - `payload_iv TEXT NOT NULL`  
@@ -57,6 +57,23 @@ Defined in `src/lib/sqlite/web/migrations.ts`:
   - `value TEXT`
 
 The intent table is a durable local mutation log; `client_state` is a generic place for client metadata.
+
+## Vault names
+
+A vault's identity is still `vaultId`; its **name** is a display label chosen
+during onboarding (between the master password and the recovery file) and
+changeable in Settings → Vault. The name lives *inside the encrypted document*
+(`DecryptedVault.name`), so the server never receives it and it travels with the
+vault across devices and cloud backups.
+
+Because the lock screen and chooser must show a name before the key exists, the
+last known name is cached per vault in `localStorage` (see the table above).
+Renaming is a durable `rename` intent (`{ name }` encrypted under the vault key)
+merged as document-level last-writer-wins; an optimistic pending marker keeps the
+new label visible until sync confirms it.
+
+The UUID is no longer shown as a primary label anywhere. Settings → Vault keeps
+the full id (with copy) because recovery, storage and the server still use it.
 
 ## Login Flow (vault-centric)
 
@@ -150,6 +167,8 @@ applied by another:
 | `localStorage["voult.selectedVault"]` | Profile-global | The selected vault id. Persisted so the app can restore *its* vault even when the session cookie is gone (M2). |
 | `localStorage["voult.lockRecord"]` | Profile-global | `{ vaultId, reason, lockedAt }` (`src/lib/state/selection-store.ts`). `reason` is `manual \| autolock \| peer \| session_expired`: the first three hold until an explicit unlock, `autolock` lapses after the window, `session_expired` forces a password re-auth. Replaces the old tab-scoped `sessionStorage["voult.lockedAt"]`. |
 | `localStorage["voult.autolock.*"]` | Device-global | Web + extension autolock timeouts (`src/lib/settings/index.ts`). Not vault data: deliberately readable while the vault is locked, which SQLite is not. |
+| `localStorage["voult.vaultName.<vaultId>"]` | Per-vault | Last name confirmed by a decrypted document (`src/lib/vault/name.ts`). Exists only so the lock screen and vault chooser can render a label before the key is in memory. A label, never key material. |
+| `localStorage["voult.pendingVaultName.<vaultId>"]` | Per-vault | An optimistic rename whose `rename` intent has not reached the server yet. Outranks the cached name for display until sync confirms it. |
 
 Restart behaviour is decided by `decideRestore()` in `src/lib/state/vault-state.ts`,
 a pure function over `(selection, lock record, autolock setting, device key

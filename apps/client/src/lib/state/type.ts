@@ -36,6 +36,11 @@ export type {
 
 // VoultPackage is web-app-local (cloud-package modeling); it stays here until
 // a second consumer needs it.
+//
+// The package is the vault's portable form. It carries the recovery envelope as
+// well as the password envelope, so restoring it on another server reproduces
+// the vault's recovery key rather than minting a new one — one vault id, one
+// recovery file, wherever it is restored.
 export interface VoultPackage {
   packageFormatVersion: number;
   vaultId: string;
@@ -44,6 +49,15 @@ export interface VoultPackage {
   cryptoParameters: { salt: string; iterations: number };
   snapshot: { ciphertext: string; iv: string };
   passwordKeyEnvelope: { wrappedVaultKey: string; iv: string };
+  recoveryEnvelope: {
+    /** HKDF salt for K_rec, base64. */
+    salt: string;
+    /** HMAC-SHA256(K_rec, "recovery-verify-v1"), base64. */
+    verifier: string;
+    /** AES-GCM envelope of the raw vault key under K_rec, base64. */
+    wrappedVaultKey: string;
+    iv: string;
+  };
 }
 
 /** Zustand store shape (web-app-local; the extension mirrors a subset). */

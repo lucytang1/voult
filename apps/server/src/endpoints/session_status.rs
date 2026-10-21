@@ -7,7 +7,7 @@ use crate::db::DbPool;
 use crate::entity::vault::{self, Entity as VaultEntity};
 use crate::error::{error_response, session_required};
 use crate::id_codec::uuid_from_db;
-use crate::session_auth::session_vault_id;
+use crate::session_auth::{clear_vault_session, session_vault_id};
 
 #[derive(Serialize)]
 pub struct SessionResponse {
@@ -31,14 +31,19 @@ pub async fn get_session(pool: web::Data<DbPool>, session: Session) -> HttpRespo
     };
 
     // A session may reference a vault that no longer exists (e.g. deleted DB).
-    // Fail closed rather than trusting the cookie alone.
+    // Fail closed rather than trusting the cookie alone — and drop the dead
+    // cookie, so it cannot keep being replayed against endpoints that bind
+    // foreign-key rows (OAuth state, provider tokens) to the session vault.
     let vault = match VaultEntity::find()
         .filter(vault::Column::Id.eq(&vault_id_raw))
         .one(pool.get_ref())
         .await
     {
         Ok(Some(vault)) => vault,
-        Ok(None) => return session_required(),
+        Ok(None) => {
+            clear_vault_session(&session);
+            return session_required();
+        }
         Err(e) => {
             log::error!("failed to fetch vault: {:?}", e);
             return error_response(

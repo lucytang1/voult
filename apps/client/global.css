@@ -39,8 +39,11 @@ html, body, #root {
        retuned from one block.
        ------------------------------------------------------------------ */
     --color-ground: #0C0B13;      /* page background (Paper) */
+    --color-surface1: #1a1a1b;        /* cards on ground */
+    --color-surface2: #18191a;           /* Card Hovers, Selected Navs and menus */
     --color-panel: #160D1B;       /* raised panel — landing action rail (Paper) */
-    --color-border: #352235;      /* hairlines, outlines (Paper) */
+    --color-hairline: #34343a;    /* Primary outlines and borders */
+    --color-hairline-accent: #352235;      /* Accented outlines and borders */
     --color-primary-text: #F2F4F7;/* headings, body, button labels (Paper) */
     --color-muted-text: #7E8590;  /* secondary copy, placeholders (Paper) */
     --color-accent: #3F072C;      /* accent fill (Paper) */
@@ -51,14 +54,13 @@ html, body, #root {
        bright magenta and breaking the mood; legibility is carried by
        --color-primary-text (15:1 on every surface here), and controls are
        defined by their edge, not by fill contrast. */
-    --color-card: #1E1124;        /* card on a panel */
     --color-surface: #2E1736;     /* inputs, chips, secondary buttons */
     --color-surface-hover: #3B1D43;
 
     /* Derived lines. --color-border is the Paper hairline (dividers,
        card outlines). This is the emphatic one — use it where an edge has
        to read as a control, e.g. the primary button outline. */
-    --color-border-strong: #5E3A60;
+    /*--color-border-strong: #5E3A60;*/
 
     /* Derived accent steps: hover lift, a line bright enough to read
        as a selection ring / focus border on the dark ground, and a light

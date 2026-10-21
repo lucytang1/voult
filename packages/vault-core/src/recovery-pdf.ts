@@ -54,6 +54,12 @@ export interface RecoveryPdfPayload {
   vaultId: string;
   /** `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX` */
   recoveryKey: string;
+  /**
+   * Optional display name, rendered on the page and in `/Title` so printed kits
+   * can be told apart. Informational only: the reader ignores it, because
+   * recovering a vault never needs the name.
+   */
+  name?: string;
 }
 
 export type RecoveryPdfErrorCode =
@@ -124,16 +130,25 @@ function centeredX(text: string, size: number): string {
 /**
  * Renders the recovery payload into the fixed page layout.
  *
- * Three blocks, deliberately plain: what the file is, which vault it opens,
- * and the key itself. The key is set at 24pt, on two lines of four groups,
- * because the point of the printed copy is that a human can read it aloud
- * over the phone to someone at the other end.
+ * Three blocks, deliberately plain: what the file is, which vault it opens
+ * (id and, when supplied, name), and the key itself. The key is set at 24pt, on
+ * two lines of four groups, because the point of the printed copy is that a
+ * human can read it aloud over the phone to someone at the other end.
  */
 function pageLines(payload: RecoveryPdfPayload): Line[] {
   const [first, second] = splitKeyGroups(payload.recoveryKey);
-  return [
+  const name = printableName(payload.name);
+  const lines: Line[] = [
     { bold: true, size: 16, y: 700, text: "VOULT VAULT RECOVERY" },
     { bold: false, size: 10, y: 672, text: `Vault: ${payload.vaultId}` },
+  ];
+  if (name) {
+    // Optional so the layout (and every existing file) is unchanged for
+    // callers that do not know a name — the count of positioned lines is
+    // asserted by the template tests.
+    lines.push({ bold: false, size: 11, y: 650, text: `Name: ${name}` });
+  }
+  lines.push(
     { bold: true, size: 24, y: 618, text: first },
     { bold: true, size: 24, y: 584, text: second },
     // The machine-readable copy of the same payload, in the page content
@@ -146,7 +161,19 @@ function pageLines(payload: RecoveryPdfPayload): Line[] {
       gray: 0.45,
       text: serializePayload(payload),
     },
-  ];
+  );
+  return lines;
+}
+
+/**
+ * One printable line for a user-supplied name: collapsed, trimmed and bounded
+ * so a long label cannot run off the page. Non-ASCII is handled by
+ * `pdfString`, which replaces it with `?` like every other literal here.
+ */
+function printableName(raw: string | undefined): string | null {
+  const cleaned = (raw ?? "").replace(/[\u0000-\u001f\u007f]/g, "").replace(/\s+/g, " ").trim();
+  if (!cleaned) return null;
+  return cleaned.length > 44 ? `${cleaned.slice(0, 41)}...` : cleaned;
 }
 
 /** `A-B-C-D-E-F-G-H` -> `["A-B-C-D", "E-F-G-H"]`. */
@@ -225,6 +252,8 @@ export function buildRecoveryPdf(
       .join("\n") +
     "\nET";
 
+  const displayName = printableName(payload.name);
+
   const objects: string[] = [
     // 1 — catalog
     "<< /Type /Catalog /Pages 2 0 R >>",
@@ -243,7 +272,7 @@ export function buildRecoveryPdf(
     `<< /Length ${new TextEncoder().encode(content).length} >>\nstream\n${content}\nendstream`,
     // 7 — document info, carrying the payload a second time.
     "<< /Title " +
-      pdfString("Voult vault recovery") +
+      pdfString(displayName ? `Voult vault recovery: ${displayName}` : "Voult vault recovery") +
       " /Subject " +
       pdfString(serializePayload(payload)) +
       " /Creator " +
@@ -320,7 +349,7 @@ function normalizePayload(input: RecoveryPdfPayload): RecoveryPdfPayload {
       "Refusing to build a recovery file from a malformed recovery key.",
     );
   }
-  return { vaultId, recoveryKey };
+  return { vaultId, recoveryKey, name: printableName(input.name) ?? undefined };
 }
 
 /**

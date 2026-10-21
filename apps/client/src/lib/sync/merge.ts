@@ -5,7 +5,7 @@
 import { mergeVault } from "@voult/vault-core";
 import type { MergeVaultResult } from "@voult/vault-core";
 import { fetchPendingIntents } from "../sqlite/web/services/intent-service";
-import { VaultItem } from "../state/type";
+import type { VaultDocumentLike } from "@voult/vault-core";
 
 type PendingIntent = Awaited<ReturnType<typeof fetchPendingIntents>>[number];
 
@@ -15,11 +15,11 @@ export type { MergeVaultResult };
 // (created_at asc, then id asc for ties). Per-op policy: see
 // apps/client/conflict-resolution.md §5.
 export async function mergeVaultLocal(
-  serverItems: VaultItem[],
+  serverDoc: VaultDocumentLike,
   pendingIntents: PendingIntent[],
   encKey: CryptoKey,
 ): Promise<MergeVaultResult> {
-  return mergeVault(serverItems, pendingIntents, encKey);
+  return mergeVault(serverDoc, pendingIntents, encKey);
 }
 
 // Keep the original name so existing import sites are untouched.
