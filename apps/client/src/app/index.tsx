@@ -58,7 +58,7 @@ export default function Landing() {
   };
 
   return (
-    <View className="flex-1 flex-col bg-ground font-app md:flex-row">
+    <View className="flex-1 flex-col bg-ground md:flex-row">
       {/* Left — copy panel */}
       <View className="flex-1 justify-center bg-ground px-6 py-12 md:px-18 md:py-20">
         <View>

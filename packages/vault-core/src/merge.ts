@@ -15,12 +15,18 @@
 // them from its own queue). No secret logging — ids and ops only.
 
 import {
+  CreateFolderSchema,
   CreateVaultItemSchema,
+  DeleteFolderSchema,
   DeleteVaultItemSchema,
+  RenameFolderSchema,
   RenameVaultSchema,
   UpdateVaultItemSchema,
   normalizeAccount,
+  type DeleteFolder,
   type DeleteVaultItem,
+  type Folder,
+  type RenameFolder,
   type UpdateVaultItem,
   type VaultItem,
 } from "./schema.js";
@@ -42,18 +48,23 @@ export interface PendingIntent {
  */
 export interface VaultDocumentLike {
   name: string;
+  folders?: Folder[];
   items: VaultItem[];
 }
 
 export type MergeVaultResult = {
   /** The merged document-level name, ready to be encrypted and pushed. */
   name: string;
+  /** The merged folder list, ready to be encrypted and pushed. */
+  folders: Folder[];
   /** The merged vault, ready to be encrypted and pushed. */
   items: VaultItem[];
   /** Intents that were resolved (applied / no-op / dropped). */
   resolvedIds: string[];
   /** Intents that could not be applied and must be quarantined. */
   quarantinedIds: string[];
+  /** Number of items removed by `deleteFolder` cascades in this run (for UI/logging). */
+  deletedFolderItemCount: number;
   /** Whether the vault actually changed and needs to be pushed. */
   changed: boolean;
 };
@@ -105,6 +116,40 @@ const applyDelete = (items: Map<string, VaultItem>, id: string): IntentOutcome =
   return "applied";
 };
 
+const applyCreateFolder = (folders: Folder[], folder: Folder): IntentOutcome => {
+  if (folders.some((f) => f.id === folder.id)) return "noop";
+  folders.push(folder);
+  return "applied";
+};
+
+const applyRenameFolder = (folders: Folder[], id: string, name: string): IntentOutcome => {
+  const existing = folders.find((f) => f.id === id);
+  if (!existing) return "dropped";
+  if (existing.name === name) return "noop";
+  existing.name = name;
+  return "applied";
+};
+
+const applyDeleteFolder = (folders: Folder[], items: Map<string, VaultItem>, id: string): IntentOutcome => {
+  const idx = folders.findIndex((f) => f.id === id);
+  if (idx === -1) return "noop";
+  folders.splice(idx, 1);
+  // Cascade: remove every item that lived in this folder. Counted for the
+  // caller (UI confirmation / logging) but never logged with names.
+  let removed = 0;
+  for (const [itemId, item] of items) {
+    if (item.folderId === id) {
+      items.delete(itemId);
+      removed++;
+    }
+  }
+  // Stash the count on the outcome via a side channel is awkward; instead the
+  // caller recomputes from the item delta. We return "applied" whenever the
+  // folder existed, which is what drives `changed`.
+  void removed;
+  return "applied";
+};
+
 // Replays pending intents onto the server snapshot in deterministic order
 // (created_at asc, then id asc for ties). Returns the merged document.
 export async function mergeVault(
@@ -113,9 +158,11 @@ export async function mergeVault(
   encKey: CryptoKey,
 ): Promise<MergeVaultResult> {
   let name = serverDoc.name;
+  const folders: Folder[] = [...(serverDoc.folders ?? [])];
   const items = new Map(serverDoc.items.map((item) => [item.id, item]));
   const resolvedIds: string[] = [];
   const quarantinedIds: string[] = [];
+  let deletedFolderItemCount = 0;
   let changed = false;
 
   const ordered = [...pendingIntents].sort(
@@ -189,6 +236,40 @@ export async function mergeVault(
         }
         break;
       }
+      case "createFolder": {
+        const parsed = CreateFolderSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          console.error("Failed to parse createFolder intent payload", intent.id, parsed.error);
+          quarantinedIds.push(intent.id);
+          continue;
+        }
+        outcome = applyCreateFolder(folders, parsed.data);
+        break;
+      }
+      case "renameFolder": {
+        const parsed = RenameFolderSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          console.error("Failed to parse renameFolder intent payload", intent.id, parsed.error);
+          quarantinedIds.push(intent.id);
+          continue;
+        }
+        outcome = applyRenameFolder(folders, parsed.data.id, parsed.data.name);
+        break;
+      }
+      case "deleteFolder": {
+        const parsed = DeleteFolderSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          console.error("Failed to parse deleteFolder intent payload", intent.id, parsed.error);
+          quarantinedIds.push(intent.id);
+          continue;
+        }
+        const beforeItems = items.size;
+        outcome = applyDeleteFolder(folders, items, parsed.data.id);
+        if (outcome === "applied") {
+          deletedFolderItemCount += beforeItems - items.size;
+        }
+        break;
+      }
       default:
         console.error("Unknown intent operation", intent.id, intent.operation);
         quarantinedIds.push(intent.id);
@@ -203,5 +284,5 @@ export async function mergeVault(
     resolvedIds.push(intent.id);
   }
 
-  return { name, items: [...items.values()], resolvedIds, quarantinedIds, changed };
+  return { name, folders, items: [...items.values()], resolvedIds, quarantinedIds, deletedFolderItemCount, changed };
 }

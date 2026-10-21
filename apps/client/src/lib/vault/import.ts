@@ -15,6 +15,7 @@ import type { RegisterRequest } from "../queries/SignUp/api.schema";
 import { readCloudVaultPending, readCloudVault } from "../cloud/api";
 import type { VoultPackage } from "../state/type";
 import { DEFAULT_VAULT_NAME, normalizeVaultName } from "./name";
+import { parseVaultDocument } from "@voult/vault-core";
 
 /**
  * Imports a vault from a cloud provider (Google Drive today).
@@ -140,9 +141,9 @@ export async function importVaultFromCloud(args: {
   } catch {
     throw new Error("Incorrect password.");
   }
-  let decryptedVault: { name?: unknown; items?: any[] };
+  let decryptedVault: { name?: unknown; folders?: any[]; items?: any[] };
   try {
-    decryptedVault = JSON.parse(plain) as { name?: unknown; items?: any[] };
+    decryptedVault = JSON.parse(plain) as { name?: unknown; folders?: any[]; items?: any[] };
   } catch {
     throw new Error("Package snapshot decrypt produced invalid JSON");
   }
@@ -153,13 +154,12 @@ export async function importVaultFromCloud(args: {
   const authKey = await createAuthKey(args.masterPassword, salt, iterations);
   const vaultVerifier = await getAuthVerifierB64(authKey);
 
-  const parsedItems = Array.isArray(decryptedVault.items) ? decryptedVault.items : [];
-  // The package carries the vault's own name. An older package without one
-  // restores under the default and can be renamed afterwards.
-  const name =
-    typeof decryptedVault.name === "string"
-      ? normalizeVaultName(decryptedVault.name) ?? DEFAULT_VAULT_NAME
-      : DEFAULT_VAULT_NAME;
+  // Parse through the shared decoder so legacy packages (no `folders` key) are
+  // interpreted as a single Personal folder, identically to every other surface.
+  const parsedDoc = parseVaultDocument(plain);
+  const parsedItems = parsedDoc.items;
+  const name = parsedDoc.name;
+  const parsedFolders = parsedDoc.folders;
 
   const request: RegisterRequest = {
     vault_id: pkg.vaultId,
@@ -189,7 +189,7 @@ export async function importVaultFromCloud(args: {
         cryptoVersion: pkg.cryptoVersion ?? 2,
       },
       vaultKey,
-      decryptedVault: { formatVersion: 1, vaultId: pkg.vaultId, name, items: parsedItems },
+      decryptedVault: { formatVersion: 1, vaultId: pkg.vaultId, name, folders: parsedFolders, items: parsedItems },
       // `/register` creates the row at version 1, regardless of the revision the
       // backup was mirrored at on its source server. The local document version
       // must match the server's, or the next sync's base_version is wrong.

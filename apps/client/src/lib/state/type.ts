@@ -27,6 +27,7 @@ export type {
   CreateVaultItem,
   UpdateVaultItem,
   DeleteVaultItem,
+  Folder,
   SsoProvider,
   SsoSignIn,
   DecryptedVault,

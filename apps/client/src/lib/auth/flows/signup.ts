@@ -12,6 +12,7 @@ import {
 import { derivePasswordKeys, generateRecoveryMaterial, parseVaultJson } from "../utils";
 import type { PendingVaultRegistration } from "../../vault/registration";
 import { normalizeVaultName } from "../../vault/name";
+import { DEFAULT_FOLDER_ID, DEFAULT_FOLDER_NAME } from "@voult/vault-core";
 
 /**
  * Vault creation, up to but NOT including the network.
@@ -51,7 +52,11 @@ export async function prepareSignupFlow(
     // entry the user ever has is one they added themselves. (This used to be a
     // `starter: { name, items }` argument, which let a screen ship three
     // `test@example.com` / `password` rows into every real user's vault.)
-    const vaultJson = JSON.stringify({ name, items: [] });
+    const vaultJson = JSON.stringify({
+      name,
+      folders: [{ id: DEFAULT_FOLDER_ID, name: DEFAULT_FOLDER_NAME }],
+      items: [],
+    });
     // The vault ID is generated client-side and never derived from any identity.
     const vaultId = uuid();
     const salt = newSaltB64();

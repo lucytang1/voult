@@ -13,7 +13,7 @@ import {
   markIntentError,
 } from "../sqlite/web/services/intent-service";
 import { b64, decrypt, encrypt } from "../crypto/index.web";
-import { VaultItem } from "../state/type";
+import { VaultItem, Folder } from "../state/type";
 import { updateVault, fetchVault } from "../queries/vault/query";
 import { isNetworkError } from "../queries/http";
 import { mergeVault } from "./merge";
@@ -53,7 +53,7 @@ const loadDocumentFromResponse = async (
 
 //updates the vault state with the server snapshot
 const adoptServerSnapshot = async (
-  doc: { name: string; items: VaultItem[] },
+  doc: { name: string; folders?: Folder[]; items: VaultItem[] },
   version: number,
   guard?: SelectionGuard,
 ) => {
@@ -66,7 +66,7 @@ const adoptServerSnapshot = async (
     console.warn("[Sync] dropping server snapshot: selection changed");
     return;
   }
-  updateDecryptedVault({ formatVersion: 1, vaultId, name: doc.name, items: doc.items });
+  updateDecryptedVault({ formatVersion: 1, vaultId, name: doc.name, folders: doc.folders ?? [], items: doc.items });
   // A pending rename is confirmed once the server document agrees with it. If
   // it does not (e.g. the intent is still queued), the marker stays so the
   // optimistic label survives an unlock that happened before this sync.
@@ -158,7 +158,7 @@ export async function sync() {
     }
 
     const encryptedVault = await encrypt(
-      JSON.stringify({ name: merged.name, items: merged.items }),
+      JSON.stringify({ name: merged.name, folders: merged.folders, items: merged.items }),
       vaultKey,
     );
     if (selectionChanged()) {

@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Pressable, Text, TextInput, View, Switch } from "react-native";
+import { Pressable, Text, View, Switch } from "react-native";
+import { TextField } from "@/src/lib/components/text-field";
 import { useRouter } from "expo-router";
 import { selectVaultSession, commitVaultUnlock, updateDecryptedVault, updateLockEpoch, updateVaultVersion } from "@/src/lib/state";
 import { prepareVaultFlow, type CreateVaultResult } from "@/src/lib/vault/create";
@@ -222,18 +223,16 @@ export default function CreateVault() {
       <Text className="text-muted-text text-xs mb-6">Until you enable cloud backup, it will not be available on other devices. You can enable sync later from Settings.</Text>
 
       <Text className="text-muted-text text-sm mb-2">Master password</Text>
-      <TextInput
-        className="w-full rounded-lg bg-card border border-border px-4 py-3 text-primary-text mb-3"
+      <TextField
+        className="mb-3"
         placeholder="Enter master password (≥8 chars)"
-        placeholderTextColor="#666"
         secureTextEntry
         value={password}
         onChangeText={setPassword}
       />
-      <TextInput
-        className="w-full rounded-lg bg-card border border-border px-4 py-3 text-primary-text mb-4"
+      <TextField
+        className="mb-4"
         placeholder="Confirm master password"
-        placeholderTextColor="#666"
         secureTextEntry
         value={confirm}
         onChangeText={setConfirm}

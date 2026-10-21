@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { AppState, DecryptedVault, LockMetadata, SessionState, VaultItem } from "./type";
+import { AppState, DecryptedVault, Folder, LockMetadata, SessionState, VaultItem } from "./type";
 import { UpdateVaultItem, CreateVaultItem, DeleteVaultItem } from "../sync/type";
 import { getWebAutolockMinutes } from "../settings";
 import {
@@ -187,6 +187,7 @@ const addVaultItem = (item: CreateVaultItem) =>
       formatVersion: state.decryptedVault?.formatVersion ?? 1,
       vaultId: documentVaultId(state),
       name: state.decryptedVault?.name ?? DEFAULT_VAULT_NAME,
+      folders: state.decryptedVault?.folders ?? [],
       items: state.decryptedVault
         ? [...state.decryptedVault.items, item]
         : [item],
@@ -201,6 +202,7 @@ const updateVaultItem = (
       formatVersion: state.decryptedVault?.formatVersion ?? 1,
       vaultId: documentVaultId(state),
       name: state.decryptedVault?.name ?? DEFAULT_VAULT_NAME,
+      folders: state.decryptedVault?.folders ?? [],
       items:
         state.decryptedVault?.items.map((item) =>
           item.id === updateditem.id ? { ...item, ...updateditem.fields} : item,
@@ -214,6 +216,7 @@ const deleteVaultItem = (deleteitem: DeleteVaultItem) =>
       formatVersion: state.decryptedVault?.formatVersion ?? 1,
       vaultId: documentVaultId(state),
       name: state.decryptedVault?.name ?? DEFAULT_VAULT_NAME,
+      folders: state.decryptedVault?.folders ?? [],
       items:
         state.decryptedVault?.items.filter(
           (item) => !(item.id === deleteitem.id),
@@ -236,10 +239,59 @@ const updateVaultName = (name: string) =>
         formatVersion: state.decryptedVault?.formatVersion ?? 1,
         vaultId,
         name,
+        folders: state.decryptedVault?.folders ?? [],
         items: state.decryptedVault?.items ?? [],
       },
     };
   });
+
+const addVaultFolder = (folder: Folder) =>
+  useAppStore.setState((state) => ({
+    decryptedVault: {
+      formatVersion: state.decryptedVault?.formatVersion ?? 1,
+      vaultId: documentVaultId(state),
+      name: state.decryptedVault?.name ?? DEFAULT_VAULT_NAME,
+      folders: [...(state.decryptedVault?.folders ?? []), folder],
+      items: state.decryptedVault?.items ?? [],
+    },
+  }));
+
+const updateVaultFolderName = (folderId: string, name: string) =>
+  useAppStore.setState((state) => ({
+    decryptedVault: {
+      formatVersion: state.decryptedVault?.formatVersion ?? 1,
+      vaultId: documentVaultId(state),
+      name: state.decryptedVault?.name ?? DEFAULT_VAULT_NAME,
+      folders: (state.decryptedVault?.folders ?? []).map((f) =>
+        f.id === folderId ? { ...f, name } : f,
+      ),
+      items: state.decryptedVault?.items ?? [],
+    },
+  }));
+
+const removeVaultFolder = (folderId: string) =>
+  useAppStore.setState((state) => ({
+    decryptedVault: {
+      formatVersion: state.decryptedVault?.formatVersion ?? 1,
+      vaultId: documentVaultId(state),
+      name: state.decryptedVault?.name ?? DEFAULT_VAULT_NAME,
+      folders: (state.decryptedVault?.folders ?? []).filter((f) => f.id !== folderId),
+      items: (state.decryptedVault?.items ?? []).filter((it) => it.folderId !== folderId),
+    },
+  }));
+
+const moveVaultItemToFolder = (itemId: string, folderId: string | null) =>
+  useAppStore.setState((state) => ({
+    decryptedVault: {
+      formatVersion: state.decryptedVault?.formatVersion ?? 1,
+      vaultId: documentVaultId(state),
+      name: state.decryptedVault?.name ?? DEFAULT_VAULT_NAME,
+      folders: state.decryptedVault?.folders ?? [],
+      items: (state.decryptedVault?.items ?? []).map((it) =>
+        it.id === itemId ? { ...it, folderId: folderId ?? undefined } : it,
+      ),
+    },
+  }));
 
 // --- Lifecycle helpers (vault-native names) ------------------------------
 
@@ -552,4 +604,8 @@ export {
   updateVaultItem,
   deleteVaultItem,
   updateVaultName,
+  addVaultFolder,
+  updateVaultFolderName,
+  removeVaultFolder,
+  moveVaultItemToFolder,
 };

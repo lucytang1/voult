@@ -13,17 +13,58 @@ html, body, #root {
   min-height: 100%;
 }
 
-/* Web font loading - non-blocking, SEO friendly */
+/* Web font loading - non-blocking, SEO friendly
+
+   Inter (variable) — self-hosted, SIL Open Font License 1.1 (see
+   /fonts/Inter-LICENSE.txt). One file per unicode subset, each carrying the
+   full 100–900 weight axis, so every weight in the UI is the same download.
+   `font-display: swap` keeps first paint instant; the fallback is the
+   platform UI font, so the swap is a near-invisible reflow.
+
+   The old "matrix" / "neo" faces pointed at files that were never shipped —
+   they 404ed on every page load and no element used them. */
 @font-face {
-  font-family: "matrix";
-  src: url("/fonts/matrix-code.otf") format("opentype");
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-weight: 100 900;
   font-display: swap;
+  src: url("/fonts/InterVariable-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 @font-face {
-  font-family: "neo";
-  src: url("/fonts/neo-pc.otf") format("opentype");
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-weight: 100 900;
   font-display: swap;
+  src: url("/fonts/InterVariable-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* react-native-web stamps `font: 14px <system stack>` on every Text and
+   TextInput through its atomic stylesheet. That is a direct declaration on the
+   element, so it beats the family inherited from <html> — which meant the app
+   font never reached the text even though <html> asked for Inter. Re-assert
+   the family on the elements react-native-web actually renders. The
+   attribute-qualified selectors are deliberately more specific than RNW's
+   single class, so they win regardless of stylesheet order. */
+input[dir],
+textarea[dir],
+div[dir],
+span[dir] {
+  font-family: var(--font-sans);
+}
+
+/* The browser's default focus ring (a blue outline) is replaced by the app's
+   own accent border on the field. Native keeps its own focus behaviour —
+   this rule only affects the web build. */
+input[dir],
+textarea[dir] {
+  outline: none;
 }
 
 @theme {
@@ -40,7 +81,7 @@ html, body, #root {
        ------------------------------------------------------------------ */
     --color-ground: #0C0B13;      /* page background (Paper) */
     --color-surface1: #1a1a1b;        /* cards on ground */
-    --color-surface2: #18191a;           /* Card Hovers, Selected Navs and menus */
+    --color-surface2: #18191a;           /* Card Hovers, Selected Navs and menus, Textboxes */
     --color-panel: #160D1B;       /* raised panel — landing action rail (Paper) */
     --color-hairline: #34343a;    /* Primary outlines and borders */
     --color-hairline-accent: #352235;      /* Accented outlines and borders */
@@ -70,5 +111,12 @@ html, body, #root {
     --color-accent-line: #7C2A63;
     --color-accent-text: #D89AC6;
 
-    --font-app: Inter, system-ui, sans-serif;
+    /* The app-wide UI face. Overriding Tailwind's `--font-sans` is what makes
+       EVERY element inherit Inter (preflight's `html` rule resolves
+       `--default-font-family` to `--font-sans`) — no per-screen opt-in.
+       NativeWind re-points `--font-sans` to the platform font on iOS/Android
+       (its unlayered `@media ios/android` rules win there), so the native
+       builds keep the system font, as they always have. */
+    --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif,
+      "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
 }

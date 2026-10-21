@@ -40,6 +40,22 @@ export type SsoSignIn = z.infer<typeof SsoSignInSchema>;
 // IdP host fragment → provider. Used by the extension's DOM detection
 // (href to an IdP is the highest-confidence signal); kept here so web +
 // extension can't drift. Substring match on the link hostname.
+// Normalizers shared by client + extension so the document is written the same
+// way everywhere. Kept here (pure, dependency-free) rather than in the client.
+export function normalizeVaultName(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const cleaned = input.replace(/[\u0000-\u001f\u007f]/g, "").replace(/\s+/g, " ").trim();
+  if (!cleaned || cleaned.length > MAX_VAULT_NAME_LENGTH) return null;
+  return cleaned;
+}
+
+export function normalizeFolderName(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const cleaned = input.replace(/[\u0000-\u001f\u007f]/g, "").replace(/\s+/g, " ").trim();
+  if (!cleaned || cleaned.length > MAX_FOLDER_NAME_LENGTH) return null;
+  return cleaned;
+}
+
 export const OAUTH_IDP_HOSTS: Record<string, SsoProvider> = {
   "accounts.google.com": "google",
   "github.com": "github",
@@ -129,6 +145,10 @@ export const VaultItemSchema = z.object({
   // onError fallback to the letter avatar. Optional so pre-favicon items stay
   // valid; renderers derive `<origin>/favicon.ico` when absent.
   faviconUrl: z.string().trim().max(2048).optional(),
+  // The folder this login lives in. Absent means "Unfiled" — a real state, not a
+  // placeholder: items captured by the extension before folders existed and items
+  // whose folder was deleted on another device both land here, and must render.
+  folderId: z.uuid().optional(),
 });
 
 export type VaultItem = z.infer<typeof VaultItemSchema>;
@@ -328,11 +348,25 @@ export const DEFAULT_VAULT_NAME = "My Vault";
 /** Longest accepted name, after trimming and whitespace collapse. */
 export const MAX_VAULT_NAME_LENGTH = 48;
 
+export const MAX_FOLDER_NAME_LENGTH = 48;
+
+export const DEFAULT_FOLDER_NAME = "Personal";
+// Fixed id for the folder every vault is born with. Must be a v4-shaped UUID so
+// it survives FolderSchema's `z.uuid()` check; a known-answer test pins it.
+export const DEFAULT_FOLDER_ID = "5b0e6a1c-0000-4000-8000-000000000001";
+
+export const FolderSchema = z.object({
+  id: z.uuid(),
+  name: z.string().trim().min(1).max(MAX_FOLDER_NAME_LENGTH),
+});
+export type Folder = z.infer<typeof FolderSchema>;
+
 export interface DecryptedVault {
   formatVersion: number;
   vaultId: string;
   /** User-facing label. Never the identity: `vaultId` still is. */
   name: string;
+  folders: Folder[];
   items: VaultItem[];
 }
 
@@ -381,6 +415,23 @@ export const RenameVaultSchema = z.object({
 });
 export type RenameVault = z.infer<typeof RenameVaultSchema>;
 
+export const CreateFolderSchema = z.object({
+  id: z.uuid(),
+  name: z.string().trim().min(1).max(MAX_FOLDER_NAME_LENGTH),
+});
+export type CreateFolder = z.infer<typeof CreateFolderSchema>;
+
+export const RenameFolderSchema = z.object({
+  id: z.uuid(),
+  name: z.string().trim().min(1).max(MAX_FOLDER_NAME_LENGTH),
+});
+export type RenameFolder = z.infer<typeof RenameFolderSchema>;
+
+export const DeleteFolderSchema = z.object({
+  id: z.uuid(),
+});
+export type DeleteFolder = z.infer<typeof DeleteFolderSchema>;
+
 export const UpdateVaultItemSchema = z.object({
   id: z.uuid(),
   fields: z.object({
@@ -391,6 +442,7 @@ export const UpdateVaultItemSchema = z.object({
     origin: z.string().optional(),
     urls: z.array(z.string()).optional(),
     faviconUrl: z.string().trim().max(2048).optional(),
+    folderId: z.uuid().optional(),
   }),
 });
 export type UpdateVaultItem = z.infer<typeof UpdateVaultItemSchema>;
@@ -402,6 +454,56 @@ export type DeleteVaultItem = z.infer<typeof DeleteVaultItemSchema>;
 
 export const CreateVaultItemSchema = VaultItemSchema;
 export type CreateVaultItem = z.infer<typeof CreateVaultItemSchema>;
+
+// --- Vault document parse / serialize ---------------------------------------
+// Single decoder + encoder shared by the web app and the extension. Keeping both
+// here is what stops a field (today `folders`, tomorrow something else) from
+// being silently dropped by a writer that rebuilds `{ name, items }`.
+
+export interface VaultDocument {
+  name: string;
+  folders: Folder[];
+  items: VaultItem[];
+}
+
+export function parseVaultDocument(plain: string): VaultDocument {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(plain);
+  } catch {
+    parsed = {};
+  }
+  if (typeof parsed !== "object" || parsed === null) parsed = {};
+  const obj = parsed as Record<string, unknown>;
+
+  const name = normalizeVaultName(obj.name) ?? DEFAULT_VAULT_NAME;
+
+  const rawItems: VaultItem[] = Array.isArray(obj.items) ? (obj.items as VaultItem[]) : [];
+
+  // Legacy discriminator: a document written before folders existed has NO
+  // `folders` key at all. Key present (even `[]`) is trusted verbatim so an
+  // intentionally emptied list never resurrects "Personal".
+  const hasFoldersKey = Object.prototype.hasOwnProperty.call(obj, "folders");
+  if (!hasFoldersKey) {
+    const folders: Folder[] = [{ id: DEFAULT_FOLDER_ID, name: DEFAULT_FOLDER_NAME }];
+    const items = rawItems.map((it) =>
+      it && typeof it === "object" && !(it as { folderId?: unknown }).folderId
+        ? { ...it, folderId: DEFAULT_FOLDER_ID }
+        : it,
+    );
+    return { name, folders, items };
+  }
+
+  const folders: Folder[] = Array.isArray(obj.folders)
+    ? (obj.folders as unknown[]).filter((f): f is Folder => FolderSchema.safeParse(f).success)
+    : [];
+
+  return { name, folders, items: rawItems };
+}
+
+export function serializeVaultDocument(doc: VaultDocument): string {
+  return JSON.stringify({ name: doc.name, folders: doc.folders, items: doc.items });
+}
 
 // --- Server API shapes (shared so web + extension can't drift) ------------
 

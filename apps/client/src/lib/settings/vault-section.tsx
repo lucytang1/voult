@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Pressable, Text, TextInput, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
+import { TextField } from "../components/text-field";
 import { useAppStore } from "../state";
 import { selectedVaultId } from "../state/vault-state";
 import { renameVault } from "../vault/rename";
@@ -71,10 +72,8 @@ export function VaultSection() {
       </Text>
 
       <View className="mt-4">
-        <TextInput
-          className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-primary-text"
+        <TextField
           placeholder="Vault name"
-          placeholderTextColor="#7E8590"
           value={name}
           onChangeText={(next) => {
             setName(next);

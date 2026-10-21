@@ -1,6 +1,7 @@
 import { useRouter } from "expo-router";
 import { useState } from "react";
-import { Pressable, Text, TextInput, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
+import { TextField } from "@/src/lib/components/text-field";
 import { useAppStore, updateLockEpoch } from "@/src/lib/state";
 import { unlockWithPassword, reauthenticateAndUnlock } from "@/src/lib/auth/flows";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
@@ -132,10 +133,9 @@ export default function Lock() {
         </Text>
       ) : null}
 
-      <TextInput
-        className="w-full rounded-md border border-border bg-surface px-3 py-2 mb-4 text-primary-text"
+      <TextField
+        className="mb-4"
         placeholder="Master password"
-        placeholderTextColor="#7E8590"
         secureTextEntry
         value={password}
         onChangeText={setPassword}

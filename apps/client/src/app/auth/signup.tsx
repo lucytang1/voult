@@ -1,6 +1,7 @@
 import { Link, useRouter } from "expo-router";
 import { useState } from "react";
-import { Pressable, Text, TextInput, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
+import { TextField } from "@/src/lib/components/text-field";
 import { prepareVaultFlow, type CreateVaultResult } from "@/src/lib/vault/create";
 import { commitVaultRegistration, describeCommitError, type PendingVaultRegistration } from "@/src/lib/vault/registration";
 import { persistDeviceSecrets } from "@/src/lib/auth/utils";
@@ -172,18 +173,16 @@ const [prepared, setPrepared] = useState<PendingVaultRegistration | null>(null);
       <Text className="text-muted-text text-xs mb-6">
         Your vault id is generated on this device. No email is required.
       </Text>
-      <TextInput
-        className="w-full rounded-md border border-border bg-surface px-3 py-2 mb-3 text-primary-text"
+      <TextField
+        className="mb-3"
         placeholder="Master password (≥8 chars)"
-        placeholderTextColor="#7E8590"
         secureTextEntry
         value={password}
         onChangeText={setPassword}
       />
-      <TextInput
-        className="w-full rounded-md border border-border bg-surface px-3 py-2 mb-4 text-primary-text"
+      <TextField
+        className="mb-4"
         placeholder="Confirm password"
-        placeholderTextColor="#7E8590"
         secureTextEntry
         value={confirm}
         onChangeText={setConfirm}

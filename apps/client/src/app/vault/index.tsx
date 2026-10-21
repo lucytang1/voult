@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Pressable, Text, View, ScrollView, Modal, ActivityIndicator, TextInput } from "react-native";
+import { Pressable, Text, View, ScrollView, Modal, ActivityIndicator } from "react-native";
+import { TextField } from "@/src/lib/components/text-field";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
@@ -509,10 +510,9 @@ export default function VaultChooser() {
               </View>
             )}
             <Text className="text-muted-text text-xs mb-2">Master password for this vault</Text>
-            <TextInput
-              className="w-full rounded-lg bg-surface px-3 py-2 text-primary-text mb-3 border border-border-strong"
+            <TextField
+              className="mb-3"
               placeholder="Enter vault master password"
-              placeholderTextColor="#666"
               secureTextEntry
               value={googleImportPassword}
               onChangeText={setGoogleImportPassword}

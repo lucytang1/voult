@@ -10,7 +10,7 @@ export type CreateIntentPayload = {
   deviceId: string;
 };
 export function createIntent(
-  operation: "create" | "update" | "delete" | "rename",
+  operation: "create" | "update" | "delete" | "rename" | "createFolder" | "renameFolder" | "deleteFolder",
   payload: CreateIntentPayload,
 ) {
   // Fail closed: intents must only ever be written into the open per-user
@@ -45,7 +45,7 @@ export function createIntent(
 
 const PendingIntentSchema = z.array(z.object({
   id: z.uuidv4(),
-  operation: z.enum(["create", "update", "delete", "rename"]),
+  operation: z.enum(["create", "update", "delete", "rename", "createFolder", "renameFolder", "deleteFolder"]),
   payload: z.string(),
   payload_iv: z.string(),
   device_id: z.string(),

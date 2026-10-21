@@ -1,5 +1,20 @@
 import { useAppStore, updateDecryptedVault, captureSelectionEpoch, addVaultItem, updateVaultItem, deleteVaultItem } from "@/src/lib/state";
 import { useEffect, useState, useMemo } from "react";
+import { FolderList } from "../../lib/components/folder-list";
+import { FolderPicker } from "../../lib/components/folder-picker";
+import { TextField } from "@/src/lib/components/text-field";
+import { CreateFolderDialog, RenameFolderDialog, DeleteFolderDialog } from "../../lib/components/folder-dialogs";
+import {
+  createFolder,
+  renameFolder,
+  deleteFolder,
+  moveItemToFolder,
+  folderNameFor,
+  itemsInFolder,
+  countByFolder,
+  UNFILED_LABEL,
+} from "../../lib/vault/folders";
+import type { Folder } from "@voult/vault-core";
 import { useQuery } from "@tanstack/react-query";
 import { Pressable, Text, TextInput, View, ScrollView, Modal, Image } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
@@ -240,10 +255,9 @@ function SsoMethodEditor({
       {selected.map((p) => (
         <View key={p} className="mt-3">
           <Text className="text-muted-text text-xs mb-1">{ssoLabel(p)} account</Text>
-          <TextInput
-            className="w-full bg-surface rounded-lg px-4 py-3 text-primary-text"
+          <TextField
+            className="mb-1"
             placeholder={ssoAccountPlaceholder(p)}
-            placeholderTextColor="#666"
             value={draft[p] ?? ""}
             onChangeText={(t) => onChange({ ...draft, [p]: t })}
             autoCapitalize="none"
@@ -270,11 +284,23 @@ export default function Home() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchFocused, setSearchFocused] = useState(false);
   const [selectedItem, setSelectedItem] = useState<VaultItem | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [hoveredAction, setHoveredAction] = useState<"lock" | "sync" | null>(null);
+
+  // Folder view state. null = "All items", "unfiled" = Unfiled bucket, otherwise a
+  // folder id. Component state only — never persisted, never part of VaultState.
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [showCreateFolder, setShowCreateFolder] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<Folder | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Folder | null>(null);
+
+  // Folder chosen for a new / edited item.
+  const [newFolderId, setNewFolderId] = useState<string | null>(null);
+  const [editFolderId, setEditFolderId] = useState<string | null>(null);
 
   // Add form state
   const [newSite, setNewSite] = useState("");
@@ -316,6 +342,7 @@ export default function Home() {
     username: string,
     password: string,
     sso: SsoSignIn[],
+    folderId?: string,
   ) => {
     if (!vaultKey) return;
     // Best-effort origin binding for future autofill matching: when the site
@@ -344,6 +371,7 @@ export default function Home() {
       password: password || undefined,
       sso,
       origin,
+      folderId,
     };
     const { cipher, iv } = await encrypt(JSON.stringify(itemWithId), vaultKey);
     const intent: CreateIntentPayload = {
@@ -363,6 +391,7 @@ export default function Home() {
     setNewPassword("");
     setNewSso({});
     setNewSsoError(null);
+    setNewFolderId(null);
   }
 
   const handleUpdate = async (item: VaultItem) => {
@@ -386,6 +415,7 @@ export default function Home() {
         username: identity.username ?? item.username,
         password: editPassword || item.password,
         sso: methods,
+        folderId: editFolderId ?? item.folderId,
       },
     };
     const { cipher, iv } = await encrypt(JSON.stringify(updatedItem), vaultKey);
@@ -445,23 +475,37 @@ export default function Home() {
 
   const decryptedVault = useAppStore((state) => state.decryptedVault);
 
+  // Fall back to "All items" when the selected folder no longer exists (deleted
+  // locally or replaced by a sync adoption).
+  useEffect(() => {
+    if (selectedFolderId === null || selectedFolderId === "unfiled") return;
+    const exists = decryptedVault?.folders?.some((f) => f.id === selectedFolderId);
+    if (!exists) setSelectedFolderId(null);
+  }, [decryptedVault?.folders, selectedFolderId]);
+
+  const folders = decryptedVault?.folders ?? [];
+  const folderCounts = useMemo(() => countByFolder(decryptedVault), [decryptedVault]);
+
   const filteredItems = useMemo(() => {
-    if (!decryptedVault?.items) return [];
-    if (!searchQuery) return decryptedVault.items;
+    let base = decryptedVault?.items ?? [];
+    if (selectedFolderId === "unfiled") {
+      base = itemsInFolder(decryptedVault, null);
+    } else if (selectedFolderId) {
+      base = itemsInFolder(decryptedVault, selectedFolderId);
+    }
+    if (!searchQuery) return base;
     const q = searchQuery.toLowerCase();
-    return decryptedVault.items.filter(
+    return base.filter(
       (item) =>
         item.site.toLowerCase().includes(q) ||
         (item.username ?? "").toLowerCase().includes(q) ||
-        // Search by provider ("google") and by IdP account, so finding a login
-        // works whether the user remembers which side of it they know.
         (item.sso ?? [])
           .map((s) => `${ssoLabel(s.provider)} ${s.account}`.trim())
           .join(" ")
           .toLowerCase()
-          .includes(q)
+          .includes(q),
     );
-  }, [decryptedVault?.items, searchQuery]);
+  }, [decryptedVault?.items, decryptedVault?.folders, searchQuery, selectedFolderId]);
 
   const groupedItems = useMemo(() => {
     const groups: Record<TimeGroup, VaultItem[]> = {
@@ -486,24 +530,16 @@ export default function Home() {
           <Text className="text-lg font-bold text-primary-text">Voult</Text>
         </View>
 
-        {/* Vaults Header */}
-        <View className="px-4 py-3 flex-row justify-between items-center">
-          <Text className="text-xs font-semibold text-muted-text uppercase tracking-wider">Vaults</Text>
-          <Pressable onPress={() => setShowAddModal(true)}>
-            <Text className="text-muted-text hover:text-primary-text text-lg">+</Text>
-          </Pressable>
-        </View>
-
-        {/* Vault Items */}
-        <View className="px-2">
-          <Pressable className="flex-row items-center px-3 py-2 rounded-lg bg-surface">
-            <Shield size={16} color="#fff" style={{ marginRight: 12 }} />
-            <View className="flex-1">
-              <Text className="text-primary-text text-sm font-medium">All items</Text>
-              <Text className="text-muted-text text-xs">{decryptedVault?.items?.length || 0} items</Text>
-            </View>
-          </Pressable>
-        </View>
+        {/* Folders */}
+        <FolderList
+          folders={folders}
+          selectedFolderId={selectedFolderId}
+          counts={folderCounts}
+          onSelect={setSelectedFolderId}
+          onCreate={() => setShowCreateFolder(true)}
+          onRename={(f) => setRenameTarget(f)}
+          onDelete={(f) => setDeleteTarget(f)}
+        />
 
         {/* Bottom Actions */}
         <View className="mt-auto border-t px-2 py-3 space-y-1">
@@ -529,13 +565,12 @@ export default function Home() {
         </View>
 
         {/* Current vault */}
-        <View className="border-t  px-4 py-3">
+        <View className="border-t border-hairline px-4 py-3">
           <View className="flex-row items-center">
             <View className="flex-1 min-w-0">
               <Text className="text-primary-text text-sm truncate">
                 {displayVaultName(session?.vaultId, decryptedVault?.name)}
               </Text>
-              <Text className="text-muted-text text-xs">Free</Text>
             </View>
             <Pressable
               accessibilityRole="button"
@@ -553,15 +588,32 @@ export default function Home() {
       <View className="flex-1 flex-col bg-ground">
         {/* Search Bar */}
         <View className="px-4 py-3 border-b border-hairline-accent">
-          <View className="flex-row items-center bg-surface rounded-lg px-3 py-2">
+          <View
+            className={`flex-row items-center bg-surface2 rounded-lg px-3 py-2 border ${
+              searchFocused ? "border-hairline-accent" : "border-hairline"
+            }`}
+          >
             <Search size={16} color="#9ca3af" style={{ marginRight: 8 }} />
             <TextInput
               className="flex-1 text-primary-text"
               placeholder="Search in all items..."
-              placeholderTextColor="#666"
+              placeholderTextColor="#7E8590"
               value={searchQuery}
               onChangeText={setSearchQuery}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
             />
+            <Pressable
+              className="ml-2 px-3 py-1.5 bg-accent border border-hairline-accent rounded-lg"
+              onPress={() => {
+                setNewFolderId(
+                  selectedFolderId && selectedFolderId !== "unfiled" ? selectedFolderId : (folders[0]?.id ?? null),
+                );
+                setShowAddModal(true);
+              }}
+            >
+              <Text className="text-primary-text text-sm">+ Add</Text>
+            </Pressable>
           </View>
         </View>
 
@@ -582,7 +634,10 @@ export default function Home() {
               <Text className="text-muted-text text-center">No items in your vault yet.</Text>
               <Pressable
                 className="mt-4 px-4 py-2 bg-accent border border-hairline-accent rounded-lg"
-                onPress={() => setShowAddModal(true)}
+                onPress={() => {
+                  setNewFolderId(folders[0]?.id ?? null);
+                  setShowAddModal(true);
+                }}
               >
                 <Text className="text-primary-text">Add your first item</Text>
               </Pressable>
@@ -638,7 +693,9 @@ export default function Home() {
                 <SiteIcon item={selectedItem} vaultId={session!.vaultId} size={44} />
                 <View className="flex-1">
                   <Text className="text-xl font-bold text-primary-text">{selectedItem.site}</Text>
-                  <Text className="text-muted-text text-sm">Personal</Text>
+                  <Text className="text-muted-text text-sm">
+                    {folderNameFor(decryptedVault, selectedItem)}
+                  </Text>
                 </View>
               </View>
               <View className="flex-row items-center space-x-2">
@@ -648,6 +705,7 @@ export default function Home() {
                     setEditSite(selectedItem.site);
                     setEditUsername(selectedItem.username ?? "");
                     setEditPassword(selectedItem.password ?? "");
+setEditFolderId(selectedItem.folderId ?? folders[0]?.id ?? null);
                     setEditSso(
                       Object.fromEntries(
                         (selectedItem.sso ?? []).map((s) => [s.provider, s.account]),
@@ -795,17 +853,15 @@ export default function Home() {
           <View className="bg-surface1 rounded-xl p-6 w-96 border border-hairline-accent">
             <Text className="text-xl font-bold text-primary-text mb-4">Add New Item</Text>
             <Text className="text-muted-text text-xs mb-3">One item holds every way to sign in — set a password, link SSO, or both.</Text>
-            <TextInput
-              className="w-full bg-surface rounded-lg px-4 py-3 text-primary-text mb-3"
+            <TextField
+              className="mb-3"
               placeholder="Site name"
-              placeholderTextColor="#666"
               value={newSite}
               onChangeText={setNewSite}
             />
-            <TextInput
-              className="w-full bg-surface rounded-lg px-4 py-3 text-primary-text mb-3"
+            <TextField
+              className="mb-3"
               placeholder="Account at this site (optional if SSO only)"
-              placeholderTextColor="#666"
               value={newUsername}
               onChangeText={(t) => {
                 setNewUsername(t);
@@ -813,14 +869,21 @@ export default function Home() {
               }}
               autoCapitalize="none"
             />
-            <TextInput
-              className="w-full bg-surface rounded-lg px-4 py-3 text-primary-text mb-3"
+            <TextField
+              className="mb-3"
               placeholder="Password (optional if SSO linked)"
-              placeholderTextColor="#666"
               value={newPassword}
               onChangeText={setNewPassword}
               secureTextEntry
             />
+            <View className="mb-3">
+              <Text className="text-muted-text text-xs mb-2">Folder</Text>
+              <FolderPicker
+                folders={folders}
+                value={newFolderId}
+                onChange={setNewFolderId}
+              />
+            </View>
             <SsoMethodEditor
               draft={newSso}
               onChange={(next) => {
@@ -855,7 +918,7 @@ export default function Home() {
                     return;
                   }
                   if (newSite && (newPassword || methods.length > 0)) {
-                    handleCreate(newSite, newUsername, newPassword, methods);
+                    handleCreate(newSite, newUsername, newPassword, methods, newFolderId ?? undefined);
                   }
                 }}
               >
@@ -876,17 +939,15 @@ export default function Home() {
         <View className="flex-1 bg-black/60 items-center justify-center">
           <View className="bg-surface1 rounded-xl p-6 w-96 border border-hairline-accent">
             <Text className="text-xl font-bold text-primary-text mb-4">Edit Item</Text>
-            <TextInput
-              className="w-full bg-surface rounded-lg px-4 py-3 text-primary-text mb-3"
+            <TextField
+              className="mb-3"
               placeholder="Site name"
-              placeholderTextColor="#666"
               value={editSite}
               onChangeText={setEditSite}
             />
-            <TextInput
-              className="w-full bg-surface rounded-lg px-4 py-3 text-primary-text mb-3"
+            <TextField
+              className="mb-3"
               placeholder="Account at this site"
-              placeholderTextColor="#666"
               value={editUsername}
               onChangeText={(t) => {
                 setEditUsername(t);
@@ -894,14 +955,21 @@ export default function Home() {
               }}
               autoCapitalize="none"
             />
-            <TextInput
-              className="w-full bg-surface rounded-lg px-4 py-3 text-primary-text mb-3"
+            <TextField
+              className="mb-3"
               placeholder="Password (empty keeps stored value)"
-              placeholderTextColor="#666"
               value={editPassword}
               onChangeText={setEditPassword}
               secureTextEntry
             />
+            <View className="mb-3">
+              <Text className="text-muted-text text-xs mb-2">Folder</Text>
+              <FolderPicker
+                folders={folders}
+                value={editFolderId}
+                onChange={setEditFolderId}
+              />
+            </View>
             <SsoMethodEditor
               draft={editSso}
               onChange={(next) => {
@@ -977,6 +1045,34 @@ export default function Home() {
           </View>
         </View>
       </Modal>
+
+      <CreateFolderDialog
+        visible={showCreateFolder}
+        folders={folders}
+        onClose={() => setShowCreateFolder(false)}
+        onCreate={async (name) => {
+          await createFolder(name);
+        }}
+      />
+      <RenameFolderDialog
+        visible={!!renameTarget}
+        folder={renameTarget}
+        folders={folders}
+        onClose={() => setRenameTarget(null)}
+        onRename={async (id, name) => {
+          await renameFolder(id, name);
+        }}
+      />
+      <DeleteFolderDialog
+        visible={!!deleteTarget}
+        folder={deleteTarget}
+        itemCount={deleteTarget ? (folderCounts.byId[deleteTarget.id] ?? 0) : 0}
+        onClose={() => setDeleteTarget(null)}
+        onDelete={async () => {
+          if (deleteTarget) await deleteFolder(deleteTarget.id);
+          if (selectedFolderId === deleteTarget?.id) setSelectedFolderId(null);
+        }}
+      />
     </View>
   );
 }

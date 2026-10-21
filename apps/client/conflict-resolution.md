@@ -85,6 +85,13 @@ Conflict resolution is only possible if these exist. Today they don't.
 | `delete {id}` | item absent | no-op (idempotent) |
 | `rename {name}` | document name differs | set the document name (last rename in replay order wins) |
 | `rename {name}` | name already equal | no-op |
+| `createFolder {id, name}` | id absent | append the folder |
+| `createFolder {id, name}` | id present | no-op (idempotent replay) |
+| `renameFolder {id, name}` | folder present | set the folder name (last writer in replay order wins) |
+| `renameFolder {id, name}` | folder absent | **drop + log** — no resurrection |
+| `deleteFolder {id}` | folder present | remove the folder **and every item with that `folderId`** (cascade) |
+| `deleteFolder {id}` | folder absent | no-op (idempotent) |
+| `update {id, fields}` with `folderId` | item present | move the item (per-field LWW); a missing target folder keeps the item under Unfiled |
 
 Three deliberate semantics, stated plainly:
 

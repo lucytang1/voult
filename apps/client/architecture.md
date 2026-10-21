@@ -75,6 +75,23 @@ new label visible until sync confirms it.
 The UUID is no longer shown as a primary label anywhere. Settings → Vault keeps
 the full id (with copy) because recovery, storage and the server still use it.
 
+## Folders
+
+A vault's items may be grouped into flat folders. The folder list lives **inside the
+encrypted vault document** (`DecryptedVault.folders`), so the server never sees it and it
+travels with the vault across devices and cloud backups. Each `VaultItem` carries an optional
+`folderId`; an item with no (or a dangling) `folderId` renders under the synthetic
+**Unfiled** bucket, which cannot be deleted.
+
+Every vault is created with one folder, **Personal** (`DEFAULT_FOLDER_ID`). Folders are
+ordered by their position in the document array (new folders append) and are managed through
+three new durable intents — `createFolder`, `renameFolder`, `deleteFolder` — the last of which
+cascades to every item in that folder at its replay position. Folder names follow the same
+1–48 character normalisation as the vault name.
+
+Because folders are part of the document, **every writer must spread the document** rather
+than rebuild `{ name, items }`. The extension does this in `src/background/vault.ts`.
+
 ## Login Flow (vault-centric)
 
 End-to-end login flow as implemented today:

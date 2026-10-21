@@ -38,7 +38,9 @@ import {
   ssoAccountsForProvider,
   upsertSsoSignIn,
   uuid,
+  parseVaultDocument,
   wrapKeyBytes,
+  type Folder,
   type SsoProvider,
   type SsoSignIn,
   type VaultItem,
@@ -259,8 +261,7 @@ export async function saveOnboarding(vaultIdInput: string, serverUrlInput: strin
 // --- Unlock ----------------------------------------------------------------
 
 function parseVaultJson(plain: string, id: string): VaultItem[] {
-  const parsed = JSON.parse(plain) as { items?: VaultItem[] };
-  return parsed.items ?? [];
+  return parseVaultDocument(plain).items;
 }
 
 async function persistDeviceEnvelope(id: string, vaultKeyRaw: Uint8Array): Promise<void> {
@@ -975,7 +976,24 @@ async function pushSingleIntent(
   const pinId = id;
   const sessionChanged = () => currentVaultId() !== pinId || currentVaultKey() !== key;
 
-  const enc = await encrypt(JSON.stringify(op.payload), key);
+  // File extension captures into the vault's first folder (Personal) when the
+  // capture did not name one, so they do not land in the Unfiled bucket.
+  const payload = { ...(op.payload as Record<string, unknown>) };
+  if (op.operation === "create" && payload.folderId === undefined) {
+    try {
+      const vd = await fetchVault(serverUrl);
+      const pl = await decrypt(vd.vault.vault, vd.vault.vaultiv, key);
+      const first = parseVaultDocument(pl).folders[0]?.id;
+      if (first) payload.folderId = first;
+    } catch (e) {
+      if (isNetworkError(e)) {
+        onOffline();
+        return { saved: false, offline: true };
+      }
+      // Non-network failure: leave folderId unset; the item lands in Unfiled.
+    }
+  }
+  const enc = await encrypt(JSON.stringify(payload), key);
   const intent = {
     id: uuid(),
     operation: op.operation,
@@ -986,18 +1004,19 @@ async function pushSingleIntent(
 
   for (let attempt = 1; attempt <= MAX_SAVE_RETRIES; attempt++) {
     if (sessionChanged()) throw new Error("Session changed; save aborted.");
-    let serverDoc: { name: string; items: VaultItem[] };
+    let serverDoc: { name: string; folders?: Folder[]; items: VaultItem[] };
     let serverVersion: number;
     try {
       const vaultData = await fetchVault(serverUrl);
       const plain = await decrypt(vaultData.vault.vault, vaultData.vault.vaultiv, key);
-      // Preserve the document-level name: the extension must never strip a
-      // field it does not render, or a web-app rename would be lost on the next
-      // save from here.
-      const parsed = JSON.parse(plain) as { name?: string; items?: VaultItem[] };
+      // Preserve the whole document: name, folders and items. The extension must
+      // never strip a field it does not render, or a web-app rename/folder
+      // change would be lost on the next save from here.
+      const parsed = parseVaultDocument(plain);
       serverDoc = {
-        name: typeof parsed.name === "string" && parsed.name.trim() ? parsed.name : DEFAULT_VAULT_NAME,
-        items: parsed.items ?? [],
+        name: parsed.name,
+        folders: parsed.folders,
+        items: parsed.items,
       };
       serverVersion = vaultData.vault.version;
     } catch (e) {
@@ -1014,7 +1033,7 @@ async function pushSingleIntent(
       setPendingSave(null);
       return { saved: true, offline: false };
     }
-    const encrypted = await encrypt(JSON.stringify({ name: merged.name, items: merged.items }), key);
+    const encrypted = await encrypt(JSON.stringify({ name: merged.name, folders: merged.folders, items: merged.items }), key);
     if (sessionChanged()) throw new Error("Session changed; save aborted.");
     try {
       const response = await postUpdateVault(

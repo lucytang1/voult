@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Pressable, Text, TextInput, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
+import { TextField } from "@/src/lib/components/text-field";
 import { useRouter } from "expo-router";
 import { KeyRound } from "lucide-react";
 import { useAppStore, switchVaultOpen, captureSelectionEpoch } from "@/src/lib/state";
@@ -147,18 +148,16 @@ export default function RecoverPassword() {
                 {vaultId ? ` ${displayVaultName(vaultId)}` : ""}
             </Text>
 
-            <TextInput
-                className="w-full max-w-md rounded-md border border-border bg-surface px-3 py-2 mb-3 text-primary-text"
+            <TextField
+                className="max-w-md mb-3"
                 placeholder="New master password (≥8 chars)"
-                placeholderTextColor="#7E8590"
                 secureTextEntry
                 value={newPassword}
                 onChangeText={setNewPassword}
             />
-            <TextInput
-                className="w-full max-w-md rounded-md border border-border bg-surface px-3 py-2 mb-4 text-primary-text"
+            <TextField
+                className="max-w-md mb-4"
                 placeholder="Confirm new password"
-                placeholderTextColor="#7E8590"
                 secureTextEntry
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}

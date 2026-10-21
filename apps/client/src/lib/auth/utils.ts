@@ -16,7 +16,8 @@ import {
 } from "../crypto/device-key";
 
 import type { SessionState, DecryptedVault, VaultItem } from "../state/type";
-import { DEFAULT_VAULT_NAME, normalizeVaultName } from "../vault/name";
+import { DEFAULT_VAULT_NAME } from "../vault/name";
+import { parseVaultDocument } from "@voult/vault-core";
 
 /**
  * Parse a decrypted vault document into the store's `DecryptedVault`.
@@ -34,10 +35,8 @@ import { DEFAULT_VAULT_NAME, normalizeVaultName } from "../vault/name";
  * The name is never part of the identity check above.
  */
 export function parseVaultJson(plain: string, vaultId: string): DecryptedVault {
-  const parsed = JSON.parse(plain) as { name?: unknown; items?: VaultItem[] };
-  const name =
-    typeof parsed.name === "string" ? normalizeVaultName(parsed.name) ?? DEFAULT_VAULT_NAME : DEFAULT_VAULT_NAME;
-  return { formatVersion: 1, vaultId, name, items: parsed.items ?? [] };
+  const parsed = parseVaultDocument(plain);
+  return { formatVersion: 1, vaultId, name: parsed.name, folders: parsed.folders, items: parsed.items };
 }
 
 export interface UnlockedSession {

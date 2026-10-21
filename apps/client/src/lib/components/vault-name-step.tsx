@@ -1,4 +1,5 @@
-import { Pressable, Text, TextInput, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
+import { TextField } from "./text-field";
 import {
   DEFAULT_VAULT_NAME,
   MAX_VAULT_NAME_LENGTH,
@@ -46,10 +47,9 @@ export function VaultNameStep({
       <Text className="text-muted-text text-sm mb-6 leading-5">{description}</Text>
 
       <Text className="text-muted-text text-xs mb-2">Vault name</Text>
-      <TextInput
-        className="w-full rounded-md border border-border bg-surface px-3 py-2 mb-1 text-primary-text"
+      <TextField
+        className="mb-1"
         placeholder={DEFAULT_VAULT_NAME}
-        placeholderTextColor="#7E8590"
         value={value}
         onChangeText={onChange}
         autoFocus
