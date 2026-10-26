@@ -5,6 +5,31 @@ merge policy, and origin matching are shared via `@voult/vault-core`
 (`packages/vault-core`) — consumed as compiled `dist`, rebuilt automatically
 by `npm run build`. Never fork that logic into the extension.
 
+## Popup layout
+
+The popup is a two-pane React view (780 × 580, the Chrome popup maximum is
+800 × 600): a searchable login list on the left, read-only item details on the
+right, and a top bar with the vault menu, search, and folder filter.
+
+- **Menu** — Settings, Open app, Lock vault, Log out. Settings edits the server
+  URL and inactivity timeout in a dialog; the worker still normalizes the URL
+  and clamps the timeout.
+- **Folder filter** — uses the folders inside the encrypted document. The
+  worker keeps `folders` (and the display name) alongside items while unlocked;
+  `PopupState` carries them so the popup never re-implements folder semantics.
+  `folderNameFor` / `itemsInFolder` / `countByFolder` are shared with the web
+  app in `@voult/vault-core`.
+- **Details** — account, masked password (reveal/copy), SSO methods, and a
+  fixed action card for Fill / Copy. Passwords never render until revealed.
+  Creating, editing, and deleting stay in the web app.
+- **Locked / Connect** — same palette and menu, with the password/pairing
+  flows unchanged.
+
+The injected page UI (suggest dropdown, save banner) intentionally stays
+vanilla TS in a closed Shadow DOM: content scripts are classic, import-free
+bundles, and shipping React into every page would cost size and isolation for
+no gain. The popup is the React surface.
+
 ## Dev loop
 
 ```sh

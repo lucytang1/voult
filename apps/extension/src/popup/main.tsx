@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Popup } from "./Popup";
+import "./popup.css";
 
 const el = document.getElementById("root");
 if (!el) throw new Error("Voult popup: #root missing");

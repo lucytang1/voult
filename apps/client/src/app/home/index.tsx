@@ -18,7 +18,7 @@ import type { Folder } from "@voult/vault-core";
 import { useQuery } from "@tanstack/react-query";
 import { Pressable, Text, TextInput, View, ScrollView, Modal, Image } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
-import { Shield, Lock as LockIcon, RefreshCw, Search, Pencil, Trash2, Mail, KeyRound, Eye, Globe, Zap, Clock, CalendarPlus, Settings } from "lucide-react";
+import { Lock as LockIcon, RefreshCw, Search, Pencil, Trash2, Mail, KeyRound, Eye, Earth, Globe, Zap, Clock, CalendarPlus, Settings } from "lucide-react";
 import { decrypt, encrypt } from "../../lib/crypto/index.web";
 import { useGetVault } from "../../lib/queries/vault/query";
 import type { VaultItem } from "../../lib/state/type";
@@ -39,6 +39,7 @@ import { http } from "../../lib/queries/http";
 import type { SsoProvider, SsoSignIn } from "@voult/vault-core";
 import { parseVaultJson } from "../../lib/auth/utils";
 import { displayVaultName } from "../../lib/vault/name";
+import { VoultWordmark } from "../../../assets/icons/VoultWordmark";
 
 // Device ids are cached per vault — a shared single value could attribute
 // one vault's intents to another after a vault switch.
@@ -60,23 +61,19 @@ function getTimeGroup(_item: VaultItem, index: number): TimeGroup {
   return "More than a month";
 }
 
-function getSiteIcon(site: string): string {
-  if (site.includes("google")) return "G";
-  if (site.includes("github")) return "GH";
-  if (site.includes("spotify")) return "S";
-  if (site.includes("facebook")) return "F";
-  if (site.includes("proton")) return "P";
-  return site.charAt(0).toUpperCase();
-}
-
-// Site icon for a vault item: the stored favicon captured by the extension at
-// save time, else `<origin>/favicon.ico` when the item is origin-bound, else
-// the legacy letter tile. Icons load through the same-origin /api/favicon
-// proxy — the app's COEP `require-corp` header makes the browser refuse
-// cross-origin `<img>` loads, and favicon hosts don't send CORP. A failed
-// load permanently falls back to the letter for that item (per render) so
-// dead icons never leave blank rows. Icons are display-only — matching never
-// consults them.
+/**
+ * Site icon: a favicon inside a white rounded square — the same tile the
+ * extension popup draws, so a login looks identical in both surfaces. The
+ * earth glyph sits UNDERNEATH the favicon (as in the popup): it is the
+ * fallback for an item with no icon, and it keeps a slow, dead or transparent
+ * favicon from reading as an empty tile.
+ *
+ * Icons are display-only — matching never consults them — and they load
+ * through the same-origin /api/favicon proxy: the app's COEP `require-corp`
+ * header makes the browser refuse cross-origin `<img>` loads, and favicon
+ * hosts don't send CORP. A failed load permanently falls back to the glyph
+ * for that item (per render) so dead icons never leave blank rows.
+ */
 function SiteIcon({
   item,
   vaultId,
@@ -115,33 +112,36 @@ function SiteIcon({
   });
 
   const src = iconQuery.data;
-  if (!direct || iconQuery.isError || imageFailed) {
-    return (
-      <View
-        className="rounded-xl bg-transparent flex items-center justify-center mr-3"
-        style={{ width: size, height: size }}
-      >
-        <Text className="text-muted-text font-semibold text-sm">
-          {getSiteIcon(item.site)}
-        </Text>
-      </View>
-    );
-  }
-  if (!src) {
-    // Keep the reserved space visually quiet while the icon query resolves;
-    // the query cache avoids refetching icons as rows rerender or remount.
-    return <View className="mr-3" style={{ width: size, height: size }} />;
-  }
+  // Tile proportions copied from the extension's icon tile (a 31px square with
+  // a 10px radius and a 20px favicon inside, itself rounded to 4px), scaled
+  // to this row's size.
+  const radius = Math.round(size * 0.32);
+  const inner = Math.round(size * 0.645);
+  const innerRadius = Math.max(3, Math.round(inner * 0.2));
+
   return (
     <View
-      className="rounded-xl bg-transparent flex items-center justify-center mr-3 overflow-hidden"
-      style={{ width: size, height: size }}
+      className="mr-3 items-center justify-center overflow-hidden bg-icon-tile"
+      style={{ width: size, height: size, borderRadius: radius }}
     >
-      <Image
-        source={{ uri: src }}
-        style={{ width: size - 12, height: size - 12, borderRadius: 9999 }}
-        onError={() => setImageFailed(true)}
-      />
+      {/* The fallback glyph is stroked with currentColor, so the tile's ink
+          token paints it — no hardcoded hex to drift out of sync. */}
+      <Earth className="text-icon-tile-ink" size={Math.round(size * 0.48)} />
+      {src && !imageFailed ? (
+        <Image
+          source={{ uri: src }}
+          resizeMode="contain"
+          onError={() => setImageFailed(true)}
+          style={{
+            position: "absolute",
+            left: (size - inner) / 2,
+            top: (size - inner) / 2,
+            width: inner,
+            height: inner,
+            borderRadius: innerRadius,
+          }}
+        />
+      ) : null}
     </View>
   );
 }
@@ -525,9 +525,8 @@ export default function Home() {
       {/* Left Sidebar - Vaults */}
       <View className="w-56 bg-ground border-r border-hairline-accent flex-col">
         {/* Logo */}
-        <View className="px-4 py-4  flex-row items-center">
-          <Shield size={20} color="#D89AC6" style={{ marginRight: 8 }} />
-          <Text className="text-lg font-bold text-primary-text">Voult</Text>
+        <View className="px-4 py-4 flex-row items-center">
+          <VoultWordmark height={35} />
         </View>
 
         {/* Folders */}

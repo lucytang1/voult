@@ -86,6 +86,11 @@ const DEFAULT_LOCK_TIMEOUT_MINUTES = 5;
 
 let vaultKey: CryptoKey | null = null;
 let items: VaultItem[] = [];
+// Folders and the vault's display name are part of the decrypted document.
+// The popup needs folders for its folder filter; the name is a label only and
+// never part of any identity or wire contract.
+let folders: Folder[] = [];
+let vaultName: string | null = null;
 let version: number | null = null;
 let vaultId: string | null = null;
 let lastActivity = 0;
@@ -260,8 +265,9 @@ export async function saveOnboarding(vaultIdInput: string, serverUrlInput: strin
 
 // --- Unlock ----------------------------------------------------------------
 
-function parseVaultJson(plain: string, id: string): VaultItem[] {
-  return parseVaultDocument(plain).items;
+function parseVaultState(plain: string): { name: string; folders: Folder[]; items: VaultItem[] } {
+  const doc = parseVaultDocument(plain);
+  return { name: doc.name, folders: doc.folders, items: doc.items };
 }
 
 async function persistDeviceEnvelope(id: string, vaultKeyRaw: Uint8Array): Promise<void> {
@@ -279,13 +285,15 @@ async function finishUnlock(
   id: string,
   key: CryptoKey,
   raw: Uint8Array | null,
-  serverItems: VaultItem[],
+  serverDoc: { name: string; folders: Folder[]; items: VaultItem[] },
   serverVersion: number,
   lockEpoch: number,
 ): Promise<void> {
   vaultKey = key;
   vaultId = id;
-  items = serverItems;
+  vaultName = serverDoc.name;
+  folders = serverDoc.folders;
+  items = serverDoc.items;
   version = serverVersion;
   touch();
   // Baseline for peer-lock detection: a later epoch means "locked elsewhere".
@@ -368,7 +376,7 @@ export async function unlockWithPassword(password: string): Promise<void> {
   } catch {
     // Offline/legacy server — unlock still valid.
   }
-  await finishUnlock(id, key, raw, parseVaultJson(plain, id), v.version, lockEpoch);
+  await finishUnlock(id, key, raw, parseVaultState(plain), v.version, lockEpoch);
   console.info("[voult] unlocked with password");
 }
 
@@ -412,7 +420,7 @@ export async function unlockWithDevice(): Promise<boolean> {
   } catch {
     return false;
   }
-  await finishUnlock(id, key, null, parseVaultJson(plain, id), v.version, session.lock_epoch ?? 0);
+  await finishUnlock(id, key, null, parseVaultState(plain), v.version, session.lock_epoch ?? 0);
   console.info("[voult] unlocked with device key");
   return true;
 }
@@ -472,6 +480,8 @@ export async function syncSession(): Promise<void> {
 export async function lock(): Promise<void> {
   vaultKey = null;
   items = [];
+  folders = [];
+  vaultName = null;
   version = null;
   vaultId = null;
   pendingSave = null;
@@ -620,8 +630,10 @@ export async function getPopupState(tabOrigin?: string): Promise<PopupState> {
     return {
       status: "needs-onboarding",
       vaultId: null,
+      vaultName: null,
       serverUrl,
       lockTimeoutMinutes,
+      folders: [],
       items: null,
       matches: null,
       version: null,
@@ -632,8 +644,10 @@ export async function getPopupState(tabOrigin?: string): Promise<PopupState> {
     return {
       status: "locked",
       vaultId: activeId,
+      vaultName: null,
       serverUrl,
       lockTimeoutMinutes,
+      folders: [],
       items: null,
       matches: null,
       version: null,
@@ -650,8 +664,10 @@ export async function getPopupState(tabOrigin?: string): Promise<PopupState> {
   return {
     status: "unlocked",
     vaultId,
+    vaultName,
     serverUrl,
     lockTimeoutMinutes,
+    folders,
     items: ordered,
     matches: ranked,
     version,
@@ -814,9 +830,14 @@ export async function confirmPendingPrompt(
 }
 
 /** Adopt a freshly pushed server snapshot into the in-memory cache. */
-export function adoptSnapshot(nextItems: VaultItem[], nextVersion: number): void {
+export function adoptSnapshot(
+  nextDoc: { name: string; folders: Folder[]; items: VaultItem[] },
+  nextVersion: number,
+): void {
   if (!isUnlocked()) return;
-  items = nextItems;
+  vaultName = nextDoc.name;
+  folders = nextDoc.folders;
+  items = nextDoc.items;
   version = nextVersion;
   touch();
 }
@@ -1029,7 +1050,7 @@ async function pushSingleIntent(
 
     const merged = await mergeVault(serverDoc, [intent], key);
     if (!merged.changed) {
-      adoptSnapshot(merged.items, serverVersion);
+      adoptSnapshot(merged, serverVersion);
       setPendingSave(null);
       return { saved: true, offline: false };
     }
@@ -1041,8 +1062,9 @@ async function pushSingleIntent(
         serverUrl,
       );
       const syncedPlain = await decrypt(response.vault, response.vaultiv, key);
-      const synced = (JSON.parse(syncedPlain) as { items?: VaultItem[] }).items ?? [];
-      adoptSnapshot(synced, response.version);
+      // Adopt the whole document, not just items: a folder create/rename that
+      // the server applied must be visible to the popup's folder filter.
+      adoptSnapshot(parseVaultState(syncedPlain), response.version);
       setPendingSave(null);
       console.info("[voult] login saved");
       return { saved: true, offline: false };

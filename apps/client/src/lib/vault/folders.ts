@@ -27,31 +27,29 @@ import { normalizeFolderName } from "@voult/vault-core";
 import {
   DEFAULT_FOLDER_ID,
   DEFAULT_FOLDER_NAME,
+  UNFILED_LABEL,
+  folderNameFor as sharedFolderNameFor,
+  itemsInFolder as sharedItemsInFolder,
+  countByFolder as sharedCountByFolder,
   type Folder,
   type VaultItem,
 } from "@voult/vault-core";
 import type { DecryptedVault } from "../state/type";
 
-export { DEFAULT_FOLDER_ID, DEFAULT_FOLDER_NAME, normalizeFolderName };
+export { DEFAULT_FOLDER_ID, DEFAULT_FOLDER_NAME, normalizeFolderName, UNFILED_LABEL };
 export type { Folder };
 
-/** A bucket that is never stored: items with no / dangling folderId. */
-export const UNFILED_LABEL = "Unfiled";
-
+/**
+ * Folder view helpers are the shared `vault-core` implementations (the
+ * extension popup renders the same buckets); these wrappers only adapt the
+ * web app's document-shaped signature.
+ */
 export function folderNameFor(doc: DecryptedVault | null, item: VaultItem): string {
-  if (!doc) return UNFILED_LABEL;
-  const folder = doc.folders.find((f) => f.id === item.folderId);
-  return folder ? folder.name : UNFILED_LABEL;
+  return sharedFolderNameFor(doc?.folders ?? [], item);
 }
 
 export function itemsInFolder(doc: DecryptedVault | null, folderId: string | null): VaultItem[] {
-  if (!doc) return [];
-  if (folderId === null) {
-    // Unfiled bucket.
-    const known = new Set(doc.folders.map((f) => f.id));
-    return doc.items.filter((it) => !it.folderId || !known.has(it.folderId));
-  }
-  return doc.items.filter((it) => it.folderId === folderId);
+  return sharedItemsInFolder(doc?.items ?? [], doc?.folders ?? [], folderId);
 }
 
 export function countByFolder(doc: DecryptedVault | null): {
@@ -59,18 +57,7 @@ export function countByFolder(doc: DecryptedVault | null): {
   unfiled: number;
   byId: Record<string, number>;
 } {
-  const byId: Record<string, number> = {};
-  let unfiled = 0;
-  if (!doc) return { all: 0, unfiled: 0, byId };
-  const known = new Set(doc.folders.map((f) => f.id));
-  for (const it of doc.items) {
-    if (!it.folderId || !known.has(it.folderId)) {
-      unfiled++;
-    } else {
-      byId[it.folderId] = (byId[it.folderId] ?? 0) + 1;
-    }
-  }
-  return { all: doc.items.length, unfiled, byId };
+  return sharedCountByFolder(doc?.items ?? [], doc?.folders ?? []);
 }
 
 export async function createFolder(name: string): Promise<Folder> {

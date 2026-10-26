@@ -6,6 +6,10 @@ import {
   DEFAULT_FOLDER_ID,
   DEFAULT_FOLDER_NAME,
   FolderSchema,
+  UNFILED_LABEL,
+  countByFolder,
+  folderNameFor,
+  itemsInFolder,
   parseVaultDocument,
   serializeVaultDocument,
   normalizeFolderName,
@@ -78,6 +82,45 @@ describe("FolderSchema", () => {
       FolderSchema.safeParse({ id: DEFAULT_FOLDER_ID, name: DEFAULT_FOLDER_NAME }).success,
       true,
     );
+  });
+});
+
+describe("folder view helpers", () => {
+  it("names an item's live folder, and calls dangling ids Unfiled", () => {
+    const work = folder("Work");
+    assert.equal(folderNameFor([work], { folderId: work.id }), "Work");
+    assert.equal(folderNameFor([work], { folderId: uuid() }), UNFILED_LABEL);
+    assert.equal(folderNameFor([work], {}), UNFILED_LABEL);
+  });
+
+  it("puts missing and dangling folder ids in the Unfiled bucket", () => {
+    const work = folder("Work");
+    const filed = item({ folderId: work.id });
+    const unfiled = item();
+    const dangling = item({ folderId: uuid() });
+    assert.deepEqual(
+      itemsInFolder([filed, unfiled, dangling], [work], null).map((i) => i.id),
+      [unfiled.id, dangling.id],
+    );
+    assert.deepEqual(
+      itemsInFolder([filed, unfiled, dangling], [work], work.id).map((i) => i.id),
+      [filed.id],
+    );
+  });
+
+  it("counts all, unfiled, and each folder consistently", () => {
+    const work = folder("Work");
+    const personal = folder("Personal");
+    const counts = countByFolder(
+      [
+        item({ folderId: work.id }),
+        item({ folderId: personal.id }),
+        item(),
+        item({ folderId: uuid() }),
+      ],
+      [work, personal],
+    );
+    assert.deepEqual(counts, { all: 4, unfiled: 2, byId: { [work.id]: 1, [personal.id]: 1 } });
   });
 });
 

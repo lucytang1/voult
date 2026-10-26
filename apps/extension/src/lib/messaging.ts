@@ -5,8 +5,8 @@
 // privileged decisions (origin, matching, fill payload) always derive from
 // `sender.tab.url` in the worker — never from page-supplied strings.
 
-import type { VaultItem, SsoProvider, SsoSignIn } from "@voult/vault-core";
-export type { VaultItem, SsoProvider, SsoSignIn };
+import type { VaultItem, Folder, SsoProvider, SsoSignIn } from "@voult/vault-core";
+export type { VaultItem, Folder, SsoProvider, SsoSignIn };
 
 export type Rank = "exact" | "linked" | "subdomain";
 
@@ -34,8 +34,12 @@ export type PopupStatus = "needs-onboarding" | "locked" | "unlocked";
 export interface PopupState {
   status: PopupStatus;
   vaultId: string | null;
+  /** Decrypted label only — display, never identity. Null while locked. */
+  vaultName: string | null;
   serverUrl: string;
   lockTimeoutMinutes: number;
+  /** Folder list from the decrypted document (empty while locked). */
+  folders: Folder[];
   /** Present when unlocked: ranked matches first for tabOrigin when given. */
   items: VaultItem[] | null;
   matches: LoginMatch[] | null;

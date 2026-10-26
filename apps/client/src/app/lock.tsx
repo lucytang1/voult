@@ -9,7 +9,6 @@ import { fetchSession } from "@/src/lib/queries/session/query";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { selectedVaultId } from "@/src/lib/state/vault-state";
 import { displayVaultName } from "@/src/lib/vault/name";
-import { Lock as LockIcon, AlertTriangle } from "lucide-react";
 
 /**
  * Lock screen: the selected vault's keys are absent. Unlock re-derives the
@@ -28,6 +27,11 @@ import { Lock as LockIcon, AlertTriangle } from "lucide-react";
  *
  * A vault the server no longer knows about is an availability error, not a
  * fourth state: we stay locked, keep the selection, and offer switch/create.
+ *
+ * Layout: the same two-panel frame as the landing page (`app/index.tsx`) —
+ * wordmark on the left, an action card in the right rail. The card caps the
+ * form at ~400px, so the password field and the button never stretch across a
+ * wide display.
  */
 export default function Lock() {
   // Only valid in the "locked" state; anything else bounces to its canonical page.
@@ -85,91 +89,137 @@ export default function Lock() {
 
   // The server no longer has this vault. There is nothing to unlock into, so
   // the password form would only produce confusing errors — offer recovery.
+  // Same two-panel frame as the landing page, so a dead vault still reads as
+  // part of the product rather than as a raw error page.
   if (vaultUnavailable) {
     return (
-      <View className="flex-1 items-center justify-center bg-ground px-6">
-        <View className="w-12 h-12 rounded-full bg-card items-center justify-center mb-4 border border-border">
-          <AlertTriangle size={22} color="#E0A458" />
+      <View className="flex-1 flex-col bg-ground md:flex-row">
+        {/* Left — copy panel, same frame as the landing page: headline plus a
+            muted line. No wordmark — the screen states its own name. */}
+        <View className="flex-1 justify-center bg-ground px-6 py-12 md:px-18 md:py-20">
+          <View>
+            <Text className="text-[34px] font-normal leading-[40px] tracking-[-0.02em] text-primary-text">
+              Vault unavailable
+            </Text>
+            <View className="max-w-120 pt-4">
+              <Text className="text-[17px] font-normal leading-6.5 text-muted-text">
+                Your selection has been kept.
+              </Text>
+            </View>
+          </View>
         </View>
-        <Text className="text-primary-text text-xl mb-1">Vault unavailable</Text>
-        <Text className="text-muted-text text-sm mb-2 text-center">
-          {vaultId ? `${displayVaultName(vaultId)} ` : ""}
-          is no longer available on this server.
-        </Text>
-        <Text className="text-muted-text text-xs mb-6 text-center">
-          Your selection has been kept. Switch to another vault or create a new
-          one to continue.
-        </Text>
-        <Pressable
-          className="w-full rounded-md bg-surface border border-border-strong py-2 items-center mb-2"
-          onPress={goToChooser}
-        >
-          <Text className="text-primary-text">Switch vault</Text>
-        </Pressable>
-        <Pressable
-          className="w-full rounded-md bg-surface border border-border py-2 items-center"
-          onPress={goToCreate}
-        >
-          <Text className="text-primary-text">Create a new vault</Text>
-        </Pressable>
+
+        {/* Right — actions rail, identical to the landing page's. */}
+        <View className="w-full items-center justify-center border-border border-t bg-panel p-6 md:w-150 md:border-t-0 md:p-12">
+          <View className="w-full max-w-100 rounded-[20px] border border-border bg-card px-8 py-9">
+            <View className="pt-2">
+              <Text className="mx-auto max-w-[270px] text-center text-[14px] font-normal leading-[20px] text-muted-text">
+                {vaultId ? `${displayVaultName(vaultId)} ` : ""}
+                is no longer available on this server. Switch to another vault or
+                create a new one to continue.
+              </Text>
+            </View>
+
+            <Pressable
+              className="mt-7 w-full items-center justify-center rounded-[10px] border border-border-strong bg-surface px-5 py-2.5"
+              onPress={goToChooser}
+            >
+              <Text className="text-[16px] font-semibold leading-5 text-primary-text">
+                Switch vault
+              </Text>
+            </Pressable>
+            <Pressable
+              className="mt-3 w-full items-center justify-center rounded-[10px] border border-border bg-surface px-5 py-2.5"
+              onPress={goToCreate}
+            >
+              <Text className="text-[16px] font-semibold leading-5 text-primary-text">
+                Create a new vault
+              </Text>
+            </Pressable>
+          </View>
+        </View>
       </View>
     );
   }
 
   return (
-    <View className="flex-1 items-center justify-center bg-ground px-6">
-      <View className="w-12 h-12 rounded-full bg-card items-center justify-center mb-4 border border-border">
-        <LockIcon size={22} color="#D89AC6" />
+    <View className="flex-1 flex-col bg-ground md:flex-row">
+      {/* Left — copy panel, same frame as the landing page: headline plus a
+          muted line. No wordmark — the screen states its own name. */}
+      <View className="flex-1 justify-center bg-ground px-6 py-12 md:px-18 md:py-20">
+        <View>
+          <Text className="text-[34px] font-normal leading-[40px] tracking-[-0.02em] text-primary-text">
+            Voult is locked
+          </Text>
+          {needsReauth ? (
+            <View className="max-w-120 pt-4">
+              <Text className="text-[17px] font-normal leading-6.5 text-muted-text">
+                Your server session expired. Enter your master password to
+                restore access to this vault.
+              </Text>
+            </View>
+          ) : null}
+        </View>
       </View>
-      <Text className="text-primary-text text-xl mb-1">Voult is locked</Text>
-      <Text className="text-muted-text text-sm mb-6">
-        {vaultId ? displayVaultName(vaultId) : ""}
-      </Text>
 
-      {needsReauth ? (
-        <Text className="text-muted-text text-xs mb-4 text-center">
-          Your server session expired. Enter your master password to restore
-          access to this vault.
-        </Text>
-      ) : null}
+      {/* Right — actions rail, identical to the landing page's. */}
+      <View className="w-full items-center justify-center border-border border-t bg-panel p-6 md:w-150 md:border-t-0 md:p-12">
+        <View className="w-full max-w-100 rounded-[20px] border border-border bg-card px-8 py-9">
+          <View className="pt-2">
+            <Text className="mx-auto max-w-[270px] text-center text-[14px] font-normal leading-[20px] text-muted-text">
+              {vaultId ? displayVaultName(vaultId) : ""}
+            </Text>
+          </View>
 
-      <TextField
-        className="mb-4"
-        placeholder="Master password"
-        secureTextEntry
-        value={password}
-        onChangeText={setPassword}
-        onSubmitEditing={onUnlock}
-      />
-      <Pressable
-        className="w-full rounded-md bg-surface border border-border-strong py-2 items-center"
-        onPress={onUnlock}
-        disabled={submitting || !password}
-      >
-        <Text className="text-primary-text">
-          {submitting ? "Unlocking..." : "Unlock"}
-        </Text>
-      </Pressable>
-      {error ? <Text className="text-red-400 mt-3">{error}</Text> : null}
+          {/* The field and the button fill the card; the card's own 400px cap
+              is what keeps them off the full screen width. */}
+          <View className="mt-5">
+            <TextField
+              placeholder="Master password"
+              secureTextEntry
+              value={password}
+              onChangeText={setPassword}
+              onSubmitEditing={onUnlock}
+            />
+          </View>
 
-      <Pressable
-        className="w-full rounded-md py-2 items-center mt-6"
-        onPress={goToChooser}
-      >
-        <Text className="text-muted-text text-xs">Use a different vault</Text>
-      </Pressable>
+          <Pressable
+            className="mt-4 w-full items-center justify-center rounded-[10px] border border-border-strong bg-surface px-5 py-2.5"
+            onPress={onUnlock}
+            disabled={submitting || !password}
+          >
+            <Text className="text-[16px] font-semibold leading-5 text-primary-text">
+              {submitting ? "Unlocking..." : "Unlock"}
+            </Text>
+          </Pressable>
 
-      {/* Case 3. The vault id travels with the link, which the bootstrap uses to
-          route here; the recovery file itself supplies the vault it belongs to,
-          so nothing has to be typed. */}
-      <Pressable
-        className="w-full rounded-md py-2 items-center mt-2"
-        onPress={() => router.push(`/recover?recover=${vaultId ?? ""}` as any)}
-      >
-        <Text className="text-muted-text text-xs">
-          Forgot your master password?
-        </Text>
-      </Pressable>
+          {error ? (
+            <Text className="mt-4 text-center text-sm text-red-400">{error}</Text>
+          ) : null}
+
+          {/* Quiet secondary actions, in the card next to the primary one. */}
+          <Pressable
+            className="mt-6 w-full items-center justify-center py-2"
+            onPress={goToChooser}
+          >
+            <Text className="text-[14px] font-normal text-muted-text">
+              Use a different vault
+            </Text>
+          </Pressable>
+
+          {/* Case 3. The vault id travels with the link, which the bootstrap uses to
+              route here; the recovery file itself supplies the vault it belongs to,
+              so nothing has to be typed. */}
+          <Pressable
+            className="w-full items-center justify-center py-2"
+            onPress={() => router.push(`/recover?recover=${vaultId ?? ""}` as any)}
+          >
+            <Text className="text-[14px] font-normal text-muted-text">
+              Forgot your master password?
+            </Text>
+          </Pressable>
+        </View>
+      </View>
     </View>
   );
 }

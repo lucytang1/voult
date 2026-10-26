@@ -111,6 +111,13 @@ textarea[dir] {
     --color-accent-line: #7C2A63;
     --color-accent-text: #D89AC6;
 
+    /* The icon tile — the white rounded square a favicon sits in, with the
+       letter fallback inked on it. The extension popup mirrors these two
+       values (apps/extension/src/popup/popup.css), so a login looks the same
+       in the app and in the popup. */
+    --color-icon-tile: #F4F2F5;
+    --color-icon-tile-ink: #252833;
+
     /* The app-wide UI face. Overriding Tailwind's `--font-sans` is what makes
        EVERY element inherit Inter (preflight's `html` rule resolves
        `--default-font-family` to `--font-sans`) — no per-screen opt-in.

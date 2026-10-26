@@ -361,6 +361,54 @@ export const FolderSchema = z.object({
 });
 export type Folder = z.infer<typeof FolderSchema>;
 
+// --- Folder views -----------------------------------------------------------
+// Display-only helpers shared by the web app and the extension popup. Folders
+// are labels, never identity: an item whose `folderId` is missing, or points at
+// a folder that no longer exists, renders in "Unfiled" — a real bucket, not an
+// error state. The bucket is never stored.
+export const UNFILED_LABEL = "Unfiled";
+
+/** Folder label for one item, or "Unfiled" when it has no live folder. */
+export function folderNameFor(
+  folders: readonly Folder[],
+  item: { folderId?: string },
+): string {
+  const folder = folders.find((f) => f.id === item.folderId);
+  return folder ? folder.name : UNFILED_LABEL;
+}
+
+/**
+ * Items in one folder view. `folderId === null` means the Unfiled bucket:
+ * items with no folderId OR a dangling one (deleted on another device).
+ */
+export function itemsInFolder(
+  items: readonly VaultItem[],
+  folders: readonly Folder[],
+  folderId: string | null,
+): VaultItem[] {
+  if (folderId !== null) return items.filter((it) => it.folderId === folderId);
+  const known = new Set(folders.map((f) => f.id));
+  return items.filter((it) => !it.folderId || !known.has(it.folderId));
+}
+
+/** Counts for the folder list: total, unfiled, and per-folder. */
+export function countByFolder(
+  items: readonly VaultItem[],
+  folders: readonly Folder[],
+): { all: number; unfiled: number; byId: Record<string, number> } {
+  const byId: Record<string, number> = {};
+  let unfiled = 0;
+  const known = new Set(folders.map((f) => f.id));
+  for (const it of items) {
+    if (!it.folderId || !known.has(it.folderId)) {
+      unfiled++;
+    } else {
+      byId[it.folderId] = (byId[it.folderId] ?? 0) + 1;
+    }
+  }
+  return { all: items.length, unfiled, byId };
+}
+
 export interface DecryptedVault {
   formatVersion: number;
   vaultId: string;
