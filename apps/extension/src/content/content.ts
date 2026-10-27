@@ -204,25 +204,37 @@ async function reportOAuthPageState(): Promise<void> {
     faviconUrl: currentFaviconUrl(),
   });
   if (isErrorResponse(res) || !res.prompt) return;
-  const { provider, origin, accounts } = res;
+  const { provider, origin, accounts, vaultName, folders, folderId, faviconUrl } = res;
   const pageFavicon = currentFaviconUrl();
-  // The banner never types an account for the user: it offers the ones this
+  // The card never types an account for the user: it offers the ones this
   // vault already knows for `provider`, or saves the method alone when it knows
   // none. `account` is therefore either a vault account or "".
-  showOAuthSaveBanner(ssoProviderLabel(provider), origin, accounts, {
-    onConfirm: (account: string) => {
-      void send<{ saved: boolean }>({
-        type: "SAVE_OAUTH_DECISION",
-        provider,
-        account,
-        faviconUrl: pageFavicon,
-      });
+  showOAuthSaveBanner(
+    {
+      providerLabel: ssoProviderLabel(provider),
+      origin,
+      accounts,
+      vaultName,
+      folders,
+      folderId,
+      faviconUrl: faviconUrl ?? pageFavicon,
     },
-    onNever: () => {
-      void send({ type: "NEVER_ORIGIN" });
+    {
+      onConfirm: (account: string, chosenFolderId) => {
+        void send<{ saved: boolean }>({
+          type: "SAVE_OAUTH_DECISION",
+          provider,
+          account,
+          folderId: chosenFolderId,
+          faviconUrl: pageFavicon,
+        });
+      },
+      onNever: () => {
+        void send({ type: "NEVER_ORIGIN" });
+      },
+      onDismiss: () => undefined,
     },
-    onDismiss: () => undefined,
-  });
+  );
 }
 
 // Initial report (content runs at document_idle, DOM is ready).
@@ -264,27 +276,41 @@ async function handleCapture(form: LoginForm): Promise<void> {
   const faviconUrl = currentFaviconUrl();
   const res = await send<SavePrompt | { error: string }>({ type: "LOGIN_CANDIDATE", ...creds, faviconUrl });
   if (isErrorResponse(res) || !res.prompt) return;
-  const { mode, origin, username } = res;
-  showSaveBanner(mode, origin, username, {
-    onConfirm: () => {
-      void send<{ saved: boolean }>({
-        type: "SAVE_DECISION",
-        username: creds.username,
-        password: creds.password,
-        mode,
-        faviconUrl: currentFaviconUrl() ?? faviconUrl,
-      });
+  const { mode, origin, username, vaultName, folders, folderId, faviconUrl: promptIcon } = res;
+  showSaveBanner(
+    {
+      mode,
+      origin,
+      username,
+      vaultName,
+      folders,
+      folderId,
+      // Prefer the worker's icon (it resolves the tab's own favicon first);
+      // the page-declared one is only a fallback for the tile.
+      faviconUrl: promptIcon ?? faviconUrl,
     },
-    onNever: () => {
-      void send({ type: "NEVER_ORIGIN" });
+    {
+      onConfirm: (chosenFolderId) => {
+        void send<{ saved: boolean }>({
+          type: "SAVE_DECISION",
+          username: creds.username,
+          password: creds.password,
+          mode,
+          folderId: chosenFolderId,
+          faviconUrl: currentFaviconUrl() ?? faviconUrl,
+        });
+      },
+      onNever: () => {
+        void send({ type: "NEVER_ORIGIN" });
+      },
+      // Explicit dismiss resolves the retained prompt too — otherwise the next
+      // page load would re-show a card the user already rejected. A redirect
+      // without user action keeps the worker copy, so it re-shows there.
+      onDismiss: () => {
+        void send({ type: "DISMISS_PENDING_SAVE" });
+      },
     },
-    // Explicit dismiss resolves the retained prompt too — otherwise the next
-    // page load would re-show a banner the user already rejected. A redirect
-    // without user action keeps the worker copy, so it re-shows there.
-    onDismiss: () => {
-      void send({ type: "DISMISS_PENDING_SAVE" });
-    },
-  });
+  );
 }
 
 // --- Redirect survival -------------------------------------------------------
@@ -296,21 +322,25 @@ async function handleCapture(form: LoginForm): Promise<void> {
 async function checkPendingSave(): Promise<void> {
   const res = await send<SavePrompt | { error: string }>({ type: "CHECK_PENDING_SAVE" });
   if (isErrorResponse(res) || !res.prompt) return;
-  const { mode, origin, username } = res;
-  showSaveBanner(mode, origin, username, {
-    onConfirm: () => {
-      void send<{ saved: boolean }>({
-        type: "CONFIRM_PENDING_SAVE",
-        faviconUrl: currentFaviconUrl(),
-      });
+  const { mode, origin, username, vaultName, folders, folderId, faviconUrl } = res;
+  showSaveBanner(
+    { mode, origin, username, vaultName, folders, folderId, faviconUrl },
+    {
+      onConfirm: (chosenFolderId) => {
+        void send<{ saved: boolean }>({
+          type: "CONFIRM_PENDING_SAVE",
+          folderId: chosenFolderId,
+          faviconUrl: currentFaviconUrl(),
+        });
+      },
+      onNever: () => {
+        void send({ type: "NEVER_ORIGIN" });
+      },
+      onDismiss: () => {
+        void send({ type: "DISMISS_PENDING_SAVE" });
+      },
     },
-    onNever: () => {
-      void send({ type: "NEVER_ORIGIN" });
-    },
-    onDismiss: () => {
-      void send({ type: "DISMISS_PENDING_SAVE" });
-    },
-  });
+  );
 }
 
 // Fresh document (content runs at document_idle): re-show a pre-redirect

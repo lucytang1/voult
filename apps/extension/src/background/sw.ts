@@ -222,16 +222,19 @@ chrome.runtime.onMessage.addListener(
             // A typed password wins over any in-flight SSO click on this
             // origin — the user chose the password path.
             clearPendingOAuthFor(candidateOrigin);
-            const verdict = await evaluateCandidate(msg.username, msg.password, candidateOrigin);
+            // The tab's own icon is what the user sees on the tab; the page's
+            // declared icon is only the fallback hint.
+            const icon = sender.tab?.favIconUrl ?? msg.faviconUrl ?? null;
+            const verdict = await evaluateCandidate(msg.username, msg.password, candidateOrigin, icon);
             // Retain the prompted capture (memory only) so a sign-in redirect
-            // destroying the page banner can re-show it on the next page.
+            // destroying the page card can re-show it on the next page.
             if (verdict.prompt) {
               setPendingPrompt({
                 username: msg.username,
                 password: msg.password,
                 origin: verdict.origin,
                 mode: verdict.mode,
-                faviconUrl: msg.faviconUrl ?? null,
+                faviconUrl: verdict.faviconUrl ?? icon,
                 at: Date.now(),
               });
             } else if (!verdict.prompt) {
@@ -254,13 +257,13 @@ chrome.runtime.onMessage.addListener(
             break;
           }
           case "CONFIRM_PENDING_SAVE": {
-            // User confirmed the re-shown banner on the post-redirect page.
+            // User confirmed the re-shown card on the post-redirect page.
             // The secret comes from worker memory — the new page never held it.
             const decisionOrigin = tabOrigin(sender.tab);
             if (!decisionOrigin) throw new Error("Unknown tab origin.");
             const canonical = originOfUrl(decisionOrigin);
             const icon = sender.tab?.favIconUrl ?? msg.faviconUrl ?? null;
-            const result = await confirmPendingPrompt(canonical, icon);
+            const result = await confirmPendingPrompt(canonical, icon, msg.folderId);
             sendResponse({ saved: result.saved, offline: result.offline });
             break;
           }
@@ -280,7 +283,14 @@ chrome.runtime.onMessage.addListener(
             // variant), then the page-declared icon. The worker re-validates
             // either; origin is still stamped from the sender tab.
             const icon = sender.tab?.favIconUrl ?? msg.faviconUrl ?? null;
-            const result = await pushSave(msg.username, msg.password, canonical, msg.mode, icon);
+            const result = await pushSave(
+              msg.username,
+              msg.password,
+              canonical,
+              msg.mode,
+              icon,
+              msg.folderId,
+            );
             // Resolved here — the post-redirect page must not re-prompt.
             // Offline keeps the retained prompt so a later page can retry.
             if (result.saved) clearPendingPrompt();
@@ -311,7 +321,13 @@ chrome.runtime.onMessage.addListener(
               break;
             }
             sendResponse(
-              await evaluateOAuthPageState(msg.offers, msg.hasLoginForm, msg.path, pageOrigin),
+              await evaluateOAuthPageState(
+                msg.offers,
+                msg.hasLoginForm,
+                msg.path,
+                pageOrigin,
+                sender.tab?.favIconUrl ?? msg.faviconUrl ?? null,
+              ),
             );
             break;
           }
@@ -323,7 +339,13 @@ chrome.runtime.onMessage.addListener(
             if (!decisionOrigin) throw new Error("Unknown tab origin.");
             const canonical = originOfUrl(decisionOrigin);
             const icon = sender.tab?.favIconUrl ?? msg.faviconUrl ?? null;
-            const result = await pushSaveOAuth(msg.provider, msg.account, canonical, icon);
+            const result = await pushSaveOAuth(
+              msg.provider,
+              msg.account,
+              canonical,
+              icon,
+              msg.folderId,
+            );
             sendResponse({ saved: result.saved, offline: result.offline });
             break;
           }

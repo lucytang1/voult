@@ -75,7 +75,14 @@ import {
   setLocalValue,
   setSessionValue,
 } from "../lib/storage";
-import type { LoginMatch, PopupState, Rank, SavePrompt, OAuthSavePrompt } from "../lib/messaging";
+import type {
+  LoginMatch,
+  PopupState,
+  Rank,
+  SaveFolder,
+  SavePrompt,
+  OAuthSavePrompt,
+} from "../lib/messaging";
 
 const SERVER_URL_KEY = "voult.serverUrl";
 const LOCK_TIMEOUT_KEY = "voult.lockTimeoutMinutes";
@@ -722,6 +729,8 @@ export interface PendingSave {
   origin: string;
   mode: "save" | "update";
   itemId?: string;
+  /** Destination chosen in the save card (null = Unfiled); omitted = no choice. */
+  folderId?: string | null;
   /** Page's declared icon at capture time (re-validated before any write). */
   faviconUrl?: string | null;
 }
@@ -798,17 +807,29 @@ export async function getPendingPrompt(pageOrigin: string): Promise<SavePrompt> 
     pendingPrompt = null;
     return { prompt: false };
   }
-  return { prompt: true, mode: p.mode, origin: canonical, username: p.username };
+  const dest = saveDestinations();
+  return {
+    prompt: true,
+    mode: p.mode,
+    origin: canonical,
+    username: p.username,
+    ...dest,
+    // An update never moves the entry: it stays in the folder it already has.
+    folderId: p.mode === "update" ? (exact?.folderId ?? null) : dest.folderId,
+    faviconUrl: sanitizeFaviconUrl(p.faviconUrl) ?? fallbackFaviconUrl(canonical) ?? null,
+  };
 }
 
 /**
  * Confirms the retained prompt using the stored secret. The caller may pass
- * the new page's icon (preferred); otherwise the capture-time icon is used.
+ * the new page's icon (preferred) and the destination picked in the card;
+ * otherwise the capture-time icon is used and the first folder is the default.
  * Keeps the prompt when offline so a later page can retry; clears on save.
  */
 export async function confirmPendingPrompt(
   pageOrigin: string,
   faviconUrl?: string | null,
+  folderId?: string | null,
 ): Promise<SaveResult> {
   if (!isUnlocked() || !pendingPrompt) throw new Error("Nothing to save.");
   let canonical: string;
@@ -824,7 +845,7 @@ export async function confirmPendingPrompt(
     throw new Error("Saved login expired; please capture it again.");
   }
   const icon = sanitizeFaviconUrl(faviconUrl) ?? sanitizeFaviconUrl(p.faviconUrl) ?? null;
-  const result = await pushSave(p.username, p.password, canonical, p.mode, icon);
+  const result = await pushSave(p.username, p.password, canonical, p.mode, icon, folderId);
   if (result.saved) pendingPrompt = null;
   return result;
 }
@@ -864,6 +885,25 @@ export async function markNeverOrigin(origin: string): Promise<void> {
 
 export { NEVER_PREFIX };
 
+/**
+ * Destination choices for the save card: the vault label (display only), the
+ * folder list in document order, and the folder a save lands in when the user
+ * picks nothing (the first one — the web app files new items in a folder, not
+ * in the Unfiled bucket). Read straight from the unlocked cache, so rendering
+ * the card never costs a network hop.
+ */
+function saveDestinations(): {
+  vaultName: string | null;
+  folders: SaveFolder[];
+  folderId: string | null;
+} {
+  return {
+    vaultName,
+    folders: folders.map((f) => ({ id: f.id, name: f.name })),
+    folderId: folders[0]?.id ?? null,
+  };
+}
+
 // --- M2: offer to save / update ------------------------------------------------
 //
 // Dedupe runs against the in-memory cache while unlocked; when locked the
@@ -883,11 +923,16 @@ function siteLabelForOrigin(origin: string): string {
   }
 }
 
-/** Decides whether a captured login deserves a save/update prompt. */
+/**
+ * Decides whether a captured login deserves a save/update prompt. `faviconUrl`
+ * is the page's icon hint, used for the card's tile only (never stored here —
+ * the write path re-sanitizes whatever it finally keeps).
+ */
 export async function evaluateCandidate(
   username: string,
   password: string,
   pageOrigin: string,
+  faviconUrl?: string | null,
 ): Promise<SavePrompt> {
   if (!isUnlocked()) return { prompt: false };
   let canonical: string;
@@ -899,13 +944,26 @@ export async function evaluateCandidate(
   if (!username || !password) return { prompt: false };
   if (await isNeverOrigin(canonical)) return { prompt: false };
   touch();
+  const dest = saveDestinations();
+  const icon = sanitizeFaviconUrl(faviconUrl) ?? fallbackFaviconUrl(canonical) ?? null;
   // Only origin-bound items participate: legacy items without an origin will
   // prompt a fresh save once (healing them into origin-bound entries; the old
   // row can be deleted in the web app). Documented v1 trade-off.
   const exact = items.find((i) => i.origin === canonical && i.username === username);
   if (exact && exact.password === password) return { prompt: false };
-  if (exact) return { prompt: true, mode: "update", origin: canonical, username };
-  return { prompt: true, mode: "save", origin: canonical, username };
+  if (exact) {
+    return {
+      prompt: true,
+      mode: "update",
+      origin: canonical,
+      username,
+      ...dest,
+      // An update keeps the entry in the folder it already lives in.
+      folderId: exact.folderId ?? null,
+      faviconUrl: icon,
+    };
+  }
+  return { prompt: true, mode: "save", origin: canonical, username, ...dest, faviconUrl: icon };
 }
 
 export interface SaveResult {
@@ -924,6 +982,11 @@ export interface SaveResult {
  * fail the save. Fresh saves store it (falling back to `<origin>/favicon.ico`
  * when the page declares none); updates heal a missing/stale icon alongside
  * the password change via the same per-field LWW path.
+ *
+ * `folderId` is the destination picked in the save card: a folder id, or null
+ * for the Unfiled bucket. Omitted (an older content script) keeps the historic
+ * behaviour of filing the capture in the vault's first folder. Updates ignore
+ * it — they never move an entry.
  */
 export async function pushSave(
   username: string,
@@ -931,8 +994,13 @@ export async function pushSave(
   origin: string,
   mode: "save" | "update",
   faviconUrl?: string | null,
+  folderId?: string | null,
 ): Promise<SaveResult> {
   if (!isUnlocked()) throw new Error("Vault is locked.");
+
+  // Resolve the destination once, outside the CAS retry: the collection point
+  // must not change between attempts.
+  const destination = folderId === undefined ? (folders[0]?.id ?? null) : folderId;
 
   // Icon resolution happens against the in-memory cache while unlocked so an
   // update can heal a missing icon. The op is fixed across CAS retries (creates
@@ -953,6 +1021,9 @@ export async function pushSave(
               password,
               sso: [],
               origin,
+              // Omitted rather than null: the document schema treats a missing
+              // folderId as the Unfiled bucket, and does not accept null.
+              ...(destination ? { folderId: destination } : {}),
               ...(icon ? { faviconUrl: icon } : {}),
             },
           };
@@ -977,7 +1048,16 @@ export async function pushSave(
           };
         })();
 
-  return pushSingleIntent(op, () => setPendingSave({ username, password, origin, mode, faviconUrl: sanitizeFaviconUrl(faviconUrl) ?? null }));
+  return pushSingleIntent(op, () =>
+    setPendingSave({
+      username,
+      password,
+      origin,
+      mode,
+      folderId: destination,
+      faviconUrl: sanitizeFaviconUrl(faviconUrl) ?? null,
+    }),
+  );
 }
 
 /**
@@ -997,23 +1077,10 @@ async function pushSingleIntent(
   const pinId = id;
   const sessionChanged = () => currentVaultId() !== pinId || currentVaultKey() !== key;
 
-  // File extension captures into the vault's first folder (Personal) when the
-  // capture did not name one, so they do not land in the Unfiled bucket.
+  // The destination is decided by the caller (pushSave / pushSaveOAuth) before
+  // the first attempt, so a create never silently lands somewhere else after a
+  // retry. A missing folderId is the Unfiled bucket.
   const payload = { ...(op.payload as Record<string, unknown>) };
-  if (op.operation === "create" && payload.folderId === undefined) {
-    try {
-      const vd = await fetchVault(serverUrl);
-      const pl = await decrypt(vd.vault.vault, vd.vault.vaultiv, key);
-      const first = parseVaultDocument(pl).folders[0]?.id;
-      if (first) payload.folderId = first;
-    } catch (e) {
-      if (isNetworkError(e)) {
-        onOffline();
-        return { saved: false, offline: true };
-      }
-      // Non-network failure: leave folderId unset; the item lands in Unfiled.
-    }
-  }
   const enc = await encrypt(JSON.stringify(payload), key);
   const intent = {
     id: uuid(),
@@ -1151,6 +1218,7 @@ export async function evaluateOAuthPageState(
   hasLoginForm: boolean,
   path: string,
   pageOrigin: string,
+  faviconUrl?: string | null,
 ): Promise<OAuthSavePrompt> {
   void offers;
   if (!isUnlocked() || !pendingOAuth) return { prompt: false };
@@ -1189,9 +1257,16 @@ export async function evaluateOAuthPageState(
   }
   pendingOAuth = null;
   // Offer what the vault already knows about this provider. Bounded so a large
-  // vault cannot turn the banner into an unreadable list of accounts.
+  // vault cannot turn the card into an unreadable list of accounts.
   const accounts = ssoAccountsForProvider(items, pending.provider).slice(0, ACCOUNT_CHOICE_LIMIT);
-  return { prompt: true, provider: pending.provider, origin: canonical, accounts };
+  return {
+    prompt: true,
+    provider: pending.provider,
+    origin: canonical,
+    accounts,
+    ...saveDestinations(),
+    faviconUrl: sanitizeFaviconUrl(faviconUrl) ?? fallbackFaviconUrl(canonical) ?? null,
+  };
 }
 
 /**
@@ -1220,6 +1295,7 @@ export async function pushSaveOAuth(
   account: string,
   origin: string,
   faviconUrl?: string | null,
+  folderId?: string | null,
 ): Promise<SaveResult> {
   if (!isUnlocked()) throw new Error("Vault is locked.");
   const trimmed = account.trim();
@@ -1229,6 +1305,9 @@ export async function pushSaveOAuth(
   } catch {
     throw new Error("Unknown site origin.");
   }
+  // Same destination rule as password saves: an explicit card choice wins,
+  // null means Unfiled, and "no choice" files into the first folder.
+  const destination = folderId === undefined ? (folders[0]?.id ?? null) : folderId;
   // Already stored on this origin — nothing to write. Reachable because the
   // banner offers vault-wide accounts: picking an account this site already
   // signs in with is a legitimate choice that simply needs no change.
@@ -1263,6 +1342,8 @@ export async function pushSaveOAuth(
           ...(trimmed ? { username: trimmed } : {}),
           sso: [{ provider, account: trimmed }],
           origin: canonical,
+          // Missing (not null) = Unfiled, per the document schema.
+          ...(destination ? { folderId: destination } : {}),
           ...(icon ? { faviconUrl: icon } : {}),
         },
       };

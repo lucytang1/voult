@@ -69,19 +69,22 @@ export type ExtensionMessage =
   // Popup → worker → content (active tab).
   | { type: "FILL_ACTIVE_TAB"; id: string }
   // M2 save flow: content reports a capture; worker dedupes and answers
-  // whether to prompt, then content relays the user's banner decision.
+  // whether to prompt, then content relays the user's save-card decision.
   // faviconUrl is the page's declared icon (fallback hint — the worker
   // prefers the tab's own icon and re-validates either; origin is still
   // stamped from sender.tab.url).
+  // `folderId` is the destination the user picked in the card: a folder id,
+  // or null for the Unfiled bucket. Omitted = no explicit choice, which keeps
+  // the old "file it in the first folder" behaviour for older content scripts.
   | { type: "LOGIN_CANDIDATE"; username: string; password: string; faviconUrl?: string | null }
-  | { type: "SAVE_DECISION"; username: string; password: string; mode: "save" | "update"; faviconUrl?: string | null }
+  | { type: "SAVE_DECISION"; username: string; password: string; mode: "save" | "update"; folderId?: string | null; faviconUrl?: string | null }
   // Redirect survival: the login banner lives in the page DOM, so a sign-in
   // redirect destroys it. The worker therefore retains the last prompted
   // capture (memory only) and each freshly loaded page re-asks for it.
   | { type: "CHECK_PENDING_SAVE" }
   // Confirm uses the worker-retained credentials — the post-redirect page has
   // no password field to read, and this avoids sending the secret back down.
-  | { type: "CONFIRM_PENDING_SAVE"; faviconUrl?: string | null }
+  | { type: "CONFIRM_PENDING_SAVE"; folderId?: string | null; faviconUrl?: string | null }
   | { type: "DISMISS_PENDING_SAVE" }
   // OAuth sign-in memory: content reports offered providers + clicks; the
   // worker (which stamps origins from sender.tab.url) decides whether the
@@ -90,22 +93,54 @@ export type ExtensionMessage =
   | { type: "OAUTH_PAGE_STATE"; offers: SsoProvider[]; hasLoginForm: boolean; path: string; faviconUrl?: string | null }
   // `account` is the IdP account this sign-in used, or "" when the vault knows
   // no account for that provider (the worker then stores the provider alone).
-  | { type: "SAVE_OAUTH_DECISION"; provider: SsoProvider; account: string; faviconUrl?: string | null }
+  | { type: "SAVE_OAUTH_DECISION"; provider: SsoProvider; account: string; folderId?: string | null; faviconUrl?: string | null }
   | { type: "NEVER_ORIGIN" };
+
+/** One destination option in the save card's folder picker. */
+export interface SaveFolder {
+  id: string;
+  name: string;
+}
+
+/**
+ * Fields every prompted save carries so the card can render the same shell:
+ * what is being saved, where it will land, and which icon to show. The worker
+ * already holds all of this while unlocked, so nothing extra is stored.
+ */
+interface SaveCardContext {
+  /** Vault label (display only; the destination is the folder). */
+  vaultName: string | null;
+  /** Destination options in document order (empty when the vault has none). */
+  folders: SaveFolder[];
+  /** Preselected destination: first folder on a save, the item's folder on an update; null = Unfiled. */
+  folderId: string | null;
+  /** Display-only icon URL, already validated/sanitized by the worker. */
+  faviconUrl: string | null;
+}
 
 export type SavePrompt =
   | { prompt: false }
-  | { prompt: true; mode: "save" | "update"; origin: string; username: string };
+  | ({
+      prompt: true;
+      mode: "save" | "update";
+      origin: string;
+      username: string;
+    } & SaveCardContext);
 
 /**
  * Whether a completed SSO sign-in on `origin` deserves a save prompt.
- * `accounts` are the vault's known accounts for that provider — the banner
+ * `accounts` are the vault's known accounts for that provider — the card
  * offers them as a choice because a password manager cannot observe which IdP
  * account was used. Empty means "save as Sign in with <provider>".
  */
 export type OAuthSavePrompt =
   | { prompt: false }
-  | { prompt: true; provider: SsoProvider; origin: string; accounts: string[] };
+  | ({
+      prompt: true;
+      provider: SsoProvider;
+      origin: string;
+      accounts: string[];
+    } & SaveCardContext);
 
 /** Fill payload returned for exactly one credential, on explicit gesture. */
 export interface FillPayload {

@@ -25,7 +25,7 @@ right, and a top bar with the vault menu, search, and folder filter.
 - **Locked / Connect** — same palette and menu, with the password/pairing
   flows unchanged.
 
-The injected page UI (suggest dropdown, save banner) intentionally stays
+The injected page UI (suggest dropdown, save card) intentionally stays
 vanilla TS in a closed Shadow DOM: content scripts are classic, import-free
 bundles, and shipping React into every page would cost size and isolation for
 no gain. The popup is the React surface.
@@ -81,10 +81,18 @@ cd apps/extension && npm install && npm run build
 
 ## M2 manual matrix (offer to save)
 
-- New login submit → one "Save login?" banner (username + origin, never the
-  password); Dismiss/Never leave nothing behind; Save persists across browser
-  restart (verify in the web app).
-- Changed password → "Update saved login?"; identical re-login is silent.
+- New login submit → one save card (Title / Username-email / masked Password —
+  the real password is never rendered); it names the destination folder in the
+  header pill, and "Not now" / the close button / the kebab's "Never for this
+  site" each leave nothing behind except that last one's origin rule. Add
+  persists across browser restart (verify in the web app).
+- Destination: the pill lists the vault's folders plus Unfiled and preselects
+  the first folder; picking another one files the saved login there (verify the
+  folder in the web app). The pill truncates, its tooltip shows
+  `<vault> › <folder>`. Update mode shows the same pill read-only, because an
+  update must not silently move the entry.
+- Changed password → "Update saved login?" with the same rows; identical
+  re-login is silent.
 - Offline save → "will retry" surfaced; candidate kept in memory only (never
   on disk); flushes on the next online save trigger.
 - Concurrent web-app + extension edits → `409` retry, per-field LWW, no
@@ -96,17 +104,18 @@ Test page needs two SSO buttons (Google + GitHub hrefs or text) on an
 `https` origin with a password form beside them.
 - Vault holding NO account for a provider + click "Continue with Google" →
   complete the IdP dance and return to the app (usually a page with no SSO
-  buttons, e.g. `/dashboard`) → one "Signed in with Google?" banner with a
-  single `Save "Sign in with Google"` button. Saving creates a passwordless
-  item with NO `username` and the method `Google` (verify in web app:
-  "Sign-in methods: Google", no password block); the popup and the suggest
-  dropdown label that row "Sign in with Google".
-- Vault holding ≥1 account for a provider → the banner lists exactly those
-  accounts as rows, nothing else; picking one creates/updates a passwordless
-  item whose `username` IS that account. The list is capped at 8. An account
-  qualifies if the vault has an explicit SSO method for that provider **or** a
-  login on the provider's own domain (`github.com` + handle `lucytang1` is
-  that person's GitHub account). Seed one in the web app first, e.g.
+  buttons, e.g. `/dashboard`) → one "Signed in with Google?" card that names
+  the method and offers Add (with no account in the vault, it saves the method
+  only). Saving creates a passwordless item with NO `username` and the method
+  `Google` (verify in web app: "Sign-in methods: Google", no password block);
+  the popup and the suggest dropdown label that row "Sign in with Google".
+- Vault holding ≥1 account for a provider → the card lists exactly those
+  accounts as radio rows (first preselected), nothing else; Add creates/updates
+  a passwordless item whose `username` IS the selected account. A row is a
+  choice, not a save — a mis-click cannot write. The list is capped at 8. An
+  account qualifies if the vault has an explicit SSO method for that provider
+  **or** a login on the provider's own domain (`github.com` + handle `lucytang1`
+  is that person's GitHub account). Seed one in the web app first, e.g.
   `you@gmail.com` and `you@acme.com` on some other site.
 - Picking an account the site already stores → no duplicate row, no error
   (the method is already there).
