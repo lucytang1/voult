@@ -5,26 +5,125 @@
  
 @import "nativewind/theme";
 
-/* Dark background from the start - prevents white flash */
+/* Dark background from the start - prevents white flash.
+   Must match --color-ground below or the first paint flashes a different
+   black than the app then renders. */
 html, body, #root {
-  background-color: #0D0208;
+  background-color: #0C0B13;
   min-height: 100%;
 }
 
-/* Web font loading - non-blocking, SEO friendly */
+/* Web font loading - non-blocking, SEO friendly
+
+   Inter (variable) — self-hosted, SIL Open Font License 1.1 (see
+   /fonts/Inter-LICENSE.txt). One file per unicode subset, each carrying the
+   full 100–900 weight axis, so every weight in the UI is the same download.
+   `font-display: swap` keeps first paint instant; the fallback is the
+   platform UI font, so the swap is a near-invisible reflow.
+
+   The old "matrix" / "neo" faces pointed at files that were never shipped —
+   they 404ed on every page load and no element used them. */
 @font-face {
-  font-family: "matrix";
-  src: url("/fonts/matrix-code.otf") format("opentype");
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-weight: 100 900;
   font-display: swap;
+  src: url("/fonts/InterVariable-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 @font-face {
-  font-family: "neo";
-  src: url("/fonts/neo-pc.otf") format("opentype");
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-weight: 100 900;
   font-display: swap;
+  src: url("/fonts/InterVariable-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* react-native-web stamps `font: 14px <system stack>` on every Text and
+   TextInput through its atomic stylesheet. That is a direct declaration on the
+   element, so it beats the family inherited from <html> — which meant the app
+   font never reached the text even though <html> asked for Inter. Re-assert
+   the family on the elements react-native-web actually renders. The
+   attribute-qualified selectors are deliberately more specific than RNW's
+   single class, so they win regardless of stylesheet order. */
+input[dir],
+textarea[dir],
+div[dir],
+span[dir] {
+  font-family: var(--font-sans);
+}
+
+/* The browser's default focus ring (a blue outline) is replaced by the app's
+   own accent border on the field. Native keeps its own focus behaviour —
+   this rule only affects the web build. */
+input[dir],
+textarea[dir] {
+  outline: none;
 }
 
 @theme {
-    /* Colors */
+    /* ------------------------------------------------------------------
+       Voult palette — synced from the Paper file "Voult".
 
+       The first six are the design file's own tokens (page "01 Landing - /"),
+       copied verbatim. The rest are derived steps in the same plum scene:
+       the Paper set only names six roles, but the app needs intermediate
+       surfaces (cards on panels, inputs on cards) and a *visible* accent
+       line — #3F072C is a fill colour and disappears as a border or ring
+       against #0C0B13. Derived values live here so the whole palette can be
+       retuned from one block.
+       ------------------------------------------------------------------ */
+    --color-ground: #0C0B13;      /* page background (Paper) */
+    --color-surface1: #1a1a1b;        /* cards on ground */
+    --color-surface2: #18191a;           /* Card Hovers, Selected Navs and menus, Textboxes */
+    --color-panel: #160D1B;       /* raised panel — landing action rail (Paper) */
+    --color-hairline: #34343a;    /* Primary outlines and borders */
+    --color-hairline-accent: #352235;      /* Accented outlines and borders */
+    --color-primary-text: #F2F4F7;/* headings, body, button labels (Paper) */
+    --color-muted-text: #7E8590;  /* secondary copy, placeholders (Paper) */
+    --color-accent: #3F072C;      /* accent fill (Paper) */
+
+    /* Derived surfaces — each step lighter than the one it sits on.
+       These lifts are deliberately small. This palette is a dark plum
+       range, so no fill can reach the 3:1 UI-component ratio without going
+       bright magenta and breaking the mood; legibility is carried by
+       --color-primary-text (15:1 on every surface here), and controls are
+       defined by their edge, not by fill contrast. */
+    --color-surface: #2E1736;     /* inputs, chips, secondary buttons */
+    --color-surface-hover: #3B1D43;
+
+    /* Derived lines. --color-border is the Paper hairline (dividers,
+       card outlines). This is the emphatic one — use it where an edge has
+       to read as a control, e.g. the primary button outline. */
+    /*--color-border-strong: #5E3A60;*/
+
+    /* Derived accent steps: hover lift, a line bright enough to read
+       as a selection ring / focus border on the dark ground, and a light
+       tint for accent-coloured TEXT. --color-accent-line is a border colour
+       only — at 2:1 on the ground it fails text contrast, hence accent-text. */
+    --color-accent-hover: #57103E;
+    --color-accent-line: #7C2A63;
+    --color-accent-text: #D89AC6;
+
+    /* The icon tile — the white rounded square a favicon sits in, with the
+       letter fallback inked on it. The extension popup mirrors these two
+       values (apps/extension/src/popup/popup.css), so a login looks the same
+       in the app and in the popup. */
+    --color-icon-tile: #F4F2F5;
+    --color-icon-tile-ink: #252833;
+
+    /* The app-wide UI face. Overriding Tailwind's `--font-sans` is what makes
+       EVERY element inherit Inter (preflight's `html` rule resolves
+       `--default-font-family` to `--font-sans`) — no per-screen opt-in.
+       NativeWind re-points `--font-sans` to the platform font on iOS/Android
+       (its unlayered `@media ios/android` rules win there), so the native
+       builds keep the system font, as they always have. */
+    --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif,
+      "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
 }

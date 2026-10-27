@@ -10,7 +10,7 @@ Voult is a local-first password manager with an **Expo web client** and an **Act
 
 - **Vault-centric auth** — signup/login with vault ID + verifier, no account collection
 - **Zero-knowledge crypto (v2)** — PBKDF2-HMAC-SHA256 → HKDF (auth / vault-wrap) → random 256-bit vault key (AES-GCM), fresh IV per wrap/encrypt, non-exportable CryptoKeys
-- **Authenticated states** — `not_authenticated` vs `authenticated` (`locked` / `unlocked`). Lock wipes keys and decrypted vault but keeps session and device envelope; unlock re-derives locally without a network round-trip
+- **Vault selection is the app state** — a `VaultState` union of `no_vault` / `locked(vaultId)` / `unlocked(vaultId, vaultKey)`. The vault key lives inside the union, so "unlocked without a key" cannot be constructed. Lock wipes keys and decrypted vault but keeps session and device envelope; unlock re-derives locally without a network round-trip
 - **Per-vault isolation** — one OPFS database file and one IndexedDB record per vault; multiple vaults can coexist in one browser profile without leaking
 - **Offline-first sync** — encrypted intent log (create/update/delete) with deterministic merge (idempotent create, last-write-wins update, sticky delete, quarantine) and server compare-and-swap versioning
 - **Google Drive appDataFolder** — optional encrypted backup via OAuth under `/api/google/*`
@@ -121,7 +121,9 @@ See `.env.example` for a copy-paste template.
 
 ## Auth & Storage
 
-**Auth machine:** `not_authenticated` → landing page; `locked` → lock screen; `unlocked` → home. The bootstrap tries to restore a session then silently unlock with the device key; a persisted lock flag prevents auto-unlock after an explicit lock.
+**Vault state machine:** `no_vault` → landing page; `locked` → lock screen; `unlocked` → home. Routing reads `vault.status` off the same union that holds the key, so the screen and the key material cannot disagree. The bootstrap tries to restore a session then silently unlock with the device key; a persisted lock record prevents auto-unlock after an explicit lock.
+
+The server session (HttpOnly cookie naming a vault) is tracked orthogonally to this state — it is an authorization fact, not an identity fact. The selected vault is the app's identity; there is no user or email.
 
 **Per-vault namespacing:**
 
@@ -133,7 +135,7 @@ See `.env.example` for a copy-paste template.
 | Query cache | TanStack Query | Cleared on session expiry |
 | `sessionStorage["voult.locked"]` | profile-global flag | Survives reload so the lock screen is not auto-unlocked |
 
-Teardown is centralized (close DB → delete device records → wipe state → clear cache) and invoked by the 401 interceptor. There is **no logout button** — the unauthenticated state is reached only via session expiry or invalidation.
+Session loss is centralized (close DB → wipe keys/plaintext → mark the server session missing → clear cache) and invoked by the 401 interceptor. It **retains** the vault selection and the local device key: an expired cookie is an authorization fact, not a change of identity, so you stay on your own vault's lock screen and re-authenticate with the master password. There is **no logout button** — switching and creating vaults are the supported ways to change the selected vault. Settings → Security offers "Forget this device" to revoke the retained device key.
 
 ---
 

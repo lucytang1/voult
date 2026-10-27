@@ -58,7 +58,11 @@ pub async fn get_vault(pool: web::Data<DbPool>, session: Session) -> HttpRespons
         Ok(Some(vault)) => vault,
         Ok(None) => {
             // A session referencing a missing vault is treated as no auth.
-            return error_response(StatusCode::UNAUTHORIZED, "session required", "SESSION_REQUIRED");
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "session required",
+                "SESSION_REQUIRED",
+            );
         }
         Err(e) => {
             log::error!("failed to fetch vault: {:?}", e);

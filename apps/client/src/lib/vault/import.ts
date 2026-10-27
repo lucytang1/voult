@@ -1,7 +1,6 @@
 import { passwordLoginFlow } from "../auth/flows/login";
 import { fetchCryptoParams } from "../queries/cryptoParams/query";
 import type { UnlockedSession } from "../auth/flows";
-import { http } from "../queries/http";
 import {
   createAuthKey,
   getAuthVerifierB64,
@@ -11,25 +10,33 @@ import {
   decrypt,
 } from "../crypto/index.web";
 import { persistDeviceSecrets } from "../auth/utils";
-import { register } from "../queries/SignUp/query";
-import { readGoogleVaultPending, readGoogleVault } from "../google/api";
+import { submitRegistration } from "./registration";
+import type { RegisterRequest } from "../queries/SignUp/api.schema";
+import { readCloudVaultPending, readCloudVault } from "../cloud/api";
 import type { VoultPackage } from "../state/type";
+import { DEFAULT_VAULT_NAME, normalizeVaultName } from "./name";
+import { parseVaultDocument } from "@voult/vault-core";
 
 /**
- * Imports a vault from Google Drive.
+ * Imports a vault from a cloud provider (Google Drive today).
  *
- * Case 1 (no session, pending OAuth): vault may NOT exist on this server's DB
- * yet — it only exists as an encrypted VoultPackage on Drive. The old code
- * called GET /get_crypto_params which returns VAULT_NOT_FOUND. Fix: on
- * VAULT_NOT_FOUND, fetch the Drive package via pendingState/fileId (or
- * session-bound read), verify the master password locally by unwrapping the
- * vault key + decrypting the snapshot, then register the vault on this server
- * so future logins succeed.
+ * Two situations, both ending in an unlocked session:
  *
- * If the vault already exists on server, the fast path just does the normal
- * passwordLoginFlow (server verifier check + device envelope).
+ *   - The vault is already on this server: the master password is all that is
+ *     needed, so this is the normal `passwordLoginFlow`.
+ *   - The vault exists only as an encrypted package on the provider: it does NOT
+ *     exist on this server yet. The package is fetched, the master password is
+ *     verified locally by unwrapping the vault key and decrypting the snapshot,
+ *     and the vault is then registered here.
+ *
+ * Registration uses the recovery material the package carries — the SAME
+ * recovery envelope and salt the vault was created with. It does not mint a new
+ * secret, so the recovery file the user already saved at creation keeps working
+ * against this server too. There is no recovery step here: recovery is a
+ * property of the vault from creation, and a restore is not a new vault.
  */
-export async function importVaultFromGoogle(args: {
+
+export async function importVaultFromCloud(args: {
   vaultId: string;
   fileId?: string;
   masterPassword: string;
@@ -42,7 +49,12 @@ export async function importVaultFromGoogle(args: {
   if (shouldTryServerFirst) {
     try {
       const params = await fetchCryptoParams(args.vaultId);
-      return await passwordLoginFlow(args.vaultId, args.masterPassword, params.salt, params.iterations);
+      return await passwordLoginFlow(
+        args.vaultId,
+        args.masterPassword,
+        params.salt,
+        params.iterations,
+      );
     } catch (e: any) {
       const code = e?.response?.data?.code as string | undefined;
       // Only fallback on VAULT_NOT_FOUND; other errors (network, etc.) bubble up.
@@ -57,10 +69,10 @@ export async function importVaultFromGoogle(args: {
   // Use pendingState token if we have no session (Case 1), else session-bound read.
   let pkgB64: string;
   if (args.pendingState) {
-    const res = await readGoogleVaultPending(args.pendingState, args.fileId!);
+    const res = await readCloudVaultPending(args.pendingState, args.fileId!);
     pkgB64 = res.package;
   } else {
-    const res = await readGoogleVault({ file_id: args.fileId });
+    const res = await readCloudVault({ file_id: args.fileId });
     pkgB64 = res.package;
   }
 
@@ -97,6 +109,15 @@ export async function importVaultFromGoogle(args: {
   if (!pkg.passwordKeyEnvelope?.wrappedVaultKey || !pkg.passwordKeyEnvelope?.iv) {
     throw new Error("Package missing password envelope");
   }
+  // The recovery envelope is what lets this restore keep the vault's existing
+  // recovery key. A package without it is not a package we can restore without
+  // silently changing the user's recovery material, so refuse it.
+  const recovery = pkg.recoveryEnvelope;
+  if (!recovery?.salt || !recovery.verifier || !recovery.wrappedVaultKey || !recovery.iv) {
+    throw new Error(
+      "That backup has no recovery material, so it cannot be restored without changing the vault's recovery key.",
+    );
+  }
 
   // Verify master password locally: derive wrapping key and unwrap vault key.
   let vaultKeyRaw: Uint8Array;
@@ -120,55 +141,69 @@ export async function importVaultFromGoogle(args: {
   } catch {
     throw new Error("Incorrect password.");
   }
-  let decryptedVault: { items?: any[] };
+  let decryptedVault: { name?: unknown; folders?: any[]; items?: any[] };
   try {
-    decryptedVault = JSON.parse(plain) as { items?: any[] };
+    decryptedVault = JSON.parse(plain) as { name?: unknown; folders?: any[]; items?: any[] };
   } catch {
     throw new Error("Package snapshot decrypt produced invalid JSON");
   }
 
-  // Derive verifier for registration / login.
+  // Derive verifier for registration. The recovery material comes straight from
+  // the package — no `generateRecoveryMaterial` here, so the vault keeps the one
+  // recovery key it was created with.
   const authKey = await createAuthKey(args.masterPassword, salt, iterations);
   const vaultVerifier = await getAuthVerifierB64(authKey);
 
-  // Try to register this vault on this server instance so future
-  // get_crypto_params / get_vault succeed. If it already exists (race),
-  // fall back to password login.
+  // Parse through the shared decoder so legacy packages (no `folders` key) are
+  // interpreted as a single Personal folder, identically to every other surface.
+  const parsedDoc = parseVaultDocument(plain);
+  const parsedItems = parsedDoc.items;
+  const name = parsedDoc.name;
+  const parsedFolders = parsedDoc.folders;
+
+  const request: RegisterRequest = {
+    vault_id: pkg.vaultId,
+    vault_verifier: vaultVerifier,
+    salt,
+    iterations,
+    vault: pkg.snapshot.ciphertext,
+    vaultiv: pkg.snapshot.iv,
+    crypto_version: pkg.cryptoVersion ?? 2,
+    vault_key_wrap: pkg.passwordKeyEnvelope.wrappedVaultKey,
+    vault_key_wrap_iv: pkg.passwordKeyEnvelope.iv,
+    recovery_verifier: recovery.verifier,
+    recovery_salt: recovery.salt,
+    recovery_wrap: recovery.wrappedVaultKey,
+    recovery_wrap_iv: recovery.iv,
+  };
+
+  console.info("Vault package verified locally; registering it on this server");
+
   try {
-    await register({
-      vault_id: pkg.vaultId,
-      vault_verifier: vaultVerifier,
-      salt,
-      iterations,
-      vault: pkg.snapshot.ciphertext,
-      vaultiv: pkg.snapshot.iv,
-      crypto_version: pkg.cryptoVersion ?? 2,
-      vault_key_wrap: pkg.passwordKeyEnvelope.wrappedVaultKey,
-      vault_key_wrap_iv: pkg.passwordKeyEnvelope.iv,
-    });
+    const { lockEpoch } = await submitRegistration(request);
+    // Persist the device envelope so the next unlock is a local unwrap.
+    await persistDeviceSecrets(vaultKeyRaw, pkg.vaultId);
+    return {
+      session: {
+        vaultId: pkg.vaultId,
+        cryptoVersion: pkg.cryptoVersion ?? 2,
+      },
+      vaultKey,
+      decryptedVault: { formatVersion: 1, vaultId: pkg.vaultId, name, folders: parsedFolders, items: parsedItems },
+      // `/register` creates the row at version 1, regardless of the revision the
+      // backup was mirrored at on its source server. The local document version
+      // must match the server's, or the next sync's base_version is wrong.
+      version: 1,
+      lockEpoch,
+    };
   } catch (regErr: any) {
     const regCode = regErr?.response?.data?.code as string | undefined;
-    if (regCode === "VAULT_EXISTS") {
-      // Vault was created concurrently — just login normally.
-      const params = await fetchCryptoParams(args.vaultId);
-      return await passwordLoginFlow(args.vaultId, args.masterPassword, params.salt, params.iterations);
-    }
-    // If register failed for other reason, but we already decrypted the package,
-    // treat the Drive package as the local vault and still create a session
-    // locally? We must have a server session for the app to be "unlocked",
-    // so rethrow.
-    throw regErr;
+    if (regCode !== "VAULT_EXISTS") throw regErr;
+    // Registered concurrently on another device between the package read and
+    // this write. That row is authoritative and already carries the same
+    // recovery material (it came from the same package lineage), so a normal
+    // login is the right outcome.
+    const params = await fetchCryptoParams(pkg.vaultId);
+    return passwordLoginFlow(pkg.vaultId, args.masterPassword, params.salt, params.iterations);
   }
-
-  // Persist device envelope for silent unlock next time.
-  await persistDeviceSecrets(vaultKeyRaw, pkg.vaultId);
-
-  // Build UnlockedSession from the Drive-decrypted data.
-  const parsedItems = Array.isArray(decryptedVault.items) ? decryptedVault.items : [];
-  return {
-    session: { vaultId: pkg.vaultId, cryptoVersion: pkg.cryptoVersion ?? 2 },
-    vaultKey,
-    decryptedVault: { formatVersion: 1, vaultId: pkg.vaultId, items: parsedItems },
-    version: pkg.logicalRevision ?? 1,
-  };
 }

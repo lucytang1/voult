@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voult</title>
+    <style>
+      /* Match the popup CSS so the first paint (before the stylesheet loads)
+         is already the dark two-pane size, never a white flash. */
+      html,
+      body,
+      #root {
+        width: 780px;
+        height: 580px;
+        margin: 0;
+        padding: 0;
+        background: #0c0b13;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/popup/main.tsx"></script>
+  </body>
+</html>

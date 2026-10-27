@@ -20,8 +20,16 @@ chrono = { version = "0.4", features = ["clock", "serde"] }
 actix-cors = "0.7.1"
 actix-session = { version = "0.11", features = ["cookie-session"] }
 base64 = "0.22"
+tokio = { version = "1", features = ["net"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"] }
 urlencoding = "2"
 rand = "0.8"
 dirs = "5.0"
+sha2 = "0.10"
+# HMAC-SHA256 for verifying recovery proofs server-side. Pairs with the sha2
+# already above and is already in the lock file (transitively, via cookie), so
+# this adds no new third-party code to the build — only a direct dependency edge.
+# Chosen over hand-rolling HMAC: the ipad/opad construction and constant-time
+# finalize are exactly the kind of detail that is easy to get subtly wrong.
+hmac = "0.12"
 migration = { path = "migration" }

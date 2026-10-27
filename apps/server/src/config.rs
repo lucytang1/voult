@@ -17,12 +17,11 @@
  * | `STATIC_DIR` | Optional | path | bundle probe / `../client/dist` | — |
  * | `CORS_ORIGINS` | Optional | comma-separated | `http://localhost:8081,http://127.0.0.1:8081` | — |
  * | `SESSION_COOKIE_SECURE` / `SAME_SITE` / `TTL_SECONDS` | Optional | — | `false` / `lax` / `604800` | — |
- * | `GOOGLE_CLIENT_ID` / `SECRET` / `REDIRECT_URI` | Optional | — | — | If unset, Google sync disabled. |
+ * | Cloud provider keys | Optional | provider-specific | — | See `cloud::provider::CloudProvider::env_keys`; unconfigured providers are omitted from `/cloud/providers`. |
  */
 
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -89,8 +88,15 @@ pub fn load_dotenv() {
         let manifest_env = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env");
         if manifest_env.exists() {
             match dotenvy::from_path(&manifest_env) {
-                Ok(_) => eprintln!("[voult] Pre-loaded manifest env from {}", manifest_env.display()),
-                Err(e) => eprintln!("[voult] Failed to pre-load manifest env {}: {}", manifest_env.display(), e),
+                Ok(_) => eprintln!(
+                    "[voult] Pre-loaded manifest env from {}",
+                    manifest_env.display()
+                ),
+                Err(e) => eprintln!(
+                    "[voult] Failed to pre-load manifest env {}: {}",
+                    manifest_env.display(),
+                    e
+                ),
             }
         }
     } else {
@@ -107,7 +113,11 @@ pub fn load_dotenv() {
 fn load_bundled_env() {
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for rel in ["../Resources/.env", "../../Resources/.env", "Resources/.env"] {
+            for rel in [
+                "../Resources/.env",
+                "../../Resources/.env",
+                "Resources/.env",
+            ] {
                 let p = dir.join(rel);
                 if p.exists() {
                     let _ = dotenvy::from_path(&p);
@@ -115,11 +125,11 @@ fn load_bundled_env() {
                     break;
                 }
             }
-            for rel in ["../Resources/google.env", "../../Resources/google.env"] {
+            for rel in ["../Resources/cloud.env", "../../Resources/cloud.env"] {
                 let p = dir.join(rel);
                 if p.exists() {
                     let _ = dotenvy::from_path(&p);
-                    eprintln!("[voult] Loaded bundled google env from {}", p.display());
+                    eprintln!("[voult] Loaded bundled cloud env from {}", p.display());
                     break;
                 }
             }
@@ -205,7 +215,11 @@ pub fn database_url(env: Environment) -> String {
     // Fallback: per-install prod DB
     let data_dir = voult_data_dir();
     if let Err(e) = fs::create_dir_all(&data_dir) {
-        log::warn!("Could not create Voult data directory {}: {}", data_dir.display(), e);
+        log::warn!(
+            "Could not create Voult data directory {}: {}",
+            data_dir.display(),
+            e
+        );
     } else {
         log::info!("Using Voult data directory: {}", data_dir.display());
     }

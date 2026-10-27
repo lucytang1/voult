@@ -10,7 +10,7 @@ export type CreateIntentPayload = {
   deviceId: string;
 };
 export function createIntent(
-  operation: "create" | "update" | "delete",
+  operation: "create" | "update" | "delete" | "rename" | "createFolder" | "renameFolder" | "deleteFolder",
   payload: CreateIntentPayload,
 ) {
   // Fail closed: intents must only ever be written into the open per-user
@@ -23,17 +23,7 @@ export function createIntent(
   const createdAt = new Date().toISOString();
   const baseVersion = useAppStore.getState().vaultVersion;
 
-  console.log(
-    "createIntent ",
-    id,
-    operation,
-    payload.payload,
-    payload.payloadIv,
-    payload.deviceId,
-    baseVersion,
-    createdAt,
-    null,
-  );
+  // No payload logging: intent rows carry ciphertext + device identity.
 
   return sql(
     `
@@ -55,7 +45,7 @@ export function createIntent(
 
 const PendingIntentSchema = z.array(z.object({
   id: z.uuidv4(),
-  operation: z.enum(["create", "update", "delete"]),
+  operation: z.enum(["create", "update", "delete", "rename", "createFolder", "renameFolder", "deleteFolder"]),
   payload: z.string(),
   payload_iv: z.string(),
   device_id: z.string(),
@@ -74,7 +64,7 @@ export async function fetchPendingIntents() {
     console.error("Failed to parse pending intents", pendingIntents.error);
     return [];
   }
-  console.log("pendingIntents", pendingIntents.data);
+  // No row logging: rows carry ciphertext + device identity.
   return pendingIntents.data;
 }
 

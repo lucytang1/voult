@@ -1,0 +1,288 @@
+// Deterministic vault merge — intent replay onto a server snapshot.
+//
+// Policy (see apps/client/conflict-resolution.md §5):
+//  - create: idempotent no-op when id exists; concurrent same-natural-key
+//    creates keep both (no silent data loss)
+//  - update: per-field LWW onto items that still exist; updates of deleted
+//    items are dropped (deletes are sticky, no resurrection)
+//  - delete: no-op when already absent (idempotent)
+//  - rename: document-level last-writer-wins over the replay order
+//  - undecryptable / unparseable / unknown ops are quarantined, never abort
+//    the whole sync for one bad intent.
+//
+// Deliberately dependency-free apart from schema + crypto: no SQLite imports
+// (the web app adapts its intent rows to PendingIntent; the extension builds
+// them from its own queue). No secret logging — ids and ops only.
+
+import {
+  CreateFolderSchema,
+  CreateVaultItemSchema,
+  DeleteFolderSchema,
+  DeleteVaultItemSchema,
+  RenameFolderSchema,
+  RenameVaultSchema,
+  UpdateVaultItemSchema,
+  normalizeAccount,
+  type DeleteFolder,
+  type DeleteVaultItem,
+  type Folder,
+  type RenameFolder,
+  type UpdateVaultItem,
+  type VaultItem,
+} from "./schema.js";
+import { decrypt } from "./crypto.js";
+
+/** Structural intent shape — both SQLite rows and extension queue items fit. */
+export interface PendingIntent {
+  id: string;
+  operation: string;
+  payload: string;
+  payload_iv: string;
+  created_at: string;
+}
+
+/**
+ * The parts of a vault document a merge touches: the item list and the
+ * document-level name. Kept structural so the web app, the extension and the
+ * tests can all pass their own document type.
+ */
+export interface VaultDocumentLike {
+  name: string;
+  folders?: Folder[];
+  items: VaultItem[];
+}
+
+export type MergeVaultResult = {
+  /** The merged document-level name, ready to be encrypted and pushed. */
+  name: string;
+  /** The merged folder list, ready to be encrypted and pushed. */
+  folders: Folder[];
+  /** The merged vault, ready to be encrypted and pushed. */
+  items: VaultItem[];
+  /** Intents that were resolved (applied / no-op / dropped). */
+  resolvedIds: string[];
+  /** Intents that could not be applied and must be quarantined. */
+  quarantinedIds: string[];
+  /** Number of items removed by `deleteFolder` cascades in this run (for UI/logging). */
+  deletedFolderItemCount: number;
+  /** Whether the vault actually changed and needs to be pushed. */
+  changed: boolean;
+};
+
+type IntentOutcome = "applied" | "noop" | "dropped";
+
+// Idempotent: a create for an id already present (e.g. replayed after a lost
+// response) is a no-op. Concurrent creates of the same natural key both
+// survive rather than silently dropping data.
+const applyCreate = (
+  items: Map<string, VaultItem>,
+  item: VaultItem,
+): IntentOutcome => {
+  if (items.has(item.id)) return "noop";
+  for (const existing of items.values()) {
+    // Accounts compare case-insensitively: `Me@Gmail.com` and `me@gmail.com`
+    // are one account, and treating them as two would flag every re-capture.
+    if (
+      existing.id !== item.id &&
+      existing.site === item.site &&
+      normalizeAccount(existing.username ?? "") === normalizeAccount(item.username ?? "")
+    ) {
+      // No identifying data logged: natural-key dups are routine, not errors.
+      console.warn("Duplicate natural key created concurrently; keeping both");
+      break;
+    }
+  }
+  items.set(item.id, item);
+  return "applied";
+};
+
+// Per-field last-write-wins on items that still exist. An update targeting an
+// item another device deleted is dropped — deletes are sticky.
+const applyUpdate = (
+  items: Map<string, VaultItem>,
+  payload: UpdateVaultItem,
+): IntentOutcome => {
+  const existing = items.get(payload.id);
+  if (!existing) {
+    return "dropped";
+  }
+  items.set(payload.id, { ...existing, ...payload.fields });
+  return "applied";
+};
+
+const applyDelete = (items: Map<string, VaultItem>, id: string): IntentOutcome => {
+  if (!items.has(id)) return "noop";
+  items.delete(id);
+  return "applied";
+};
+
+const applyCreateFolder = (folders: Folder[], folder: Folder): IntentOutcome => {
+  if (folders.some((f) => f.id === folder.id)) return "noop";
+  folders.push(folder);
+  return "applied";
+};
+
+const applyRenameFolder = (folders: Folder[], id: string, name: string): IntentOutcome => {
+  const existing = folders.find((f) => f.id === id);
+  if (!existing) return "dropped";
+  if (existing.name === name) return "noop";
+  existing.name = name;
+  return "applied";
+};
+
+const applyDeleteFolder = (folders: Folder[], items: Map<string, VaultItem>, id: string): IntentOutcome => {
+  const idx = folders.findIndex((f) => f.id === id);
+  if (idx === -1) return "noop";
+  folders.splice(idx, 1);
+  // Cascade: remove every item that lived in this folder. Counted for the
+  // caller (UI confirmation / logging) but never logged with names.
+  let removed = 0;
+  for (const [itemId, item] of items) {
+    if (item.folderId === id) {
+      items.delete(itemId);
+      removed++;
+    }
+  }
+  // Stash the count on the outcome via a side channel is awkward; instead the
+  // caller recomputes from the item delta. We return "applied" whenever the
+  // folder existed, which is what drives `changed`.
+  void removed;
+  return "applied";
+};
+
+// Replays pending intents onto the server snapshot in deterministic order
+// (created_at asc, then id asc for ties). Returns the merged document.
+export async function mergeVault(
+  serverDoc: VaultDocumentLike,
+  pendingIntents: PendingIntent[],
+  encKey: CryptoKey,
+): Promise<MergeVaultResult> {
+  let name = serverDoc.name;
+  const folders: Folder[] = [...(serverDoc.folders ?? [])];
+  const items = new Map(serverDoc.items.map((item) => [item.id, item]));
+  const resolvedIds: string[] = [];
+  const quarantinedIds: string[] = [];
+  let deletedFolderItemCount = 0;
+  let changed = false;
+
+  const ordered = [...pendingIntents].sort(
+    (a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+  );
+
+  for (const intent of ordered) {
+    let plaintext: string;
+    try {
+      plaintext = await decrypt(intent.payload, intent.payload_iv, encKey);
+    } catch (error) {
+      console.error("Failed to decrypt intent payload", intent.id, error);
+      quarantinedIds.push(intent.id);
+      continue;
+    }
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(plaintext);
+    } catch (error) {
+      console.error("Failed to JSON parse intent payload", intent.id, error);
+      quarantinedIds.push(intent.id);
+      continue;
+    }
+
+    let outcome: IntentOutcome;
+    switch (intent.operation) {
+      case "create": {
+        const parsed = CreateVaultItemSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          console.error("Failed to parse create intent payload", intent.id, parsed.error);
+          quarantinedIds.push(intent.id);
+          continue;
+        }
+        outcome = applyCreate(items, parsed.data);
+        break;
+      }
+      case "update": {
+        const parsed = UpdateVaultItemSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          console.error("Failed to parse update intent payload", intent.id, parsed.error);
+          quarantinedIds.push(intent.id);
+          continue;
+        }
+        outcome = applyUpdate(items, parsed.data);
+        break;
+      }
+      case "delete": {
+        const parsed = DeleteVaultItemSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          console.error("Failed to parse delete intent payload", intent.id, parsed.error);
+          quarantinedIds.push(intent.id);
+          continue;
+        }
+        const payload: DeleteVaultItem = parsed.data;
+        outcome = applyDelete(items, payload.id);
+        break;
+      }
+      case "rename": {
+        const parsed = RenameVaultSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          console.error("Failed to parse rename intent payload", intent.id, parsed.error);
+          quarantinedIds.push(intent.id);
+          continue;
+        }
+        if (parsed.data.name === name) {
+          outcome = "noop";
+        } else {
+          name = parsed.data.name;
+          outcome = "applied";
+        }
+        break;
+      }
+      case "createFolder": {
+        const parsed = CreateFolderSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          console.error("Failed to parse createFolder intent payload", intent.id, parsed.error);
+          quarantinedIds.push(intent.id);
+          continue;
+        }
+        outcome = applyCreateFolder(folders, parsed.data);
+        break;
+      }
+      case "renameFolder": {
+        const parsed = RenameFolderSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          console.error("Failed to parse renameFolder intent payload", intent.id, parsed.error);
+          quarantinedIds.push(intent.id);
+          continue;
+        }
+        outcome = applyRenameFolder(folders, parsed.data.id, parsed.data.name);
+        break;
+      }
+      case "deleteFolder": {
+        const parsed = DeleteFolderSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          console.error("Failed to parse deleteFolder intent payload", intent.id, parsed.error);
+          quarantinedIds.push(intent.id);
+          continue;
+        }
+        const beforeItems = items.size;
+        outcome = applyDeleteFolder(folders, items, parsed.data.id);
+        if (outcome === "applied") {
+          deletedFolderItemCount += beforeItems - items.size;
+        }
+        break;
+      }
+      default:
+        console.error("Unknown intent operation", intent.id, intent.operation);
+        quarantinedIds.push(intent.id);
+        continue;
+    }
+
+    if (outcome === "applied") {
+      changed = true;
+    } else if (outcome === "dropped") {
+      console.warn("Dropped intent; item no longer exists on server", intent.id);
+    }
+    resolvedIds.push(intent.id);
+  }
+
+  return { name, folders, items: [...items.values()], resolvedIds, quarantinedIds, deletedFolderItemCount, changed };
+}
