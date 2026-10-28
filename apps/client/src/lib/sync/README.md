@@ -155,17 +155,18 @@ window.
 
 ## 4. Cross-surface lock — `use-session-sync.ts` + `session-channel.ts`
 
-Distinct from data sync: this is about **wiping keys when someone else locks**.
+Distinct from data sync: this is about **wiping keys when someone else manually locks**.
+Timers are local to their surface and never publish; only a deliberate lock is global.
 
 ```
   Web app                 Server                    Extension
   ───────                 ──────                    ─────────
-  lockVaultNow() ──POST /lock──►  vault.lock_epoch += 1
+  lockVaultNow("manual") ──POST /lock──►  vault.lock_epoch += 1
        │                              │
        │                              ├── GET /session ──► epoch > mine?
        │                              │                     │ yes
        │                              │                     ▼
-       │                              │              lock() — wipe memory
+       │                              │       lock("peer") — wipe memory
        │
        └── postSessionEvent("locked") ──► BroadcastChannel (same origin)
                                                 │
@@ -186,10 +187,17 @@ Distinct from data sync: this is about **wiping keys when someone else locks**.
   than local state, this surface tears down and deselects rather than adopting the
   new vault unlocked. A user-initiated switch instead goes through
   `switchVaultOpen()`, which commits the new selection atomically.
+- **Session expiry is not a lock.** A 401 only marks `serverSession: "missing"`;
+  an already-unlocked vault keeps its key and plaintext, and sync pauses until
+  reauthentication. It is never broadcast as `"locked"` and never writes a lock
+  record. A locked vault stays locked with its real reason.
+- **Lock is local-first.** `lockVaultNow()` wipes keys/plaintext, persists the
+  reason, closes SQLite, and routes to `/lock` before the best-effort
+  `POST /lock`. A failed request only delays peer convergence.
 - **Sync pins the selection, not the session.** `sync()` captures
   `captureSelectionEpoch()` and aborts if it changed — including an A→B→A round
   trip that an id comparison would miss. Pinning on `session` would be wrong:
-  session loss (M2) nulls the session while the vault stays selected.
+  the cookie can lapse while the vault stays selected.
 
 ---
 
@@ -470,28 +478,38 @@ derived from that, so a stalled or failed mirror is **visible**, never silent.
 
 ### 6.9 What the client sees, and how it learns
 
-- `GET /api/cloud/binding` returns the real state: `sync_status`,
-  `vault_version`, `mirrored_vault_version`, `versions_behind`,
-  `last_mirrored_at`, `last_mirror_error` (`cloud_endpoints.rs:398-450`).
-- Because the mirror is detached, the client must poll for it:
-  `useGoogleBinding` uses `staleTime: 5_000` + `refetchOnWindowFocus` with a
-  comment stating exactly why (`cloud/queries.ts:52-64`).
-- `describeBackup` (`cloud/backup-status.ts:37-104`) maps state → sentence.
-  `behind > 0 || pending || mirroring` is the yellow "Backup is N changes behind"
-  / "Backing up…" branch (`:81-93`), and `conflict` / `auth_required` / `error`
-  each render with an explicit *"Your vault on this device is unaffected."*
-- `POST /api/cloud/vaults/mirror` ("Back up now") awaits `mirror_now` and
-  returns the discriminated `MirrorOutcome` (`cloud_endpoints.rs:573-614`,
-  `mirror.rs:107-136`, `MirrorResult` in `cloud/api.ts:206-214`), so the user
-  learns what actually happened instead of a permanent "Encrypted sync enabled"
-  label. The button is disabled when the backup is already current
-  (`settings/index.tsx:221`).
+- `GET /api/cloud/binding` returns the real state: `sync_status`, `vault_version`,
+  `mirrored_vault_version`, `versions_behind`, `binding_generation`, `last_mirrored_at`,
+  `last_mirror_error` (`cloud_endpoints.rs:453-505`). A vault with no binding answers
+  `404 BINDING_NOT_FOUND`, which the client maps to `null` so "not configured yet" is
+  distinguishable from "could not load".
+- Because the mirror is detached, the client must poll for it: `useCloudBinding` uses
+  `staleTime: 0` + `refetchOnWindowFocus` and an **adaptive** `refetchInterval` — 1 s while the
+  binding is `pending`/`mirroring` (or idle with writes still owed), 15 s otherwise, never in a
+  background tab (`cloud/queries.ts`). Settings is not where edits are made, so the pane does not
+  try to animate a sub-second `pending → mirroring → idle` sequence; it shows the settled truth and
+  one honest transient.
+- `describeBackup` (`cloud/backup-view.ts`) maps the binding to one sentence, and deliberately does
+  **not** put versions, revisions or file ids in it: `saving` while a write is owed, `current` with a
+  relative last-backup time, `paused` when the credential is gone (which is rendered — it used to be
+  unreachable, because the row required `connected` to expand), `missing` for `unlinked`, `conflict`
+  for a moved remote, `failed` for `error`, and `stalled` once a transient state is older than 90 s
+  (the sweeper is 60 s and a provider request 30 s). The numbers live behind a collapsed
+  "Technical details" block.
+- `POST /api/cloud/vaults/mirror` ("Back up now") is **always enabled** and always forces a real
+  provider write: it waits for any detached pass to finish (`MIRROR_BUSY` after 5 s rather than racing
+  it), reads the live revision (so a deleted or externally changed copy is reported instead of being
+  hidden behind a current watermark), and then conditionally writes. It returns the discriminated
+  `MirrorOutcome` (`cloud_endpoints.rs:627-668`, `mirror.rs`, `MirrorResult` in `cloud/api.ts`) plus the
+  binding it just wrote, so the user learns what actually happened.
+- A **swap** is blocked while a backup is in flight, in both places that matter: the pane disables the
+  control and says why, and `POST /cloud/binding` takes the mirror claim *before* creating anything, so
+  a request that slips through gets `409 BACKUP_IN_PROGRESS` with no orphan file and no binding write.
 - Enrollment records the truth rather than assuming it:
-  `POST /cloud/vaults/create` creates/adopts the file, leaves the watermark
-  unset, then awaits `mirror_now` so an adopted stale file is repaired before it
-  can be considered current (`cloud_endpoints.rs:709-779`). Provider switching
-  through `POST /cloud/binding?provider=...` uses the same pattern; importing an
-  existing backup can record its known imported version directly.
+  `POST /cloud/vaults/create` creates/adopts the file, leaves the watermark unset, then awaits a
+  mirror so an adopted stale file is repaired before it can be considered current. Provider switching
+  through `POST /cloud/binding?provider=...` runs the same pass under the claim it already holds;
+  importing an existing backup records its known imported version directly.
 
 ### 6.10 The zero-knowledge boundary of the mirror
 
@@ -523,6 +541,29 @@ ever read from `cloud_token` and used as a bearer header.
 4. **`cloud_token` stores provider credentials in plaintext SQLite**, and
    mirroring puts them on the hot path of every vault write
    (`SECURITY_AND_FEATURE_ROADMAP.md:66`).
+
+### 6.12 Binding generations — why a stale pass cannot lie
+
+`cloud_binding` is keyed by `vault_id`, so a provider switch, a re-enroll, an import and a disconnect
+all rewrite the row a detached pass may still be working against. Without a guard, a pass that started
+on Drive lands its revision string on the row that now describes Dropbox — after which every later
+conditional write fails — and can force `sync_status = idle` over whatever the new binding actually is.
+
+`binding_generation` is that guard. It is bumped in the same write as any change to what the binding
+*points at* (switch, import-adopt, disconnect) and never by the mirror. A pass captures it once
+(`BindingGuard`), and every state write — status, watermark, revision, the live-baseline persist —
+is conditional on it. Zero rows affected means "the binding moved on", which is logged at debug and
+dropped: not an error, and never a silent success.
+
+Two related fixes keep the status honest:
+
+- `settle_current` clears `pending`/`mirroring` when the watermark already equals the vault version.
+  A concurrent commit could otherwise re-open `pending` after a successful pass, and nothing would ever
+  close it (the sweeper only acts when the watermark *differs*). It is limited to those two states so a
+  real `conflict`/`auth_required`/`unlinked`/`error` is never erased.
+- `mirror_now` participates in the same claim. Previously it bypassed it, so a manual backup during a
+  detached pass produced two conditional writes on one revision and a false `REMOTE_CONFLICT`.
+
 
 ---
 
@@ -556,6 +597,16 @@ Breaking any of these breaks the security model, not just correctness:
 11. **Never mirror before the CAS resolves.** The mirror is only reachable on
     the `rows_affected > 0` arm, so it can never resurrect a rejected write
     (§6.2).
+12. **A mirror may only write state for the binding incarnation it started
+    with.** Every state write carries its `binding_generation`; a zero-row update
+    is a drop, never a success. This is what stops a late pass from stamping one
+    provider's revision onto another's binding (§6.12).
+13. **A transient status must never outlive a settled watermark.** If
+    `mirrored_vault_version` equals the vault version, `pending`/`mirroring` is
+    stale by definition: `settle_current` clears it on the read path and the
+    sweeper heals it in the background. Real remote states
+    (`conflict`/`auth_required`/`unlinked`/`error`) are never cleared this way
+    (§6.12).
 
 ---
 
@@ -581,13 +632,15 @@ lives here:
 | File | Role |
 |---|---|
 | `apps/server/src/endpoints/update_vault.rs` | The CAS, then `mark_pending` + `spawn_after_commit` (§6.2) |
-| `apps/server/src/cloud/mirror.rs` | `spawn_after_commit`, `attempt`, `claim`/`settle`, watermark and status writers (§6.3–6.8) |
+| `apps/server/src/cloud/mirror.rs` | `spawn_after_commit`, `attempt`, `claim`/`settle`, `BindingGuard`, watermark and status writers (§6.3–6.8, §6.12) |
 | `apps/server/src/cloud/package.rs` | Re-serializes stored ciphertext into a `VoultPackage`; never decrypts (§6.5, §6.10) |
 | `apps/server/src/cloud/drive.rs` | Drive HTTP: `replace_vault` with `if_match_revision`, `file_revision`, `UNKNOWN_REVISION` (§6.6) |
 | `apps/server/src/cloud/token_store.rs` | Access token, auto-refresh inside 60 s of expiry (§6.5) |
 | `apps/server/src/cloud/error.rs` | Provider-neutral `ProviderErrorKind` and HTTP status mapping (§6.6) |
-| `apps/server/src/entity/cloud_binding.rs` | `mirrored_vault_version`, `last_mirrored_at`, `last_mirror_error`, `sync_status` |
-| `apps/server/migration/src/m20261011_000004_cloud_binding_mirror_state.rs` | Adds those four columns, all nullable |
-| `apps/server/src/endpoints/cloud_endpoints.rs` | `/cloud/binding` (`versions_behind`), `/cloud/vaults/mirror`, enrollment/import bindings (§6.9) |
-| `apps/client/src/lib/cloud/backup-status.ts` | Binding state → user-facing backup status (§6.9) |
+| `apps/server/src/entity/cloud_binding.rs` | `mirrored_vault_version`, `last_mirrored_at`, `last_mirror_error`, `sync_status`, `binding_generation` |
+| `apps/server/migration/src/m20261011_000004_cloud_binding_mirror_state.rs` | Adds the four nullable state columns |
+| `apps/server/migration/src/m20261027_000007_cloud_binding_generation.rs` | Adds `binding_generation` (§6.12) |
+| `apps/server/src/endpoints/cloud_endpoints.rs` | `/cloud/binding` (`versions_behind`, `binding_generation`), `/cloud/vaults/mirror`, enrollment/import bindings, claim-held switch (§6.9) |
+| `apps/client/src/lib/cloud/backup-view.ts` | Binding state → the sentence Settings shows (§6.9) |
+| `apps/client/src/lib/settings/backup-section.tsx` | The Backup pane: radio providers, status block, actions |
 | `apps/client/src/lib/cloud/enableSync.ts` | The one-time enrollment that creates the binding |

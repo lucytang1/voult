@@ -38,8 +38,24 @@ export interface PopupState {
   vaultName: string | null;
   serverUrl: string;
   lockTimeoutMinutes: number;
+  /**
+   * True when the server rejected the session cookie. Purely informational:
+   * an unlocked vault keeps working locally; syncing/saving resumes once the
+   * browser session is re-established (e.g. by signing in on the web app).
+   */
+  serverSessionMissing: boolean;
   /** Folder list from the decrypted document (empty while locked). */
   folders: Folder[];
+  /**
+   * The popup's folder filter, persisted by the worker for the unlocked
+   * lifetime (cleared by every lock). `null` = All folders; `"unfiled"` = the
+   * shared Unfiled bucket; anything else is a folder id. Null while locked.
+   *
+   * This is not just a view: it also scopes which logins are suggested on a
+   * page and where a save lands, so it must come from the worker rather than
+   * from per-popup React state.
+   */
+  selectedFolderId: string | null;
   /** Present when unlocked: ranked matches first for tabOrigin when given. */
   items: VaultItem[] | null;
   matches: LoginMatch[] | null;
@@ -62,6 +78,11 @@ export type ExtensionMessage =
   | { type: "LOCK" }
   | { type: "LOGOUT" }
   | { type: "SET_SETTINGS"; serverUrl?: string; lockTimeoutMinutes?: number }
+  // Folder filter: `folderId` is a folder id, "unfiled", or null for All
+  // folders. Persisted in the worker (cleared on lock) so it survives a popup
+  // close and scopes both page suggestions and save destinations. `tabOrigin`
+  // lets the reply carry this site's matches under the new scope.
+  | { type: "SET_FOLDER"; folderId: string | null; tabOrigin?: string }
   // Content → worker. No URL/page claims: the worker stamps origins from
   // sender.tab.url exclusively.
   | { type: "QUERY_LOGINS" }

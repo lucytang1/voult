@@ -1,5 +1,5 @@
 import { useAppStore, updateDecryptedVault, captureSelectionEpoch, addVaultItem, updateVaultItem, deleteVaultItem } from "@/src/lib/state";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { FolderList } from "../../lib/components/folder-list";
 import { FolderPicker } from "../../lib/components/folder-picker";
 import { TextField } from "@/src/lib/components/text-field";
@@ -15,8 +15,7 @@ import {
   UNFILED_LABEL,
 } from "../../lib/vault/folders";
 import type { Folder } from "@voult/vault-core";
-import { useQuery } from "@tanstack/react-query";
-import { Pressable, Text, TextInput, View, ScrollView, Modal, Image } from "react-native";
+import { Pressable, Text, TextInput, View, ScrollView, Modal, Animated } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { Lock as LockIcon, RefreshCw, Search, Pencil, Trash2, Mail, KeyRound, Eye, Earth, Globe, Zap, Clock, CalendarPlus, Settings } from "lucide-react";
 import { decrypt, encrypt } from "../../lib/crypto/index.web";
@@ -35,7 +34,8 @@ import { useRouter } from "expo-router";
 import { v4 as uuidv4 } from "uuid";
 import { canonicalizeOrigin, normalizeAccount } from "@voult/vault-core";
 import { faviconForItem } from "@voult/vault-core";
-import { http } from "../../lib/queries/http";
+import { hydrateFavicons, warmFavicons } from "../../lib/favicon";
+import { useFavicon } from "../../lib/favicon/use-favicon";
 import type { SsoProvider, SsoSignIn } from "@voult/vault-core";
 import { parseVaultJson } from "../../lib/auth/utils";
 import { displayVaultName } from "../../lib/vault/name";
@@ -71,8 +71,12 @@ function getTimeGroup(_item: VaultItem, index: number): TimeGroup {
  * Icons are display-only — matching never consults them — and they load
  * through the same-origin /api/favicon proxy: the app's COEP `require-corp`
  * header makes the browser refuse cross-origin `<img>` loads, and favicon
- * hosts don't send CORP. A failed load permanently falls back to the glyph
- * for that item (per render) so dead icons never leave blank rows.
+ * hosts don't send CORP.
+ *
+ * The read is synchronous (`useFavicon` → `lib/favicon`), so an icon that is
+ * already cached is painted in this row's very first frame. Only a genuinely
+ * cold icon fades in (180 ms) instead of snapping over the glyph; a dead icon
+ * resolves to `failed` and needs no per-render state to hide.
  */
 function SiteIcon({
   item,
@@ -83,35 +87,30 @@ function SiteIcon({
   vaultId: string;
   size?: number;
 }) {
-  const [imageFailed, setImageFailed] = useState(false);
   const direct = faviconForItem(item);
-  useEffect(() => setImageFailed(false), [direct]);
-  const iconQuery = useQuery({
-    queryKey: ["favicon", vaultId, direct ?? ""],
-    enabled: !!direct,
-    staleTime: 24 * 60 * 60 * 1000,
-    queryFn: async () => {
-    // Fetch through the shared credentialed API client instead of assigning
-    // the proxy URL directly to <Image>. Browser image requests use
-    // credentialsMode="same-origin" and omit the session cookie in split-port
-    // dev (Expo :8081 → API :8080), so the authenticated proxy otherwise 401s.
-    // Converting the response to a data URL also means the final image load is
-    // same-document and is not blocked by COEP require-corp.
-      const response = await http.get<ArrayBuffer>(`/favicon?u=${encodeURIComponent(direct!)}`, {
-        responseType: "arraybuffer",
-      });
-      const contentType = String(response.headers["content-type"] ?? "image/png");
-      const bytes = new Uint8Array(response.data);
-      let binary = "";
-      // Chunk to avoid overflowing the JS argument stack on a large icon.
-      for (let i = 0; i < bytes.length; i += 0x8000) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-      }
-      return `data:${contentType};base64,${btoa(binary)}`;
-    },
-  });
+  const entry = useFavicon(vaultId, direct);
+  const src = entry?.src;
 
-  const src = iconQuery.data;
+  // Warm icons are shown immediately at full opacity — a fade there would look
+  // like loading, which it is not. Only a newly fetched or changed icon rises
+  // from 0, so nothing ever snaps into place.
+  const previousSrc = useRef<string | undefined>(src);
+  const opacity = useRef(new Animated.Value(src ? 1 : 0)).current;
+  useEffect(() => {
+    if (!src) {
+      previousSrc.current = undefined;
+      return;
+    }
+    if (previousSrc.current === src) return;
+    if (previousSrc.current !== undefined) opacity.setValue(0);
+    previousSrc.current = src;
+    Animated.timing(opacity, {
+      toValue: 1,
+      duration: 180,
+      useNativeDriver: false,
+    }).start();
+  }, [src, opacity]);
+
   // Tile proportions copied from the extension's icon tile (a 31px square with
   // a 10px radius and a 20px favicon inside, itself rounded to 4px), scaled
   // to this row's size.
@@ -127,11 +126,10 @@ function SiteIcon({
       {/* The fallback glyph is stroked with currentColor, so the tile's ink
           token paints it — no hardcoded hex to drift out of sync. */}
       <Earth className="text-icon-tile-ink" size={Math.round(size * 0.48)} />
-      {src && !imageFailed ? (
-        <Image
+      {src ? (
+        <Animated.Image
           source={{ uri: src }}
           resizeMode="contain"
-          onError={() => setImageFailed(true)}
           style={{
             position: "absolute",
             left: (size - inner) / 2,
@@ -139,6 +137,7 @@ function SiteIcon({
             width: inner,
             height: inner,
             borderRadius: innerRadius,
+            opacity,
           }}
         />
       ) : null}
@@ -281,6 +280,7 @@ export default function Home() {
   const session = useAppStore((state) => state.session);
   const isLocked = vault.status !== "unlocked";
   const isSyncing = useAppStore((state) => state.isSyncing);
+  const serverSession = useAppStore((state) => state.serverSession);
   const router = useRouter();
   const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState("");
@@ -475,6 +475,36 @@ export default function Home() {
 
   const decryptedVault = useAppStore((state) => state.decryptedVault);
 
+  // Icons are loaded into memory *before* the list paints: `SiteIcon` reads the
+  // cache synchronously, so a warm icon is present in the first frame instead
+  // of flashing the fallback glyph while a request is in flight.
+  const iconVaultId = session?.vaultId ?? null;
+  const [iconsHydrated, setIconsHydrated] = useState(false);
+  useEffect(() => {
+    if (!iconVaultId) return;
+    let alive = true;
+    setIconsHydrated(false);
+    hydrateFavicons(iconVaultId)
+      .catch((error) => console.warn("Favicon cache hydration failed", error))
+      .finally(() => {
+        if (alive) setIconsHydrated(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [iconVaultId]);
+
+  // Once the list is up, prefetch the rest in idle time so scrolling to a row
+  // or opening the detail panel never starts a cold fetch. Deduped by URL and
+  // bounded inside `warmFavicons`, so it cannot compete with vault traffic.
+  useEffect(() => {
+    if (!iconVaultId || !iconsHydrated || !decryptedVault) return;
+    const urls = (decryptedVault.items ?? [])
+      .map((item) => faviconForItem(item))
+      .filter((url): url is string => !!url);
+    if (urls.length > 0) warmFavicons(iconVaultId, urls);
+  }, [iconVaultId, iconsHydrated, decryptedVault]);
+
   // Fall back to "All items" when the selected folder no longer exists (deleted
   // locally or replaced by a sync adoption).
   useEffect(() => {
@@ -553,13 +583,19 @@ export default function Home() {
           </Pressable>
           <Pressable
             className="flex-row items-center px-3 py-2 rounded-lg hover:bg-surface2"
-            disabled={isSyncing}
+            disabled={isSyncing || serverSession !== "active"}
             onPress={() => syncScheduler.requestSync("forced")}
             onHoverIn={() => setHoveredAction("sync")}
             onHoverOut={() => setHoveredAction(null)}
           >
             <RefreshCw size={16} color={hoveredAction === "sync" ? "#F2F4F7" : "#9ca3af"} style={{ marginRight: 12 }} />
-            <Text className={hoveredAction === "sync" ? "text-primary-text text-sm" : "text-muted-text text-sm"}>{isSyncing ? "Syncing..." : "Sync"}</Text>
+            <Text className={hoveredAction === "sync" ? "text-primary-text text-sm" : "text-muted-text text-sm"}>
+              {isSyncing
+                ? "Syncing..."
+                : serverSession === "active"
+                  ? "Sync"
+                  : "Sync unavailable"}
+            </Text>
           </Pressable>
         </View>
 
@@ -628,7 +664,15 @@ export default function Home() {
 
         {/* Password List */}
         <ScrollView className="flex-1 px-2 py-2">
-          {!decryptedVault || !decryptedVault.items?.length ? (
+          {!decryptedVault || !iconsHydrated ? (
+            // Waiting for the vault document and the icon cache. Neither is a
+            // network round-trip for a warm vault: decryption is local and
+            // hydration is one IndexedDB pass. Saying "no items" here (the old
+            // behaviour) was wrong while the vault was still arriving.
+            <View className="flex-1 items-center justify-center py-12">
+              <Text className="text-muted-text text-center">Loading your vault…</Text>
+            </View>
+          ) : !decryptedVault.items?.length ? (
             <View className="flex-1 items-center justify-center py-12">
               <Text className="text-muted-text text-center">No items in your vault yet.</Text>
               <Pressable

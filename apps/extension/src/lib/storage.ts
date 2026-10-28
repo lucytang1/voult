@@ -3,9 +3,9 @@
 // Mirrors the web app's per-vault isolation (one OPFS file + one IndexedDB
 // record per vault): every key is prefixed `vault:<vaultId>:...` so two
 // vaults onboarded in one browser profile can never see each other's data.
-// `chrome.storage.session` holds only non-sensitive flags (locked, vaultId) —
-// never keys, verifier, or plaintext. The wrapped device envelope stored here
-// is zero-knowledge-safe (the server already knows it).
+// `chrome.storage.session` holds only non-sensitive flags (locked, vaultId, the
+// popup's folder filter) — never keys, verifier, or plaintext. The wrapped device
+// envelope stored here is zero-knowledge-safe (the server already knows it).
 
 const recordKey = (vaultId: string, suffix: string) => `vault:${vaultId}:${suffix}`;
 

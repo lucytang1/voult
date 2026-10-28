@@ -6,6 +6,8 @@ use actix_web::{HttpResponse, post, web};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Auth);
+
 #[derive(Deserialize)]
 pub struct UpdatePasswordRequest {
     pub new_vault_verifier: String,
@@ -44,7 +46,7 @@ pub async fn update_vault_password(
                 .json(serde_json::json!({"error_msg":"vault not found","code":"VAULT_NOT_FOUND"}));
         }
         Err(e) => {
-            log::error!("{:?}", e);
+            LOG.error(format_args!("{:?}", e), logger::Metadata::new());
             return HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error_msg":"db error","code":"DB_ERROR"}));
         }
@@ -60,7 +62,7 @@ pub async fn update_vault_password(
     match VaultEntity::update(am).exec(pool.get_ref()).await {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({"updated": true})),
         Err(e) => {
-            log::error!("{:?}", e);
+            LOG.error(format_args!("{:?}", e), logger::Metadata::new());
             HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error_msg":"db error","code":"DB_ERROR"}))
         }

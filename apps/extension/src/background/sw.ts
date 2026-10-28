@@ -31,7 +31,9 @@ import {
   queryLogins,
   recordOAuthClick,
   resetOnboarding,
+  restoreOnStartup,
   saveOnboarding,
+  setFolderSelection,
   setPendingPrompt,
   syncSession,
   unlockWithDevice,
@@ -44,6 +46,7 @@ import {
   getLocalValue,
   getSessionValue,
   setLocalValue,
+  setSessionValue,
 } from "../lib/storage";
 
 function tabOrigin(tab: chrome.tabs.Tab | undefined): string | null {
@@ -60,19 +63,23 @@ chrome.runtime.onInstalled.addListener((details) => {
   console.info(`[voult] extension ${details.reason}`, { version: EXTENSION_VERSION });
 });
 
-// Silent device unlock on worker startup (fresh browser session), unless the
-// user explicitly locked (locked flag survives in chrome.storage.session).
+// Silent device unlock on worker/browser startup, governed by the durable lock
+// policy (`restoreOnStartup`): Never or a still-open idle window restores;
+// a manual/peer lock or an elapsed idle deadline stays locked.
 // When nothing is onboarded yet, opportunistically adopt the web session's
 // vault so the popup opens on the password screen instead of Connect.
 async function startupUnlock(): Promise<void> {
   try {
-    if (await getSessionValue<number>(LOCKED_FLAG_KEY)) return;
     let id = await getLocalValue<string>(ACTIVE_VAULT_KEY);
     if (!id) {
       id = await adoptSessionProbe();
       if (!id) return;
     }
-    await unlockWithDevice();
+    // Fast path for a lock recorded earlier in this browser session. The
+    // durable lock record is what survives a browser restart.
+    if (await getSessionValue<number>(LOCKED_FLAG_KEY)) return;
+    const unlocked = await restoreOnStartup();
+    if (!unlocked) await setSessionValue(LOCKED_FLAG_KEY, 1);
   } catch (e) {
     console.warn("[voult] startup unlock skipped", e);
   }
@@ -148,10 +155,23 @@ chrome.runtime.onMessage.addListener(
               await setLocalValue("voult.serverUrl", normalized);
             }
             if (msg.lockTimeoutMinutes !== undefined) {
-              const mins = Math.min(120, Math.max(1, Math.floor(msg.lockTimeoutMinutes)));
+              // 0 means "Never" (same sentinel as the web app). Clamp to the
+              // shared 4-hour ceiling; a corrupt value must not disable the
+              // timer silently.
+              const raw = Math.floor(msg.lockTimeoutMinutes);
+              const mins = Number.isFinite(raw) ? Math.min(240, Math.max(0, raw)) : 5;
               await setLocalValue("voult.lockTimeoutMinutes", mins);
             }
             sendResponse(await getPopupState());
+            break;
+          }
+          case "SET_FOLDER": {
+            // The popup's folder filter outlives the popup: the worker keeps it
+            // (cleared by every lock) and uses it to scope page suggestions and
+            // save destinations. The reply is a full state so this site's
+            // matches reflect the new scope.
+            await setFolderSelection(msg.folderId);
+            sendResponse(await getPopupState(msg.tabOrigin));
             break;
           }
           case "QUERY_LOGINS": {
@@ -367,12 +387,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   void handleAlarm(alarm);
 });
 
-// Screen lock always locks the vault immediately (publishing best-effort so
-// the web app converges); system idle is covered by the inactivity alarm.
+// Screen lock always locks the vault immediately. It is an environmental event
+// like the idle timer, not a deliberate user "Lock" action, so it stays local
+// to this surface and does not bump the shared epoch.
 chrome.idle.onStateChanged.addListener((state) => {
   if (state === "locked" && isUnlocked()) {
     console.info("[voult] locked (screen locked)");
-    void publishLock();
+    void publishLock("autolock");
   }
 });
 

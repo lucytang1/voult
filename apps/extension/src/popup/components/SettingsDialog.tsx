@@ -112,11 +112,11 @@ export function SettingsDialog({
           <section className="settings-section">
             <h3 className="settings-section__title">Auto-lock</h3>
             <p className="settings-section__sub">
-              Wipe keys and plaintext after this much inactivity.
+              Wipe keys and plaintext after this much inactivity. Use 0 to never auto-lock.
             </p>
             <div className="form-row">
               <label className="form-label" htmlFor="settings-autolock">
-                Timeout (minutes, 1–120)
+                Timeout (minutes, 0 = never, max 240)
               </label>
               <input
                 id="settings-autolock"
@@ -138,7 +138,14 @@ export function SettingsDialog({
             className="btn btn--primary"
             disabled={busy || !url.trim()}
             onClick={() =>
-              onSave(url.trim() || serverUrl, Number(minutes) || lockTimeoutMinutes)
+              onSave(
+                url.trim() || serverUrl,
+                // 0 is a meaningful value ("Never"); don't let `||` coerce it
+                // into the previous timeout.
+                Number.isFinite(Number(minutes)) && minutes.trim() !== ""
+                  ? Number(minutes)
+                  : lockTimeoutMinutes,
+              )
             }
           >
             {busy ? "Saving…" : "Save settings"}

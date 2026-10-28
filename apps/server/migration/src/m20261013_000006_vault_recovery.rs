@@ -80,9 +80,7 @@ impl MigrationTrait for Migration {
                 Table::alter()
                     .table(Vault::Table)
                     .add_column_if_not_exists(
-                        integer(Vault::CredentialVersion)
-                            .not_null()
-                            .default(0),
+                        integer(Vault::CredentialVersion).not_null().default(0),
                     )
                     .to_owned(),
             )

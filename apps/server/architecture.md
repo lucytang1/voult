@@ -23,6 +23,21 @@ authenticated session. Updates use ciphertext-only version compare-and-swap.
 bindings, and Drive operations are likewise scoped to the authenticated
 `vault_id`; provider account/email values are metadata only.
 
+## Logging
+
+All server logging goes through the shared `crates/logger` crate: the default
+`logger` instance or `Logger::create(context)`. `VOULT_LOG_LEVEL`
+(`debug|log|warn|error`, default `log`) is the single minimum level. Lines are
+written to stderr with a hardcoded context and an ISO 8601 UTC timestamp.
+
+`logger::init()` installs the crate as the global `log` backend. Actix request
+logs, SeaORM/SQLx records, and the `migration` crate therefore use the same
+filter and formatter; `RUST_LOG` is ignored. Target-specific formatters clean up
+noisy dependency records: `sqlx::query` uses the SQL summary as the message and
+`rows_affected`/`rows_returned`/`elapsed`/`slow_threshold` as metadata, while
+`actix_web::middleware::logger` uses `METHOD PATH STATUS` as the message and
+connection/request details as metadata.
+
 ## Database model
 
 The clean-start migration creates `vault`, `session`, `google_token`,

@@ -96,9 +96,11 @@ export interface AppState {
    */
   selectionEpoch: number;
   /**
-   * The server session (cookie-scoped vault + crypto version). Null once the
-   * cookie is known to be missing, in which case `vault` still holds the
-   * selection and `serverSession` is `missing`.
+   * The server session (cookie-scoped vault + crypto version). Authoritative
+   * for `vaultId` only while `serverSession` is `active`. After a 401 it may
+   * still be present when the vault is unlocked, because the vault keeps
+   * operating locally; treat `serverSession` — never this object — as the
+   * signal that protected calls are allowed.
    */
   session: SessionState | null;
   authKey: CryptoKey | null;

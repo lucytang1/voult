@@ -8,6 +8,8 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Vaults);
+
 #[derive(Deserialize)]
 pub struct CreateVaultRequest {
     pub vault_id: Option<String>,
@@ -149,10 +151,16 @@ pub async fn create_vault(
                 || s.contains("unique constraint")
                 || s.contains("1555")
             {
-                log::warn!("vault create conflict: {:?}", e);
+                LOG.warn(
+                    format_args!("vault create conflict: {:?}", e),
+                    logger::Metadata::new(),
+                );
                 return err(StatusCode::CONFLICT, "vault already exists", "VAULT_EXISTS");
             }
-            log::error!("failed to create vault: {:?}", e);
+            LOG.error(
+                format_args!("failed to create vault: {:?}", e),
+                logger::Metadata::new(),
+            );
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to create vault",
@@ -192,7 +200,7 @@ pub async fn list_vaults(pool: web::Data<DbPool>, session: Session) -> HttpRespo
         Ok(Some(v)) => v,
         Ok(None) => return err(StatusCode::NOT_FOUND, "vault not found", "VAULT_NOT_FOUND"),
         Err(e) => {
-            log::error!("{:?}", e);
+            LOG.error(format_args!("{:?}", e), logger::Metadata::new());
             return err(StatusCode::INTERNAL_SERVER_ERROR, "db error", "DB_ERROR");
         }
     };

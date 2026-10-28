@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   disconnectCloud,
   getCloudBinding,
@@ -11,8 +11,10 @@ import {
   mirrorCloudVault,
   persistCloudBinding,
   startCloudAuth,
+  type CloudBinding,
   type VaultDescriptor,
 } from "./api";
+import { isBackupInFlight } from "./backup-view";
 
 export const cloudKeys = {
   providers: () => ["cloud", "providers"] as const,
@@ -27,7 +29,17 @@ export function useCloudProviders() {
 }
 
 export function useCloudCredentials(enabled = true) {
-  return useQuery({ queryKey: ["cloud", "credentials"] as const, queryFn: listCloudCredentials, enabled, staleTime: 0, retry: false });
+  return useQuery({
+    queryKey: ["cloud", "credentials"] as const,
+    queryFn: listCloudCredentials,
+    enabled,
+    staleTime: 0,
+    // This is the account email shown on each provider row, so it should not
+    // drift far behind a reconnect. It changes only on connect/disconnect.
+    refetchInterval: enabled ? 30_000 : false,
+    refetchIntervalInBackground: false,
+    retry: false,
+  });
 }
 
 export function useCloudStatus(vaultId = "current", enabled = true) {
@@ -60,18 +72,52 @@ export function usePendingCloudVaults(state?: string) {
   });
 }
 
-export function useCloudBinding(vaultId?: string, enabled = !!vaultId) {
-  return useQuery({
+export function useCloudBinding(
+  vaultId?: string,
+  options: { enabled?: boolean; fast?: boolean } = {},
+) {
+  const enabled = !!vaultId && (options.enabled ?? true);
+  return useQuery<CloudBinding | null>({
     queryKey: cloudKeys.binding(vaultId ?? ""),
     queryFn: () => getCloudBinding(vaultId!),
-    enabled: !!vaultId && enabled,
+    enabled,
     // Backup state changes out of band (the server mirrors after each vault
-    // write), so a cached value can be arbitrarily stale. Refetch on focus and
-    // keep a short window otherwise.
-    staleTime: 5_000,
+    // write), so a cached value can be arbitrarily stale — and a stale value is
+    // exactly what makes the pane lie. Always revalidate on mount/focus.
+    staleTime: 0,
     refetchOnWindowFocus: true,
+    refetchOnMount: "always",
+    // Adaptive polling. The mirror is detached server-side, so the only way to
+    // learn it finished is to ask again: quickly while the copy is known to be
+    // behind or in flight, lazily otherwise. `fast` pins it high while an action
+    // this pane started (switch, manual backup) is running. Background tabs do
+    // not poll; returning to the tab refetches immediately.
+    refetchInterval: (query) => {
+      if (options.fast) return 750;
+      return isBackupInFlight(query.state.data) ? 1_000 : 15_000;
+    },
+    refetchIntervalInBackground: false,
     retry: false,
   });
+}
+
+/**
+ * Write a binding into the cache only if it is not older than what is there.
+ *
+ * A mutation response can arrive after a provider switch (or a disconnect) has
+ * already produced a newer binding; without this guard the late response would
+ * resurrect the previous incarnation and the pane would describe a provider the
+ * vault no longer backs up to.
+ */
+export function mergeCloudBinding(
+  queryClient: QueryClient,
+  vaultId: string,
+  next: CloudBinding | null | undefined,
+) {
+  if (!next) return;
+  queryClient.setQueryData<CloudBinding | null>(cloudKeys.binding(vaultId), (prev) =>
+    !prev || next.binding_generation >= prev.binding_generation ? next : prev,
+  );
 }
 
 /**
@@ -86,9 +132,10 @@ export function useMirrorCloudVault(vaultId?: string) {
     gcTime: 0,
     onSuccess: async (data) => {
       // The server returns the binding it just wrote; use it directly rather
-      // than refetching, so the UI reflects the outcome immediately.
+      // than refetching, so the UI reflects the outcome immediately. The merge
+      // drops it if a switch happened while the request was in flight.
       if (data.binding && vaultId) {
-        queryClient.setQueryData(cloudKeys.binding(vaultId), data.binding);
+        mergeCloudBinding(queryClient, vaultId, data.binding);
       } else if (vaultId) {
         await queryClient.invalidateQueries({ queryKey: cloudKeys.binding(vaultId) });
       }

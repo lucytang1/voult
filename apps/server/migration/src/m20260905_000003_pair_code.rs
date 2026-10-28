@@ -18,9 +18,11 @@ impl MigrationTrait for Migration {
                     .col(string(PairCode::Selector).not_null().primary_key())
                     .col(string(PairCode::VaultId).not_null())
                     .col(string(PairCode::CodeHash).not_null())
-                    .col(string(PairCode::CreatedAt).not_null().default(Expr::cust(
-                        "STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')",
-                    )))
+                    .col(
+                        string(PairCode::CreatedAt)
+                            .not_null()
+                            .default(Expr::cust("STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')")),
+                    )
                     .col(string(PairCode::ExpiresAt).not_null())
                     .foreign_key(
                         ForeignKey::create()

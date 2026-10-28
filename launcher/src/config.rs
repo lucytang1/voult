@@ -4,6 +4,7 @@
  * | Var | Required | Values | Default | Notes |
  * |-----|----------|--------|---------|-------|
  * | `VOULT_ENV` | Optional | `development` / `production` | `production` | Controls dev vs prod branching (auto-start, CWD). Panics on any other value. |
+ * | `VOULT_LOG_LEVEL` | Optional | `debug` / `log` / `warn` / `error` (`info` aliases `log`) | `log` | Read by `crates/logger`; filters launcher root-level logging. |
  *
  * Dev: `VOULT_ENV=development` (set in `apps/server/.env`) => launcher
  * does NOT auto-start server and does NOT auto-open browser, so you can run
@@ -15,6 +16,9 @@
 use std::{env, path::PathBuf};
 
 pub const ENV_VOULT_ENV: &str = "VOULT_ENV";
+
+/// Launcher config logging context.
+const CONFIG_LOG: logger::LauncherLogger = logger::Logger::create(logger::LauncherContext::Config);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Environment {
@@ -30,10 +34,15 @@ impl Environment {
                 "development" => Self::Development,
                 "production" => Self::Production,
                 "" => {
-                    eprintln!("[launcher] {ENV_VOULT_ENV} is empty, defaulting to production");
+                    CONFIG_LOG.warn(
+                        format_args!("{ENV_VOULT_ENV} is empty, defaulting to production"),
+                        logger::metadata! { "env_var" => ENV_VOULT_ENV },
+                    );
                     Self::Production
                 }
-                other => panic!("{ENV_VOULT_ENV} must be 'development' or 'production', got '{other}'"),
+                other => {
+                    panic!("{ENV_VOULT_ENV} must be 'development' or 'production', got '{other}'")
+                }
             },
             Err(_) => Self::Production,
         }
@@ -44,11 +53,13 @@ impl Environment {
     }
 }
 
-/// Load `.env` files so `VOULT_ENV` is visible even when launcher CWD != repo root.
-/// Priority (shell wins, `from_path` does not override):
+/// Load `.env` files so `VOULT_ENV` / `VOULT_LOG_LEVEL` are visible even when
+/// launcher CWD != repo root. Priority (shell wins, `from_path` does not
+/// override):
 /// 1. CWD `.env`
 /// 2. `apps/server/.env` (authoritative dev file)
 /// 3. repo root `.env`
+/// 4. `~/Library/Application Support/Voult/.env` (per-install overrides)
 pub fn load_dotenv() {
     let _ = dotenvy::dotenv();
     let launcher_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -60,6 +71,16 @@ pub fn load_dotenv() {
         let root_env = root.join(".env");
         if root_env.exists() {
             let _ = dotenvy::from_path(&root_env);
+        }
+    }
+
+    // A bundled launcher has no useful CWD or repo root. The server already
+    // reads this per-install file, so the launcher reads it too; otherwise
+    // VOULT_LOG_LEVEL would work for only one of the two processes.
+    if let Ok(home) = env::var("HOME") {
+        let user_env = PathBuf::from(home).join("Library/Application Support/Voult/.env");
+        if user_env.exists() {
+            let _ = dotenvy::from_path(&user_env);
         }
     }
 }

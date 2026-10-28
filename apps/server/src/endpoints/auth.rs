@@ -9,6 +9,8 @@ use crate::entity::vault::{self, Entity as VaultEntity};
 use crate::id_codec::uuid_from_db;
 use crate::session_auth::establish_vault_session;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Auth);
+
 #[derive(Deserialize)]
 pub struct AuthRequest {
     // Client-generated, stable vault identity embedded in the encrypted vault.
@@ -82,7 +84,10 @@ pub async fn auth(
             );
         }
         Err(e) => {
-            log::error!("failed to fetch vault: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch vault: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to fetch vault",
@@ -102,7 +107,10 @@ pub async fn auth(
     // Rotate/purge any existing session before establishing the authenticated
     // one, then store only the authenticated vault ID in the session cookie.
     if let Err(e) = establish_vault_session(&session, &vault.id) {
-        log::error!("failed to establish session: {:?}", e);
+        LOG.error(
+            format_args!("failed to establish session: {:?}", e),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to establish session",
@@ -114,7 +122,10 @@ pub async fn auth(
         vault_id: match uuid_from_db(&vault.id) {
             Ok(id) => id,
             Err(e) => {
-                log::error!("invalid UUID in vault.id: {:?}", e);
+                LOG.error(
+                    format_args!("invalid UUID in vault.id: {:?}", e),
+                    logger::Metadata::new(),
+                );
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "invalid vault id in database",

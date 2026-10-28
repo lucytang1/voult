@@ -7,7 +7,8 @@
 // or non-sensitive:
 //
 //  - memory only (wiped on lock): vaultKey, items, version
-//  - chrome.storage.session (cleared on browser close): locked flag, vault id
+//  - chrome.storage.session (cleared on browser close): locked flag, vault id,
+//    folder filter (opaque id only)
 //  - chrome.storage.local: server URL, lock timeout, active vault id,
 //    `never:<origin>` list (M2)
 //  - IndexedDB `voult-ext`: device key + device envelope (CryptoKey handles)
@@ -17,6 +18,7 @@
 
 import {
   CRYPTO_VERSION,
+  DEFAULT_FOLDER_ID,
   DEFAULT_VAULT_NAME,
   b64,
   createAuthKey,
@@ -30,6 +32,7 @@ import {
   hasSsoSignIn,
   importVaultKey,
   isValidVaultId,
+  itemsInFolder,
   mergeVault,
   originOfUrl,
   rankOriginMatch,
@@ -71,6 +74,7 @@ import {
   LOCKED_FLAG_KEY,
   clearVaultRecords,
   getLocalValue,
+  getSessionValue,
   recordKey,
   setLocalValue,
   setSessionValue,
@@ -89,6 +93,25 @@ const LOCK_TIMEOUT_KEY = "voult.lockTimeoutMinutes";
 const NEVER_PREFIX = "never:";
 const DEFAULT_LOCK_TIMEOUT_MINUTES = 5;
 
+// Durable, non-secret per-vault records. `chrome.storage.session` dies with the
+// browser, which would reset the idle window and forget a deliberate lock on
+// restart; these live in `chrome.storage.local` under the vault's namespace.
+const LAST_ACTIVITY_SUFFIX = "lastActivity";
+const LOCK_RECORD_SUFFIX = "lockRecord";
+
+/** Why the vault is locked. Mirrors the web app's LockReason. */
+type LockReason = "manual" | "autolock" | "peer";
+
+interface StoredLockRecord {
+  reason: LockReason;
+  lockedAt: number;
+}
+
+const LOCK_REASONS: readonly LockReason[] = ["manual", "autolock", "peer"];
+
+/** How often activity is written to storage; the deadline is minute-scale. */
+const ACTIVITY_PERSIST_MS = 10_000;
+
 // --- In-memory unlocked state (never persisted) ----------------------------
 
 let vaultKey: CryptoKey | null = null;
@@ -101,6 +124,10 @@ let vaultName: string | null = null;
 let version: number | null = null;
 let vaultId: string | null = null;
 let lastActivity = 0;
+
+// True when a session probe definitively failed authentication. Informational
+// only: it must never wipe an unlocked vault or be treated as a lock.
+let serverSessionMissing = false;
 
 // Last server lock_epoch converged to, per vault (memory cache over
 // chrome.storage.local `vault:<id>:lockEpoch`). Survives worker restarts so a
@@ -126,8 +153,113 @@ export function isUnlocked(): boolean {
   return vaultKey !== null && vaultId !== null;
 }
 
+// --- Folder filter (unlocked lifetime only) ---------------------------------
+//
+// The popup's folder filter lives in the worker, not in popup state: it decides
+// which logins are suggested on a page (`queryLogins`) and where a save lands
+// (`defaultSaveFolderId`). Keeping it here is what makes it survive closing the
+// popup, and clearing it on every lock is what makes the next unlock start at
+// All folders.
+//
+// Mirrored into `chrome.storage.session` (in-memory, never written to disk) so
+// a worker restart that device-unlocks the same vault can restore the filter.
+// The value is an opaque folder id or the Unfiled marker — no folder name, item,
+// or secret — and the record dies with the browser.
+
+const SELECTED_FOLDER_SUFFIX = "selectedFolder";
+/** Sentinel for the Unfiled bucket (folder ids are UUIDs, so no clash). */
+const UNFILED_SELECTION = "unfiled";
+
+let selectedFolderId: string | null = null;
+
+const selectedFolderKey = (id: string) => recordKey(id, SELECTED_FOLDER_SUFFIX);
+
+/**
+ * The persisted filter, normalized against the live document. A folder that no
+ * longer exists (deleted on another device and adopted by a sync) falls back to
+ * All folders, which is also what a missing value means.
+ */
+function normalizeFolderSelection(value: string | null | undefined): string | null {
+  if (value === UNFILED_SELECTION) return UNFILED_SELECTION;
+  if (typeof value === "string" && folders.some((f) => f.id === value)) return value;
+  return null;
+}
+
+async function persistFolderSelection(id: string, value: string | null): Promise<void> {
+  if (value === null) await chrome.storage.session.remove(selectedFolderKey(id));
+  else await setSessionValue(selectedFolderKey(id), value);
+}
+
+/**
+ * Popup gesture: switch the folder filter. Persisted for the unlocked lifetime.
+ * A locked vault has no folders, so a selection is meaningless there.
+ */
+export async function setFolderSelection(folderId: string | null): Promise<void> {
+  const id = vaultId ?? ((await getLocalValue<string>(ACTIVE_VAULT_KEY)) ?? null);
+  const next = isUnlocked() ? normalizeFolderSelection(folderId) : null;
+  selectedFolderId = next;
+  if (id && isValidVaultId(id)) await persistFolderSelection(id, next);
+}
+
+// --- Durable idle + lock records ---------------------------------------------
+//
+// The auto-lock timer is a deadline, not a background job: an MV3 worker (or
+// the whole browser) can stop before the timeout elapses. Persisting the last
+// activity lets the next start compare wall-clock idle time instead of starting
+// a fresh window, and persisting the lock reason lets a deliberate lock survive
+// a restart even when the timeout is "Never".
+
+const activityKey = (id: string) => recordKey(id, LAST_ACTIVITY_SUFFIX);
+const lockRecordKey = (id: string) => recordKey(id, LOCK_RECORD_SUFFIX);
+
+async function getLastActivity(id: string): Promise<number | null> {
+  const stored = await getLocalValue<number>(activityKey(id));
+  if (typeof stored !== "number" || !Number.isFinite(stored) || stored <= 0) return null;
+  // A far-future timestamp would make idle time negative and keep the vault
+  // open forever; treat it as corrupt.
+  if (stored > Date.now() + 60_000) return null;
+  return stored;
+}
+
+async function setLastActivity(id: string, at: number): Promise<void> {
+  await setLocalValue(activityKey(id), at);
+}
+
+async function getLockRecord(id: string): Promise<StoredLockRecord | null> {
+  const stored = await getLocalValue<StoredLockRecord>(lockRecordKey(id));
+  if (
+    !stored ||
+    !LOCK_REASONS.includes(stored.reason) ||
+    typeof stored.lockedAt !== "number" ||
+    !Number.isFinite(stored.lockedAt)
+  ) {
+    return null;
+  }
+  return stored;
+}
+
+async function setLockRecord(id: string, record: StoredLockRecord): Promise<void> {
+  await setLocalValue(lockRecordKey(id), record);
+}
+
+async function clearLockRecord(id: string): Promise<void> {
+  await chrome.storage.local.remove(lockRecordKey(id));
+}
+
+let lastActivityPersistedAt = 0;
+
 function touch(): void {
-  lastActivity = Date.now();
+  const now = Date.now();
+  lastActivity = now;
+  const id = vaultId;
+  if (!id) return;
+  // Throttle: pointer/fill traffic can call this constantly, and the timer
+  // only needs minute-scale precision.
+  if (now - lastActivityPersistedAt < ACTIVITY_PERSIST_MS) return;
+  lastActivityPersistedAt = now;
+  void setLastActivity(id, now).catch((e) => {
+    console.warn("[voult] failed to persist activity", e);
+  });
 }
 
 /** Seconds since any authenticated activity (message, fill, save). */
@@ -301,8 +433,31 @@ async function finishUnlock(
   vaultName = serverDoc.name;
   folders = serverDoc.folders;
   items = serverDoc.items;
+  // The filter belongs to the currently-unlocked session. A set `voult.locked`
+  // flag means this unlock comes from the lock screen (or a startup restore that
+  // declined to restore), so start at All folders and drop any leftover record.
+  // No flag means the vault was never locked — a worker restart or a popup close
+  // — and the filter carries over. A folder id the new document no longer has
+  // normalizes back to All folders either way.
+  const cameFromLock = (await getSessionValue<number>(LOCKED_FLAG_KEY)) !== null;
+  selectedFolderId = normalizeFolderSelection(
+    cameFromLock ? null : await getSessionValue<string>(selectedFolderKey(id)),
+  );
+  if (cameFromLock) {
+    try {
+      await chrome.storage.session.remove(selectedFolderKey(id));
+    } catch (e) {
+      console.warn("[voult] failed to clear stale folder filter", e);
+    }
+  }
   version = serverVersion;
+  lastActivity = Date.now();
+  lastActivityPersistedAt = lastActivity;
   touch();
+  serverSessionMissing = false;
+  // An unlock ends any persisted lock decision.
+  await clearLockRecord(id);
+  await setLastActivity(id, lastActivity);
   // Baseline for peer-lock detection: a later epoch means "locked elsewhere".
   await setKnownEpoch(id, lockEpoch);
   // Enroll/refresh this browser's device envelope so next time can unlock
@@ -456,14 +611,22 @@ export async function syncSession(): Promise<void> {
   try {
     session = await fetchSession(serverUrl);
   } catch {
+    // Offline is a normal state; it says nothing about the cookie or the lock.
     return;
   }
-  if (!session.authenticated || session.vault_id !== id) {
-    // Logged out elsewhere, or another surface switched vaults: drop keys so
-    // this side can never act on a stale vault, then converge the onboarding
-    // id to the server truth (locked — the user unlocks explicitly).
-    if (isUnlocked()) await lock();
-    if (session.authenticated && session.vault_id !== id && isValidVaultId(session.vault_id)) {
+  if (!session.authenticated) {
+    // Authorization lost, not a lock decision. Keep an unlocked vault usable
+    // locally; server-dependent work (sync/update) surfaces the 401 on its own
+    // request. Wiping here would contradict "Auto-lock: Never".
+    serverSessionMissing = true;
+    return;
+  }
+  serverSessionMissing = false;
+  if (session.vault_id !== id) {
+    // Another surface switched vaults: single-vault invariant. Drop this
+    // vault's keys (identity changed) and adopt the server's id locked.
+    if (isUnlocked()) await lock("peer");
+    if (isValidVaultId(session.vault_id)) {
       await setLocalValue(ACTIVE_VAULT_KEY, session.vault_id);
       await setSessionValue(LOCKED_FLAG_KEY, 1);
     }
@@ -476,38 +639,70 @@ export async function syncSession(): Promise<void> {
     return;
   }
   if (epoch > known) {
-    await lock();
+    await lock("peer");
     await setKnownEpoch(id, epoch);
   }
 }
 
 // --- Lock / logout -----------------------------------------------------------
 
-/** Wipes keys + plaintext from memory, keeps session + device envelope. */
-export async function lock(): Promise<void> {
+/**
+ * Wipes keys + plaintext from memory, records why, and keeps the session and
+ * device envelope. Local-only: callers that want peers to converge must use
+ * `publishLock` (or add the peer notification themselves, as `syncSession`
+ * deliberately does not — re-publishing an observed epoch would ping-pong).
+ */
+export async function lock(reason: LockReason = "manual"): Promise<void> {
+  const id = vaultId ?? ((await getLocalValue<string>(ACTIVE_VAULT_KEY)) ?? null);
+  const wasUnlocked = isUnlocked();
   vaultKey = null;
   items = [];
   folders = [];
   vaultName = null;
   version = null;
   vaultId = null;
+  // A lock ends the folder filter: the next unlock starts at All folders.
+  selectedFolderId = null;
   pendingSave = null;
   pendingOAuth = null;
   pendingPrompt = null;
+  if (id && isValidVaultId(id)) {
+    try {
+      await chrome.storage.session.remove(selectedFolderKey(id));
+    } catch (e) {
+      // A stale session value is harmless (unlock re-reads it, and a lock path
+      // always resets memory to All folders); never let cleanup block the lock.
+      console.warn("[voult] failed to clear folder filter", e);
+    }
+  }
+  if (wasUnlocked && id && isValidVaultId(id)) {
+    // Durable: chrome.storage.session dies with the browser, so a manual lock
+    // (or a timer result) must be recorded locally to survive a restart.
+    try {
+      await setLockRecord(id, { reason, lockedAt: Date.now() });
+    } catch (e) {
+      console.warn("[voult] failed to persist lock record", e);
+    }
+  }
   await setSessionValue(LOCKED_FLAG_KEY, 1);
   await chrome.alarms.clear(AUTOLOCK_ALARM);
-  console.info("[voult] locked");
+  console.info(`[voult] locked (${reason})`);
 }
 
 /**
- * User-initiated lock (button, idle timeout, screen lock): publish the global
- * lock first so the web app converges, then wipe locally. Best-effort: an
- * offline lock still locks this side and converges later. Never called from
- * syncSession — a peer-observed lock must not re-bump the epoch (that would
- * ping-pong the counter on every tick).
+ * Lock this surface, and publish the global lock only when the lock was
+ * **manual** (button, explicit action). An idle/timer lock is local to this
+ * surface: web and extension have separate timeouts, so a timer firing here
+ * must not force the other surface to lock — and must not bump `lock_epoch`,
+ * which peers would record as a durable `peer` lock.
+ *
+ * Local locking happens first and never waits on the network. Peers converge on
+ * their next successful check if the request made it through.
  */
-export async function publishLock(): Promise<void> {
+export async function publishLock(reason: "manual" | "autolock" = "manual"): Promise<void> {
   const id = (await getLocalValue<string>(ACTIVE_VAULT_KEY)) ?? null;
+  await lock(reason);
+  if (reason !== "manual") return;
   if (id && isValidVaultId(id)) {
     try {
       const serverUrl = await getServerUrl();
@@ -517,7 +712,49 @@ export async function publishLock(): Promise<void> {
       console.warn("[voult] lock publish failed; locked locally only", e);
     }
   }
-  await lock();
+}
+
+/**
+ * Startup restore decision, mirroring the web app's `decideRestore()`.
+ *
+ * The browser may have been closed past the idle deadline, so a fresh in-memory
+ * timer cannot be trusted. Reads the durable lock record and last-activity
+ * timestamp first:
+ *
+ *  - manual/peer lock -> stay locked until an explicit unlock.
+ *  - autolock within its window -> stay locked.
+ *  - finite timer and the persisted idle time is past the deadline -> stay
+ *    locked (no timestamp also fails safe).
+ *  - Never, or no record and still within the window -> try device unlock.
+ *
+ * Returns whether the vault was unlocked.
+ */
+export async function restoreOnStartup(): Promise<boolean> {
+  const id = await getLocalValue<string>(ACTIVE_VAULT_KEY);
+  if (!id || !isValidVaultId(id)) return false;
+
+  const record = await getLockRecord(id);
+  const timeout = await getLockTimeoutMinutes();
+  const now = Date.now();
+
+  if (record?.reason === "manual" || record?.reason === "peer") {
+    console.info(`[voult] staying locked on startup (${record.reason})`);
+    return false;
+  }
+  if (record?.reason === "autolock" && timeout > 0) {
+    if (now - record.lockedAt < timeout * 60_000) {
+      console.info("[voult] staying locked: autolock window still open");
+      return false;
+    }
+  }
+  if (timeout > 0) {
+    const last = await getLastActivity(id);
+    if (last === null || now - last >= timeout * 60_000) {
+      console.info("[voult] staying locked: idle deadline elapsed");
+      return false;
+    }
+  }
+  return await unlockWithDevice();
 }
 
 /** Full logout: server session + this vault's local records + memory. */
@@ -553,7 +790,24 @@ function rankOf(item: VaultItem, pageOrigin: string): Rank | null {
 
 const rankOrder: Record<Rank, number> = { exact: 0, linked: 1, subdomain: 2 };
 
-/** Logins matching a page origin, exact/linked before subdomain fallback. */
+/** Items visible under the popup's current folder filter (null = whole vault). */
+function itemsInSelectedFolder(): VaultItem[] {
+  const selection = normalizeFolderSelection(selectedFolderId);
+  if (selection === null) return items;
+  return itemsInFolder(
+    items,
+    folders,
+    selection === UNFILED_SELECTION ? null : selection,
+  );
+}
+
+/**
+ * Logins matching a page origin, exact/linked before subdomain fallback.
+ *
+ * Suggestions follow the popup's folder filter: a login filed in another folder
+ * is never offered for this page, and with no match left in view the content
+ * script shows no dropdown at all. "All folders" keeps the whole vault eligible.
+ */
 export function queryLogins(pageOrigin: string): LoginMatch[] {
   if (!isUnlocked()) return [];
   touch();
@@ -563,7 +817,7 @@ export function queryLogins(pageOrigin: string): LoginMatch[] {
   } catch {
     return [];
   }
-  return items
+  return itemsInSelectedFolder()
     .map((item) => {
       const rank = rankOf(item, canonical);
       if (!rank) return null;
@@ -640,7 +894,9 @@ export async function getPopupState(tabOrigin?: string): Promise<PopupState> {
       vaultName: null,
       serverUrl,
       lockTimeoutMinutes,
+      serverSessionMissing,
       folders: [],
+      selectedFolderId: null,
       items: null,
       matches: null,
       version: null,
@@ -654,7 +910,9 @@ export async function getPopupState(tabOrigin?: string): Promise<PopupState> {
       vaultName: null,
       serverUrl,
       lockTimeoutMinutes,
+      serverSessionMissing,
       folders: [],
+      selectedFolderId: null,
       items: null,
       matches: null,
       version: null,
@@ -674,7 +932,9 @@ export async function getPopupState(tabOrigin?: string): Promise<PopupState> {
     vaultName,
     serverUrl,
     lockTimeoutMinutes,
+    serverSessionMissing,
     folders,
+    selectedFolderId: normalizeFolderSelection(selectedFolderId),
     items: ordered,
     matches: ranked,
     version,
@@ -709,9 +969,9 @@ export async function handleAlarm(alarm: chrome.alarms.Alarm): Promise<void> {
     return;
   }
   const timeoutMinutes = await getLockTimeoutMinutes();
-  if (idleSeconds() >= timeoutMinutes * 60) {
+  if (timeoutMinutes > 0 && idleSeconds() >= timeoutMinutes * 60) {
     console.info("[voult] auto-lock after idle timeout");
-    await publishLock();
+    await publishLock("autolock");
     return;
   }
   try {
@@ -860,6 +1120,18 @@ export function adoptSnapshot(
   folders = nextDoc.folders;
   items = nextDoc.items;
   version = nextVersion;
+  // A folder deleted elsewhere can invalidate the filter; fall back to All
+  // folders (and mirror the correction) instead of scoping to a ghost folder.
+  const selection = normalizeFolderSelection(selectedFolderId);
+  if (selection !== selectedFolderId) {
+    selectedFolderId = selection;
+    const id = vaultId;
+    if (id) {
+      void persistFolderSelection(id, selection).catch((e) => {
+        console.warn("[voult] failed to correct folder filter", e);
+      });
+    }
+  }
   touch();
 }
 
@@ -886,10 +1158,29 @@ export async function markNeverOrigin(origin: string): Promise<void> {
 export { NEVER_PREFIX };
 
 /**
+ * Where a save lands when the card's picker was never touched:
+ *
+ *  - the folder the user is currently viewing, so the save follows the filter;
+ *  - "Unfiled" when that is the bucket in view (an explicit empty destination);
+ *  - otherwise the vault's default folder — `DEFAULT_FOLDER_ID`, i.e. the folder
+ *    every vault is born with ("Personal", even if it was renamed since);
+ *  - the first folder, or Unfiled, when that folder was deleted.
+ *
+ * A dangling filter id normalizes to All folders first, so this can never return
+ * a folder that is not in the current document.
+ */
+function defaultSaveFolderId(): string | null {
+  const selection = normalizeFolderSelection(selectedFolderId);
+  if (selection === UNFILED_SELECTION) return null;
+  if (selection) return selection;
+  if (folders.some((f) => f.id === DEFAULT_FOLDER_ID)) return DEFAULT_FOLDER_ID;
+  return folders[0]?.id ?? null;
+}
+
+/**
  * Destination choices for the save card: the vault label (display only), the
- * folder list in document order, and the folder a save lands in when the user
- * picks nothing (the first one — the web app files new items in a folder, not
- * in the Unfiled bucket). Read straight from the unlocked cache, so rendering
+ * folder list in document order, and the preselected destination (see
+ * `defaultSaveFolderId`). Read straight from the unlocked cache, so rendering
  * the card never costs a network hop.
  */
 function saveDestinations(): {
@@ -900,7 +1191,7 @@ function saveDestinations(): {
   return {
     vaultName,
     folders: folders.map((f) => ({ id: f.id, name: f.name })),
-    folderId: folders[0]?.id ?? null,
+    folderId: defaultSaveFolderId(),
   };
 }
 
@@ -984,9 +1275,9 @@ export interface SaveResult {
  * the password change via the same per-field LWW path.
  *
  * `folderId` is the destination picked in the save card: a folder id, or null
- * for the Unfiled bucket. Omitted (an older content script) keeps the historic
- * behaviour of filing the capture in the vault's first folder. Updates ignore
- * it — they never move an entry.
+ * for the Unfiled bucket. Omitted (an older content script) falls back to the
+ * selected folder / the vault's default folder — see `defaultSaveFolderId`.
+ * Updates ignore it — they never move an entry.
  */
 export async function pushSave(
   username: string,
@@ -1000,7 +1291,7 @@ export async function pushSave(
 
   // Resolve the destination once, outside the CAS retry: the collection point
   // must not change between attempts.
-  const destination = folderId === undefined ? (folders[0]?.id ?? null) : folderId;
+  const destination = folderId === undefined ? defaultSaveFolderId() : folderId;
 
   // Icon resolution happens against the in-memory cache while unlocked so an
   // update can heal a missing icon. The op is fixed across CAS retries (creates
@@ -1306,8 +1597,9 @@ export async function pushSaveOAuth(
     throw new Error("Unknown site origin.");
   }
   // Same destination rule as password saves: an explicit card choice wins,
-  // null means Unfiled, and "no choice" files into the first folder.
-  const destination = folderId === undefined ? (folders[0]?.id ?? null) : folderId;
+  // null means Unfiled, and "no choice" files into the selected folder (or the
+  // vault's default folder when the view is All folders).
+  const destination = folderId === undefined ? defaultSaveFolderId() : folderId;
   // Already stored on this origin — nothing to write. Reachable because the
   // banner offers vault-wide accounts: picking an account this site already
   // signs in with is a legitimate choice that simply needs no change.

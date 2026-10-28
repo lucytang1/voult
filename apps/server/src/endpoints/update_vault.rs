@@ -9,6 +9,8 @@ use crate::session_auth::session_vault_id;
 
 use crate::db::DbPool;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Vault);
+
 #[derive(Deserialize)]
 struct UpdateVaultRequest {
     pub vault: String,
@@ -75,7 +77,10 @@ pub async fn update_vault(
             return error_response(StatusCode::NOT_FOUND, "vault not found", "VAULT_NOT_FOUND");
         }
         Err(e) => {
-            log::error!("failed to fetch vault: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch vault: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to fetch vault",
@@ -129,7 +134,10 @@ pub async fn update_vault(
             );
         }
         Err(e) => {
-            log::error!("failed to update vault: {:?}", e);
+            LOG.error(
+                format_args!("failed to update vault: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to update vault",

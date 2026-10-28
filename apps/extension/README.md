@@ -19,6 +19,13 @@ right, and a top bar with the vault menu, search, and folder filter.
   `PopupState` carries them so the popup never re-implements folder semantics.
   `folderNameFor` / `itemsInFolder` / `countByFolder` are shared with the web
   app in `@voult/vault-core`.
+  The selection itself is worker state, not popup state: closing the popup keeps
+  it, every lock (manual, idle, peer, logout) clears it, and the next unlock
+  starts on *All folders*. It also scopes behaviour beyond the popup — page
+  suggestions only offer logins filed in the selected folder, and a save lands
+  there. It is mirrored in `chrome.storage.session` (opaque folder id / Unfiled
+  marker only) so a worker restart that device-unlocks the same vault restores
+  the filter.
 - **Details** — account, masked password (reveal/copy), SSO methods, and a
   fixed action card for Fill / Copy. Passwords never render until revealed.
   Creating, editing, and deleting stay in the web app.
@@ -73,6 +80,9 @@ cd apps/extension && npm install && npm run build
 - Unlocked: only same-origin matches suggested (exact/linked first, subdomain
   marked weaker); lookalike host (`examp1e`) gets nothing; cross-origin
   iframes never filled; `http` pages show insecure markers.
+- Suggestions are also scoped to the popup's folder filter: pick a folder with
+  no login for the site and focusing the field shows no dropdown; the login
+  appears again after switching to *All folders* (or its own folder).
 - Fill via dropdown click, `Ctrl/Cmd+Shift+L`, and popup Fill all dispatch
   framework-compatible input events; never auto-submits.
 - OAuth markers: dropdown rows read the account + provider (never fill);
@@ -87,10 +97,13 @@ cd apps/extension && npm install && npm run build
   site" each leave nothing behind except that last one's origin rule. Add
   persists across browser restart (verify in the web app).
 - Destination: the pill lists the vault's folders plus Unfiled and preselects
-  the first folder; picking another one files the saved login there (verify the
-  folder in the web app). The pill truncates, its tooltip shows
-  `<vault> › <folder>`. Update mode shows the same pill read-only, because an
-  update must not silently move the entry.
+  the folder currently selected in the popup (Unfiled when that bucket is in
+  view); with *All folders* selected it preselects the vault's default folder —
+  Personal (`DEFAULT_FOLDER_ID`, even if renamed), falling back to the first
+  folder when that folder was deleted. Picking another one files the saved
+  login there (verify the folder in the web app). The pill truncates, its
+  tooltip shows `<vault> › <folder>`. Update mode shows the same pill read-only,
+  because an update must not silently move the entry.
 - Changed password → "Update saved login?" with the same rows; identical
   re-login is silent.
 - Offline save → "will retry" surfaced; candidate kept in memory only (never

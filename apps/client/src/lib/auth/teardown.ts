@@ -2,46 +2,68 @@ import { QueryClient } from "@tanstack/react-query";
 import { useAppStore, loseServerSession, clearSessionState } from "../state";
 import { closeSQLite } from "../sqlite/web/init-db";
 import { deleteDeviceKey } from "../crypto/device-key";
+import { deleteVaultFavicons, forgetVaultFavicons } from "../favicon";
 
 /**
- * Central teardown path for server-forced session expiry (401
- * SESSION_REQUIRED). Ordering matters:
+ * Central handler for a server-forced session expiry (401 SESSION_REQUIRED).
  *
- * 1. Close this vault's SQLite database so no further intent/state writes can
- *    land after teardown begins — pending intents stay durable on that vault's
- *    own OPFS file for its next unlock.
- * 2. Wipe keys/plaintext and mark the server session missing, **retaining the
- *    vault selection** (see `loseServerSession`).
- * 3. Drop the ciphertext query cache so no decrypted or encrypted vault body
- *    outlives the session.
+ * A dead cookie is an authorization fact, not a lock. The vault key and
+ * plaintext live only in this device's memory; they are not server state and
+ * must survive losing access to the server. So:
  *
- * M2 behaviour change — the device key and envelope are NO LONGER deleted.
+ * 1. An **unlocked** vault stays unlocked: keys, plaintext, this vault's SQLite
+ *    handle, and ciphertext caches are all kept. Only `serverSession` becomes
+ *    `missing`, which pauses sync/cloud work until reauthentication.
+ * 2. A **locked** vault stays locked and keeps its real lock reason; its SQLite
+ *    handle is already closed and its query cache is cleared (nothing to
+ *    render). This also drops the now-meaningless session object.
  *
- * Previously this path called `deleteDeviceKey(vaultId)`, on the theory that a
- * dead session should not leave unlock material behind. That conflated the
- * cookie with the device: the cookie is the server's authorization to talk to
- * it, while the device key is a *local* secret that the user never chose to
- * per-session. Deleting it meant an expired cookie silently downgraded the
- * vault from "unlock with one tap" to "type your master password", every time,
- * for no security gain — the material is useless without the master password,
- * and it is namespaced per-vault so it cannot leak across vaults.
- *
- * Retaining it is safe *because* it is paired with a password-gated re-auth:
- * the lock screen re-establishes the session via `reauthenticateVaultSession`
- * (the existing verifier flow, never the password itself) and only then can the
- * key be used for anything. What we must not do is device-unlock silently on
- * session loss and then assume protected API access exists — the password path
- * is what re-establishes that, and it is explicit.
+ * The device key and envelope are never deleted here. Deleting them would
+ * downgrade every cookie expiry into a mandatory password re-entry for no
+ * security gain — the material is useless without the master password and is
+ * namespaced per vault.
  *
  * A real sign-out (clearing app data, or the user revoking this device) still
- * deletes the device material; that is `clearSessionState`'s caller's job, not
- * this path's.
+ * deletes the device material; that is `signOutOfVault`'s job.
  */
 export async function teardownVaultSession(queryClient?: QueryClient) {
-  await closeSQLite();
+  const { vault } = useAppStore.getState();
+  const stillUnlocked = vault.status === "unlocked";
+
+  if (!stillUnlocked) {
+    await closeSQLite();
+  }
   loseServerSession();
+  if (!stillUnlocked) queryClient?.clear();
+
+  console.info(
+    stillUnlocked
+      ? "Server session expired; vault stays unlocked, server features paused"
+      : "Server session expired; vault stays selected and locked",
+  );
+}
+
+/**
+ * Another surface switched this browser's session to a different vault.
+ *
+ * Unlike `teardownVaultSession`, this really does end local access to the
+ * selected vault: the identity in the cookie has changed, so continuing to
+ * render vault A's plaintext under a session for vault B is exactly the
+ * cross-vault contamination the selection epoch guards against. The device
+ * material is kept (the user may switch back), but the selection is cleared and
+ * the new vault is adopted locked on its next unlock.
+ */
+export async function abandonVaultSelection(queryClient?: QueryClient) {
+  const { vault } = useAppStore.getState();
+  const abandonedVaultId = vault.status === "no_vault" ? null : vault.vaultId;
+  await closeSQLite();
+  clearSessionState();
   queryClient?.clear();
-  console.info("Server session expired; vault stays selected and locked");
+  // Icons are vault-derived display bytes: dropping the selection must not
+  // leave another vault's rows rendering while the new vault loads, but the
+  // on-disk records stay (the user may switch back).
+  if (abandonedVaultId) forgetVaultFavicons(abandonedVaultId);
+  console.info("Selected vault abandoned after a server-side vault switch");
 }
 
 /**
@@ -74,6 +96,13 @@ export async function signOutOfVault(queryClient?: QueryClient, vaultId?: string
       // record is inert without the master password. Surface it rather than
       // pretending the device was fully revoked.
       console.error("Failed to delete device secrets during sign-out", e);
+    }
+    try {
+      // Icons are vault-derived display data kept on disk for warm reloads;
+      // a deliberate sign-out is the one path that must remove them.
+      await deleteVaultFavicons(target);
+    } catch (e) {
+      console.error("Failed to delete cached icons during sign-out", e);
     }
   }
   clearSessionState();

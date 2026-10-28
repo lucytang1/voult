@@ -14,11 +14,10 @@ use actix_session::config::PersistentSession;
 use actix_session::storage::CookieSessionStore;
 use actix_web::cookie::time::Duration;
 use actix_web::cookie::{Key, SameSite};
+use actix_web::middleware;
 use actix_web::middleware::DefaultHeaders;
-use actix_web::middleware::Logger;
 use actix_web::{App, HttpServer, web};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use env_logger::Env;
 use migration::{Migrator, MigratorTrait};
 use rand::RngCore;
 use std::env;
@@ -34,6 +33,11 @@ use static_site::static_site;
 
 mod config;
 use config::Environment;
+use logger::{Logger, ServerContext, ServerLogger};
+
+/// Process-level logging contexts.
+const SERVER_LOG: ServerLogger = Logger::create(ServerContext::Server);
+const CONFIG_LOG: ServerLogger = Logger::create(ServerContext::Config);
 
 fn voult_data_dir() -> PathBuf {
     config::voult_data_dir()
@@ -56,7 +60,10 @@ fn resolve_static_dir() -> String {
             ];
             for cand in &candidates {
                 if cand.join("index.html").exists() {
-                    log::info!("Using bundled static site at {}", cand.display());
+                    CONFIG_LOG.log(
+                        format_args!("Using bundled static site at {}", cand.display()),
+                        logger::Metadata::new(),
+                    );
                     return cand.to_string_lossy().to_string();
                 }
             }
@@ -77,10 +84,16 @@ fn resolve_session_cookie_key() -> String {
         }
         // Concrete validation: throw is handled by panic in caller if <64, but here
         // we treat too-short as misconfig and fall back with warn (strict would panic)
-        log::warn!(
-            "{} from env is <64 chars (got {}), ignoring and using per-install key",
-            config::ENV_SESSION_COOKIE_KEY,
-            key.len()
+        CONFIG_LOG.warn(
+            format_args!(
+                "{} from env is <64 chars (got {}), ignoring and using per-install key",
+                config::ENV_SESSION_COOKIE_KEY,
+                key.len()
+            ),
+            logger::metadata! {
+                "env_var" => config::ENV_SESSION_COOKIE_KEY,
+                "length" => key.len(),
+            },
         );
     }
 
@@ -91,12 +104,18 @@ fn resolve_session_cookie_key() -> String {
     if let Ok(existing) = fs::read_to_string(&key_path) {
         let trimmed = existing.trim().to_string();
         if trimmed.len() >= 64 {
-            log::info!("Using per-install session key at {}", key_path.display());
+            CONFIG_LOG.log(
+                format_args!("Using per-install session key at {}", key_path.display()),
+                logger::Metadata::new(),
+            );
             return trimmed;
         }
-        log::warn!(
-            "Existing session key at {} is too short, regenerating",
-            key_path.display()
+        CONFIG_LOG.warn(
+            format_args!(
+                "Existing session key at {} is too short, regenerating",
+                key_path.display()
+            ),
+            logger::Metadata::new(),
         );
     }
 
@@ -106,22 +125,31 @@ fn resolve_session_cookie_key() -> String {
     let key = BASE64_STANDARD.encode(bytes);
 
     if let Err(e) = fs::create_dir_all(&data_dir) {
-        log::warn!("Could not create data dir for session key: {}", e);
+        CONFIG_LOG.warn(
+            format_args!("Could not create data dir for session key: {}", e),
+            logger::Metadata::new(),
+        );
     } else {
         match fs::write(&key_path, format!("{key}\n")) {
             Ok(()) => {
                 // Restrict to owner only (0600) on unix
                 let _ = fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600));
-                log::info!(
-                    "Generated new per-install session key at {}",
-                    key_path.display()
+                CONFIG_LOG.log(
+                    format_args!(
+                        "Generated new per-install session key at {}",
+                        key_path.display()
+                    ),
+                    logger::Metadata::new(),
                 );
             }
             Err(e) => {
-                log::warn!(
-                    "Could not persist session key to {}: {}",
-                    key_path.display(),
-                    e
+                CONFIG_LOG.warn(
+                    format_args!(
+                        "Could not persist session key to {}: {}",
+                        key_path.display(),
+                        e
+                    ),
+                    logger::Metadata::new(),
                 );
             }
         }
@@ -132,18 +160,28 @@ fn resolve_session_cookie_key() -> String {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     config::load_dotenv();
-    env_logger::init_from_env(Env::default().default_filter_or("info"));
+    // Installs the shared logger as the global `log` backend, so every server
+    // module, Actix request log, SeaORM/SQLx record, and migration warning uses
+    // the same VOULT_LOG_LEVEL filter and output format.
+    let log_filter = logger::init();
 
     let env = Environment::from_env();
-    log::info!(
-        "VOULT_ENV={} (is_dev: {})",
-        env::var(config::ENV_VOULT_ENV)
-            .unwrap_or_else(|_| "(unset, defaulting to production)".to_string()),
-        env.is_dev()
+    SERVER_LOG.log(
+        format_args!(
+            "VOULT_LOG_LEVEL={} VOULT_ENV={} (is_dev: {})",
+            log_filter,
+            env::var(config::ENV_VOULT_ENV)
+                .unwrap_or_else(|_| "(unset, defaulting to production)".to_string()),
+            env.is_dev()
+        ),
+        logger::metadata! { "dev" => env.is_dev() },
     );
 
     let database_url = config::database_url(env);
-    log::info!("DATABASE_URL resolved to {}", database_url);
+    CONFIG_LOG.log(
+        format_args!("DATABASE_URL resolved to {}", database_url),
+        logger::Metadata::new(),
+    );
 
     // Session cookie signing/encryption secret. Must be at least 64 bytes for
     // the cookie-session backend. Never share or commit it.
@@ -207,9 +245,12 @@ async fn main() -> std::io::Result<()> {
     // lives under /api. Override the location with STATIC_DIR.
     let static_dir = resolve_static_dir();
     if !Path::new(&static_dir).join("index.html").exists() {
-        log::warn!(
-            "Static site not found at {} (run `npm run build:web` in apps/client); only the API will be served",
-            static_dir
+        CONFIG_LOG.warn(
+            format_args!(
+                "Static site not found at {} (run `npm run build:web` in apps/client); only the API will be served",
+                static_dir
+            ),
+            logger::metadata! { "static_dir" => static_dir.as_str() },
         );
     }
 
@@ -219,7 +260,17 @@ async fn main() -> std::io::Result<()> {
     // `web::Data` is an Arc, so cloning it into each worker shares one instance.
     let recovery_throttle = web::Data::new(recovery::ChallengeThrottle::default());
 
-    log::info!("Starting server at http://localhost:8080");
+    // Same reason for both favicon halves: one shared upstream HTTP client keeps
+    // connection pooling (the previous per-request client paid a fresh DNS +
+    // TCP + TLS handshake for every icon), and one shared icon cache means an
+    // icon fetched by any worker is warm for all of them.
+    let favicon_client = web::Data::new(favicon::build_http_client());
+    let favicon_cache = web::Data::new(favicon::FaviconCache::new());
+
+    SERVER_LOG.log(
+        "Starting server at http://localhost:8080",
+        logger::Metadata::new(),
+    );
     HttpServer::new(move || {
         let mut cors = Cors::default()
             .supports_credentials()
@@ -244,6 +295,8 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(db_data.clone())
             .app_data(recovery_throttle.clone())
+            .app_data(favicon_client.clone())
+            .app_data(favicon_cache.clone())
             // Required by sqlite-wasm OPFS (SharedArrayBuffer). Mirrors the
             // client's public/_headers.
             .wrap(
@@ -251,7 +304,7 @@ async fn main() -> std::io::Result<()> {
                     .add(("Cross-Origin-Opener-Policy", "same-origin"))
                     .add(("Cross-Origin-Embedder-Policy", "require-corp")),
             )
-            .wrap(Logger::default())
+            .wrap(middleware::Logger::default())
             .wrap(session_middleware)
             .wrap(cors)
             .service(

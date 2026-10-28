@@ -1,11 +1,24 @@
 import { useRouter } from "expo-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { TextField } from "@/src/lib/components/text-field";
-import { useAppStore, updateLockEpoch } from "@/src/lib/state";
-import { unlockWithPassword, reauthenticateAndUnlock } from "@/src/lib/auth/flows";
+import {
+  commitVaultUnlock,
+  readLockRecordForSelection,
+  selectVaultSession,
+  updateDecryptedVault,
+  updateLockEpoch,
+  updateVaultVersion,
+  useAppStore,
+} from "@/src/lib/state";
+import {
+  unlockWithDevice,
+  unlockWithPassword,
+  reauthenticateAndUnlock,
+} from "@/src/lib/auth/flows";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { fetchSession } from "@/src/lib/queries/session/query";
+import { getDeviceEnvelope, getDeviceKey } from "@/src/lib/crypto/device-key";
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { selectedVaultId } from "@/src/lib/state/vault-state";
 import { displayVaultName } from "@/src/lib/vault/name";
@@ -45,9 +58,82 @@ export default function Lock() {
   const serverSession = useAppStore((s) => s.serverSession);
   const availability = useAppStore((s) => s.availability);
 
+  // Why did we land here? Shown to the user and used to decide whether a
+  // device unlock is acceptable. `null` means no lock record (e.g. the vault was
+  // restored locked because the server cookie is missing or storage changed).
+  const lockReason = readLockRecordForSelection()?.reason ?? null;
+
   // A dead cookie means the password has to do double duty: re-authenticate,
-  // then unwrap. With a live session it is a local unwrap only.
+  // then unwrap. With a live session it is a local unwrap only. `unknown`
+  // (offline / not probed) has no proven-bad cookie, so the local unwrap still
+  // works when lock metadata is available.
   const needsReauth = serverSession !== "active";
+  const sessionMissing = serverSession === "missing";
+  const serverUnreachable = serverSession === "unknown";
+
+  // Is there actually something to unwrap with? A device key without its
+  // envelope cannot reopen anything, and offering the button would only produce
+  // "Device unlock is unavailable" — the dead end that makes an unexpected lock
+  // screen feel broken. Unknown until the local read resolves; assume "no".
+  const [deviceMaterial, setDeviceMaterial] = useState(false);
+  useEffect(() => {
+    let active = true;
+    if (!vaultId) {
+      setDeviceMaterial(false);
+      return;
+    }
+    (async () => {
+      try {
+        const key = await getDeviceKey(vaultId);
+        const envelope = key ? await getDeviceEnvelope(vaultId) : null;
+        if (active) {
+          setDeviceMaterial(!!key && !!envelope && envelope.device_id === key.device_id);
+        }
+      } catch (e) {
+        console.warn("Could not inspect local device material", e);
+        if (active) setDeviceMaterial(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [vaultId]);
+
+  // A timer lock is a convenience lock, not a deliberate "lock me out" decision.
+  // Let the device key reopen it without retyping the master password, exactly
+  // as a restart would. Manual/peer locks stay password-only.
+  const canDeviceUnlock =
+    deviceMaterial &&
+    serverSession === "active" &&
+    (lockReason === "autolock" || lockReason === null);
+
+  const finishUnlock = async (unlocked: NonNullable<Awaited<ReturnType<typeof unlockWithDevice>>>) => {
+    selectVaultSession(unlocked.session);
+    commitVaultUnlock(unlocked.vaultKey);
+    updateLockEpoch(unlocked.lockEpoch);
+    updateDecryptedVault(unlocked.decryptedVault);
+    updateVaultVersion(unlocked.version);
+    await initSQLite(unlocked.session.vaultId);
+  };
+
+  const onDeviceUnlock = async () => {
+    setError(null);
+    setSubmitting(true);
+    try {
+      const unlocked = await unlockWithDevice();
+      if (!unlocked) {
+        setError("Device unlock is unavailable — enter your master password.");
+        return;
+      }
+      await finishUnlock(unlocked);
+      router.replace("/home" as any);
+    } catch (err) {
+      console.warn("Device unlock failed", err);
+      setError(err instanceof Error ? err.message : "Failed to unlock.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
   const vaultUnavailable = availability === "unavailable";
 
   const onUnlock = async () => {
@@ -154,11 +240,26 @@ export default function Lock() {
           {needsReauth ? (
             <View className="max-w-120 pt-4">
               <Text className="text-[17px] font-normal leading-6.5 text-muted-text">
-                Your server session expired. Enter your master password to
-                restore access to this vault.
+                {sessionMissing
+                  ? "Your server session expired. Enter your master password to restore access to this vault."
+                  : serverUnreachable
+                    ? "The server is unreachable. Check that it is running, then enter your master password."
+                    : "Enter your master password to restore access to this vault."}
               </Text>
             </View>
-          ) : null}
+          ) : (
+            <View className="max-w-120 pt-4">
+              <Text className="text-[17px] font-normal leading-6.5 text-muted-text">
+                {lockReason === "autolock"
+                  ? "Locked automatically after inactivity."
+                  : lockReason === "manual"
+                    ? "Locked manually."
+                    : lockReason === "peer"
+                      ? "Locked from another Voult surface."
+                      : "Enter your master password to unlock this vault."}
+              </Text>
+            </View>
+          )}
         </View>
       </View>
 
@@ -192,6 +293,18 @@ export default function Lock() {
               {submitting ? "Unlocking..." : "Unlock"}
             </Text>
           </Pressable>
+
+          {canDeviceUnlock ? (
+            <Pressable
+              className="mt-3 w-full items-center justify-center rounded-[10px] border border-border bg-surface px-5 py-2.5"
+              onPress={onDeviceUnlock}
+              disabled={submitting}
+            >
+              <Text className="text-[16px] font-semibold leading-5 text-primary-text">
+                Unlock with this device
+              </Text>
+            </Pressable>
+          ) : null}
 
           {error ? (
             <Text className="mt-4 text-center text-sm text-red-400">{error}</Text>

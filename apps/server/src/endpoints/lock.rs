@@ -9,17 +9,22 @@ use crate::entity::vault::{self, Entity as Vault};
 use crate::error::{error_response, session_required};
 use crate::session_auth::session_vault_id;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Lock);
+
 #[derive(Serialize)]
 pub struct LockResponse {
     pub lock_epoch: i32,
 }
 
-/// Global lock signal for web ↔ extension consistency. Requires a valid
-/// session, then atomically bumps `vault.lock_epoch` for the session's vault.
-/// Peers observe the bump via `GET /session` (check-on-use + slow fallback,
-/// never a dedicated fast poller) and wipe local keys. The counter is
-/// monotonic and non-sensitive — never key material or plaintext. Unlocking
-/// never decrements it: unlock is per-device (each side re-unwraps locally).
+/// Global signal for a **deliberate (manual) lock** so web ↔ extension stay
+/// consistent. Requires a valid session, then atomically bumps
+/// `vault.lock_epoch` for the session's vault. Peers observe the bump via
+/// `GET /session` (check-on-use + slow fallback, never a dedicated fast poller)
+/// and wipe local keys. Idle/timer locks deliberately do not call this: the two
+/// surfaces have independent timeouts, so a timer firing on one must not force
+/// the other to lock. The counter is monotonic and non-sensitive — never key
+/// material or plaintext. Unlocking never decrements it: unlock is per-device
+/// (each side re-unwraps locally).
 #[post("/lock")]
 pub async fn lock(pool: web::Data<DbPool>, session: Session) -> HttpResponse {
     let vault_id = match session_vault_id(&session) {
@@ -37,7 +42,10 @@ pub async fn lock(pool: web::Data<DbPool>, session: Session) -> HttpResponse {
         Ok(Some(v)) => v,
         Ok(None) => return session_required(),
         Err(e) => {
-            log::error!("failed to fetch vault for lock: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch vault for lock: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to fetch vault",
@@ -56,7 +64,10 @@ pub async fn lock(pool: web::Data<DbPool>, session: Session) -> HttpResponse {
         .exec(pool.get_ref())
         .await;
     if let Err(e) = bump {
-        log::error!("failed to bump lock_epoch: {:?}", e);
+        LOG.error(
+            format_args!("failed to bump lock_epoch: {:?}", e),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to record lock",

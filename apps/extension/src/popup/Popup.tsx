@@ -24,7 +24,6 @@ export function Popup() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -128,9 +127,30 @@ export function Popup() {
     }
   }, []);
 
+  // Folder filter gestures go to the worker, which owns the value: it persists
+  // it for the unlocked lifetime and uses it to scope page suggestions and save
+  // destinations. The reply is a full state, so the list repaints optimistically
+  // here and is then replaced by the worker's normalized truth (a dangling id
+  // falls back to All folders).
+  const chooseFolder = useCallback(
+    (value: string | null) => {
+      setError(null);
+      queryClient.setQueryData<PopupState>(queryKey, (prev) =>
+        prev ? { ...prev, selectedFolderId: value } : prev,
+      );
+      void call<PopupState>({ type: "SET_FOLDER", folderId: value, tabOrigin })
+        .then((next) => queryClient.setQueryData(queryKey, next))
+        .catch((e) => setError(e instanceof Error ? e.message : "Could not change folder."));
+    },
+    [queryClient, queryKey, tabOrigin],
+  );
+
   const items = state?.items ?? [];
   const folders = state?.folders ?? [];
   const matches = state?.matches ?? null;
+  // The worker owns the folder filter (it must outlive the popup); this is a
+  // projection of it, never popup-local state. Null = All folders.
+  const selectedFolderId = state?.selectedFolderId ?? null;
 
   // Folder view: null = all items; "unfiled" = the shared Unfiled bucket.
   const scopedItems = useMemo(() => {
@@ -155,13 +175,6 @@ export function Popup() {
     });
   }, [scopedItems, query]);
 
-  // Fall back to "All folders" when the selected folder disappears (deleted
-  // on another device and adopted by a later sync).
-  useEffect(() => {
-    if (selectedFolderId === null || selectedFolderId === "unfiled") return;
-    if (!folders.some((f) => f.id === selectedFolderId)) setSelectedFolderId(null);
-  }, [folders, selectedFolderId]);
-
   // Drop a stale selection when the item leaves the current view.
   useEffect(() => {
     if (selectedId && !filteredItems.some((i) => i.id === selectedId)) {
@@ -172,7 +185,13 @@ export function Popup() {
   const selectedItem =
     filteredItems.find((item) => item.id === selectedId) ?? filteredItems[0] ?? null;
 
-  const oauthMatches = (matches ?? []).filter((m) => !m.hasPassword && m.sso.length > 0);
+  // Suggestions are folder-scoped twice: the worker already filters `matches`
+  // to the selected folder, and intersecting with the visible items keeps the
+  // block honest during the optimistic filter switch (before the reply lands).
+  const scopedIds = useMemo(() => new Set(scopedItems.map((item) => item.id)), [scopedItems]);
+  const oauthMatches = (matches ?? []).filter(
+    (m) => scopedIds.has(m.id) && !m.hasPassword && m.sso.length > 0,
+  );
 
   const fill = useCallback(
     (id: string) => {
@@ -252,7 +271,7 @@ export function Popup() {
           folders={folders}
           items={items}
           selectedFolderId={selectedFolderId}
-          onFolderChange={setSelectedFolderId}
+          onFolderChange={chooseFolder}
           menuOpen={menuOpen}
           onToggleMenu={() => setMenuOpen((v) => !v)}
           searchRef={searchRef}
@@ -280,6 +299,12 @@ export function Popup() {
           {state.insecureOrigin && (
             <div className="warn-strip">
               This page is plain http — fill only on sites you trust.
+            </div>
+          )}
+          {state.serverSessionMissing && (
+            <div className="warn-strip">
+              Server session expired. The vault stays usable here; syncing resumes after you sign in
+              again in the web app.
             </div>
           )}
           <div className="panes">

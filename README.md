@@ -53,6 +53,7 @@ voult/
 ├─ apps/client/               # Expo web app (routes: /, /auth/signup, /lock, /home, /vault/*)
 ├─ apps/server/               # Rust API (serves /api + static client bundle)
 │  └─ migration/              # vault-centric initial migration
+├─ crates/logger/             # shared Rust logger (server + launcher root files)
 ├─ launcher/                  # macOS tray launcher
 ├─ AGENTS.md                  # contributor gotchas & commands
 ├─ SECURITY_AND_FEATURE_ROADMAP.md  # audited backlog
@@ -106,6 +107,7 @@ All env vars are optional with per-install defaults. Loaded from the current dir
 | Var | Default | Notes |
 |---|---|---|
 | `VOULT_ENV` | `production` | `development` → DB in `apps/server/voult.db`; `production` → `~/Library/Application Support/Voult/voult.db` |
+| `VOULT_LOG_LEVEL` | `log` | `debug` / `log` / `warn` / `error` (case-insensitive; `info` aliases `log`). Controls all server and launcher logging, including Actix, SeaORM/SQLx, and other `log`-facade records through the global backend. `RUST_LOG` is ignored. |
 | `DATABASE_URL` | `sqlite://…?mode=rwc` per `VOULT_ENV` | SQLite connection string |
 | `SESSION_COOKIE_KEY` | per-install `~/Library/Application Support/Voult/session.key` (0600, 64B base64) | Must be ≥64 chars if provided, else ignored with warning |
 | `STATIC_DIR` | probe `Resources/dist` (Voult.app) then `../client/dist` | Override for custom bundle location |

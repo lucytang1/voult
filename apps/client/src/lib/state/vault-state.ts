@@ -79,9 +79,11 @@ export type VaultState =
  *  - `active`  — a definitive `GET /session` succeeded. The cookie names a
  *                vault that exists and protected endpoints may be called.
  *  - `missing` — a definitive `SESSION_REQUIRED` (HTTP 401 with that code).
- *                Selection and local device material are retained; the master
- *                password re-establishes the session via the existing
- *                verifier flow, then unwraps the key locally.
+ *                This is an authorization fact, not a lock: an unlocked vault
+ *                stays unlocked and usable locally while sync pauses. The
+ *                selection and local device material are retained; the master
+ *                password re-establishes the session via the existing verifier
+ *                flow, then any locked vault unwraps the key locally.
  */
 export type ServerSessionStatus = "unknown" | "active" | "missing";
 
@@ -124,8 +126,13 @@ export const INITIAL_MODEL: AppVaultModel = {
  * two are decisions by a person (or by another surface acting for one) and hold
  * until an explicit unlock; the last is a timer that was only ever a
  * convenience and is allowed to lapse on its own.
+ *
+ * A server session that has expired is deliberately NOT a lock reason. The
+ * cookie authorizes API calls; it does not own the user's lock decision. Losing
+ * it must never be recorded as "this vault was locked", or a restart would
+ * treat an authorization problem as a user intent.
  */
-export type LockReason = "manual" | "autolock" | "peer" | "session_expired";
+export type LockReason = "manual" | "autolock" | "peer";
 
 /**
  * The durable, vault-scoped record of the most recent lock.
@@ -288,22 +295,26 @@ export function buildLockRecord(
 /**
  * A definitive server rejection of the cookie.
  *
- * The core M2 rule in one function: wipe the key and plaintext, but **retain the
- * selection**. The device key and envelope stay too — deleting them on cookie
- * expiry (today's `teardownVaultSession` behaviour) means the next unlock can
- * only ever be a password unlock, even for a user who never left the device.
+ * The core rule in one function: this is an **authorization** fact, not a lock
+ * decision. An already-unlocked vault stays unlocked — its key and plaintext
+ * live only in this device's memory, and a cookie that no longer authorizes API
+ * calls cannot make local data disappear. Server-dependent work (sync, cloud)
+ * pauses instead.
  *
- * The pair it pairs with is the password path on the lock screen: re-establish
- * the session with the existing verifier flow, then unwrap locally. Note this
- * must not auto-unlock behind the user's back — a client-side unwrap succeeding
- * does not imply protected API access exists.
+ * A locked vault stays locked, with the selection retained. Neither case writes
+ * a lock record: the user did not lock anything.
+ *
+ * The device key and envelope stay too — deleting them on cookie expiry means
+ * the next unlock can only ever be a password unlock, even for a user who never
+ * left the device. Note this must not auto-unlock behind the user's back: a
+ * locally available key does not imply protected API access exists.
  */
 export function onServerSessionMissing(model: AppVaultModel): AppVaultModel {
   return {
-    vault: model.vault.status === "no_vault" ? model.vault : lockedSame(model.vault.vaultId),
+    // Selection and lock state are untouched. `no_vault` stays `no_vault`.
+    vault: model.vault,
     serverSession: "missing",
-    // Deliberately untouched: an invalid cookie says nothing about whether the
-    // vault exists on the server.
+    // An invalid cookie says nothing about whether the vault exists.
     availability: model.availability,
   };
 }
@@ -358,7 +369,14 @@ export function onVaultUnavailable(model: AppVaultModel): AppVaultModel {
 /** What startup should do with a persisted selection. */
 export type RestoreDecision =
   | { kind: "no_selection" }
-  | { kind: "stay_locked"; reason: LockReason }
+  | {
+      kind: "stay_locked";
+      /**
+       * A recorded user/timer lock, or `no_device_material` — nothing to
+       * unwrap with, so no silent restore is possible even under "Never".
+       */
+      reason: LockReason | "no_device_material";
+    }
   | { kind: "device_unlock"; because: "never_locked" | "autolock_window_lapsed" };
 
 /**
@@ -370,56 +388,88 @@ export type RestoreDecision =
  * reproducible — settings change independently of the record, and reading the
  * live value here would make the same record mean different things over time.
  *
- * The cases, in the plan's order:
+ * The cases, in order:
  *
  *  - Nothing persisted            -> `no_selection` (landing).
  *  - `manual` / `peer`            -> stay locked until an explicit unlock. A
  *    person decided this, so a restart does not undo the decision.
- *  - `session_expired`            -> stay locked, and a password is required:
- *    device unlock begins with `GET /session`, so with a dead cookie it cannot
- *    succeed even when the device key is present.
  *  - `autolock`, window still open-> stay locked. A refresh seconds after the
  *    timer fired must not look like a fresh start.
  *  - `autolock`, window lapsed    -> device unlock.
- *  - No record at all             -> device unlock, i.e. an ordinary restart of
- *    an unlocked vault. With `AUTOLOCK_NEVER` that means a restart restores
+ *  - No record at all             -> this is an ordinary restart of a vault the
+ *    timer never got to lock. That does NOT mean "unlock unconditionally": the
+ *    idle deadline still applies, because while the app was closed no activity
+ *    was recorded. `lastActivityAt` is the persisted timestamp of the last
+ *    activity while unlocked, so `now - lastActivityAt` is the true idle time.
+ *    Within the window (or with `AUTOLOCK_NEVER`) -> device unlock; past it ->
+ *    stay locked. With `AUTOLOCK_NEVER` an ordinary restart restores
  *    *unlocked*, which is the point of opting out of timer locking; it does not
  *    make a deliberate manual lock disappear.
+ *  - A finite timer but no usable `lastActivityAt` (upgrade, cleared storage)
+ *    -> stay locked. Guessing "recently used" would silently defeat the timer,
+ *    which is the unsafe direction for a credential store.
+ *  - No device key *or* no device envelope -> stay locked, whatever the timer
+ *    says. There is nothing on this browser to unwrap, so "Never" cannot
+ *    silently reopen the vault; only the master password can.
  *
  * A record naming a different vault than the selection is stale and discarded
  * rather than applied — switching vaults must not inherit the previous vault's
  * lock.
  *
- * Note this intentionally differs from today's `isLockStillActive()`, which
- * treats `AUTOLOCK_NEVER` as "hold forever" and is tab-scoped. M2 migrates the
- * bootstrap onto this and deletes that function.
+ * Session expiry is not an input here. Whether a cookie exists is orthogonal:
+ * it decides if a device unlock can fetch the vault, not whether the user's
+ * lock policy permits trying.
  */
 export function decideRestore(args: {
   selectedVaultId: string | null;
   record: LockRecord | null;
   autolockMinutes: number;
-  hasDeviceKey: boolean;
+  /**
+   * True only when this browser holds *both* the device key and its
+   * device-wrapped vault-key envelope for this vault.
+   *
+   * The pair is required, not just the key: a device key with no envelope has
+   * nothing to unwrap, so `unlockWithDevice()` can only fail. Treating that as
+   * usable is what made reloads land on the lock screen while the policy said
+   * "restore" — the decision promised a silent unlock that could never happen.
+   */
+  hasDeviceMaterial: boolean;
+  /**
+   * Epoch ms of the last recorded activity while this vault was unlocked, or
+   * null when never recorded (fresh install, cleared storage, or an old
+   * version of the app).
+   */
+  lastActivityAt: number | null;
   now?: number;
 }): RestoreDecision {
-  const { selectedVaultId, record, autolockMinutes, hasDeviceKey } = args;
+  const { selectedVaultId, record, autolockMinutes, hasDeviceMaterial, lastActivityAt } = args;
   const now = args.now ?? Date.now();
 
   if (!selectedVaultId) return { kind: "no_selection" };
+
+  const expiredByActivity =
+    autolockMinutes > 0 &&
+    (lastActivityAt === null || now - lastActivityAt >= autolockMinutes * 60_000);
+
   if (!record || record.vaultId !== selectedVaultId) {
-    // No lock ever happened for *this* vault: an ordinary restart.
-    return hasDeviceKey
-      ? { kind: "device_unlock", because: "never_locked" }
-      : { kind: "stay_locked", reason: "manual" };
+    if (!hasDeviceMaterial) return { kind: "stay_locked", reason: "no_device_material" };
+    // Never locking: no timer can hold the vault closed across a restart.
+    if (autolockMinutes <= 0) {
+      return { kind: "device_unlock", because: "never_locked" };
+    }
+    return expiredByActivity
+      ? { kind: "stay_locked", reason: "autolock" }
+      : { kind: "device_unlock", because: "never_locked" };
   }
-  if (!hasDeviceKey) return { kind: "stay_locked", reason: record.reason };
+  if (!hasDeviceMaterial) {
+    // The recorded reason still describes the last lock; there is simply no
+    // envelope to restore with. Surface that honestly rather than pretending a
+    // manual lock is what is holding the vault closed.
+    return { kind: "stay_locked", reason: "no_device_material" };
+  }
 
   if (record.reason === "manual" || record.reason === "peer") {
     return { kind: "stay_locked", reason: record.reason };
-  }
-  if (record.reason === "session_expired") {
-    // The envelope could unwrap locally, but without a cookie every protected
-    // call would 401, so a password is needed to re-establish the session.
-    return { kind: "stay_locked", reason: "session_expired" };
   }
   // autolock, and a device key is present: only the elapsed window matters.
   if (autolockMinutes <= 0) {
