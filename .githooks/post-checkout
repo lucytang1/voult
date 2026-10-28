@@ -1,0 +1,17 @@
+#!/bin/sh
+# Git worktrees do not carry gitignored files, so a fresh worktree has no .env.
+# post-checkout is the only Git hook that runs during `git worktree add`, so it
+# links the main worktree's env files into the new one.
+#
+# Install once per clone with: ./scripts/env-worktrees.sh setup
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+script="$repo_root/scripts/env-worktrees.sh"
+[ -f "$script" ] || exit 0
+
+# Never block a checkout if linking fails; report the repair command instead.
+bash "$script" sync --quiet || \
+  printf 'warning: could not link .env files into %s; run %s sync --all\n' \
+    "$repo_root" "$script" >&2
+
+exit 0

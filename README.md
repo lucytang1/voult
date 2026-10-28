@@ -119,6 +119,26 @@ All env vars are optional with per-install defaults. Loaded from the current dir
 
 See `.env.example` for a copy-paste template.
 
+### Env files in Git worktrees
+
+`.env` files are deliberately gitignored, so `git worktree add` cannot copy them. The repo ships a `post-checkout` hook that discovers the ignored `.env` / `.env.*` files in the main checkout and symlinks the missing ones into each new linked worktree. Existing files are never overwritten, and the links stay gitignored. Templates and copies inside ignored build/dependency directories are skipped.
+
+Enable it once per clone:
+
+```sh
+./scripts/env-worktrees.sh setup
+```
+
+This sets the repo-local `core.hooksPath` to `.githooks` and backfills existing worktrees. New worktrees created with `git worktree add` are handled automatically. If `core.hooksPath` is already set to another directory, `setup` stops rather than replacing it; merge `.githooks/post-checkout` into that directory manually.
+
+Git has no "worktree created" hook, so tools that bypass hooks (manual copies, `git worktree add --no-checkout` before the first checkout, or hooks disabled) cannot be intercepted. Repair those worktrees with:
+
+```sh
+./scripts/env-worktrees.sh sync --all
+```
+
+Hook configuration is local to a clone and is not copied by `git clone`, so run `setup` again after cloning.
+
 ---
 
 ## Auth & Storage
