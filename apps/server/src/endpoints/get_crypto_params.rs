@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::db::DbPool;
 use crate::entity::vault::{self, Entity as Vaults};
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Auth);
+
 #[derive(Deserialize)]
 pub struct GetCryptoParamsRequest {
     // Vault identity the client wants KDF params for, before unlocking.
@@ -75,7 +77,10 @@ pub async fn get_crypto_params(
             return error_response(StatusCode::NOT_FOUND, "vault not found", "VAULT_NOT_FOUND");
         }
         Err(e) => {
-            log::error!("failed to fetch vault: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch vault: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to fetch vault",

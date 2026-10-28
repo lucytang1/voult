@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    io,
+    fs, io,
     net::TcpStream,
     path::PathBuf,
     process::{Child, Command, ExitStatus, Stdio},
@@ -24,6 +23,13 @@ const QUIT_ITEM_ID: &str = "quit_item";
 
 mod config;
 use config::Environment;
+
+/// Hardcoded contexts for the launcher's root-level logging.
+const LAUNCHER_LOG: logger::LauncherLogger =
+    logger::Logger::create(logger::LauncherContext::Launcher);
+const PROCESS_LOG: logger::LauncherLogger =
+    logger::Logger::create(logger::LauncherContext::Process);
+const TRAY_LOG: logger::LauncherLogger = logger::Logger::create(logger::LauncherContext::Tray);
 
 /// Address the server is expected to listen on. The launcher only needs to
 /// know "is something listening" — a raw TCP connect is enough for that and
@@ -97,7 +103,9 @@ impl Launcher {
 
     fn is_port_open(&self) -> bool {
         TcpStream::connect_timeout(
-            &SERVER_ADDR.parse().expect("SERVER_ADDR is a valid socket addr"),
+            &SERVER_ADDR
+                .parse()
+                .expect("SERVER_ADDR is a valid socket addr"),
             HEALTH_PROBE_TIMEOUT,
         )
         .is_ok()
@@ -144,13 +152,19 @@ impl Launcher {
                         self.state = ServerState::Stopped;
                     } else {
                         let reason = Self::describe_exit(status);
-                        eprintln!("Server terminated unexpectedly ({reason})");
+                        PROCESS_LOG.error(
+                            format_args!("Server terminated unexpectedly ({reason})"),
+                            logger::Metadata::new(),
+                        );
                         self.state = ServerState::Crashed { reason };
                     }
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    eprintln!("Could not inspect server process: {error}");
+                    PROCESS_LOG.error(
+                        format_args!("Could not inspect server process: {error}"),
+                        logger::Metadata::new(),
+                    );
                     self.child = None;
                     self.state = ServerState::Stopped;
                 }
@@ -187,10 +201,13 @@ impl Launcher {
             // Nothing of ours, but the port is busy → someone else's server.
             (_, true) if self.child.is_none() => {
                 let pid = Self::foreign_pid();
-                info_log(&format!(
-                    "Detected server on {SERVER_ADDR} not started by launcher{}",
-                    pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
-                ));
+                PROCESS_LOG.log(
+                    format_args!(
+                        "Detected server on {SERVER_ADDR} not started by launcher{}",
+                        pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+                    ),
+                    logger::Metadata::new(),
+                );
                 self.state = ServerState::RunningElsewhere { pid };
             }
             _ => {}
@@ -200,7 +217,10 @@ impl Launcher {
         if transitioned_to_running && !self.has_auto_opened {
             self.has_auto_opened = true;
             if Environment::from_env().is_dev() {
-                info_log("Dev mode (VOULT_ENV=development): auto-open disabled");
+                LAUNCHER_LOG.log(
+                    "Dev mode (VOULT_ENV=development): auto-open disabled",
+                    logger::Metadata::new(),
+                );
             } else {
                 Self::open_browser();
             }
@@ -210,7 +230,10 @@ impl Launcher {
     /// Best-effort open of http://localhost:8080 in the default browser.
     fn open_browser() {
         let url = "http://localhost:8080";
-        info_log(&format!("Opening browser at {url}"));
+        LAUNCHER_LOG.log(
+            format_args!("Opening browser at {url}"),
+            logger::Metadata::new(),
+        );
         // `open` crate handles macOS `open` correctly; fallback to Command.
         if open::that(url).is_err() {
             let _ = Command::new("open").arg(url).stdin(Stdio::null()).spawn();
@@ -265,7 +288,10 @@ impl Launcher {
 
         // Prefer direct binary if bundled; fallback to `cargo run` for dev.
         if let Some(bin) = Self::resolve_server_binary() {
-            info_log(&format!("Starting bundled server at {}", bin.display()));
+            PROCESS_LOG.log(
+                format_args!("Starting bundled server at {}", bin.display()),
+                logger::Metadata::new(),
+            );
             // Prepare log file
             let log_path = Self::log_file_path();
             let (stdout, stderr) = if let Some(ref p) = log_path {
@@ -274,7 +300,8 @@ impl Launcher {
                         let s1 = f.try_clone().ok();
                         let s2 = f.try_clone().ok();
                         let to_stdio = |opt: Option<fs::File>| {
-                            opt.map(|file| Stdio::from(file)).unwrap_or_else(Stdio::null)
+                            opt.map(|file| Stdio::from(file))
+                                .unwrap_or_else(Stdio::null)
                         };
                         // We need two handles; if clone fails, inherit for visibility
                         if s1.is_some() && s2.is_some() {
@@ -284,7 +311,10 @@ impl Launcher {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Could not open log file {}: {e}", p.display());
+                        LAUNCHER_LOG.warn(
+                            format_args!("Could not open log file {}: {e}", p.display()),
+                            logger::metadata! { "path" => p.display().to_string() },
+                        );
                         (Stdio::inherit(), Stdio::inherit())
                     }
                 }
@@ -308,14 +338,20 @@ impl Launcher {
 
             match result {
                 Ok(server) => {
-                    info_log(&format!("Started server process (pid {})", server.id()));
+                    PROCESS_LOG.log(
+                        format_args!("Started server process (pid {})", server.id()),
+                        logger::metadata! { "pid" => server.id() },
+                    );
                     self.child = Some(server);
                     self.state = ServerState::Starting;
                     self.last_health_probe =
                         Instant::now() - HEALTH_PROBE_INTERVAL + Duration::from_millis(250);
                 }
                 Err(error) => {
-                    eprintln!("Could not start server binary {}: {error}", bin.display());
+                    PROCESS_LOG.error(
+                        format_args!("Could not start server binary {}: {error}", bin.display()),
+                        logger::metadata! { "path" => bin.display().to_string() },
+                    );
                     self.state = ServerState::Crashed {
                         reason: format!("failed to spawn: {error}"),
                     };
@@ -328,7 +364,10 @@ impl Launcher {
         let server_directory = match Self::server_directory() {
             Ok(directory) => directory,
             Err(error) => {
-                eprintln!("Could not locate server directory: {error}");
+                PROCESS_LOG.error(
+                    format_args!("Could not locate server directory: {error}"),
+                    logger::Metadata::new(),
+                );
                 return;
             }
         };
@@ -343,10 +382,10 @@ impl Launcher {
 
         match result {
             Ok(server) => {
-                info_log(&format!(
-                    "Started server process (pid {})",
-                    server.id()
-                ));
+                PROCESS_LOG.log(
+                    format_args!("Started server process (pid {})", server.id()),
+                    logger::metadata! { "pid" => server.id() },
+                );
                 self.child = Some(server);
                 self.state = ServerState::Starting;
                 // Probe promptly rather than waiting a full interval so the
@@ -355,7 +394,10 @@ impl Launcher {
                     Instant::now() - HEALTH_PROBE_INTERVAL + Duration::from_millis(250);
             }
             Err(error) => {
-                eprintln!("Could not start server: {error}");
+                PROCESS_LOG.error(
+                    format_args!("Could not start server: {error}"),
+                    logger::Metadata::new(),
+                );
                 self.state = ServerState::Crashed {
                     reason: format!("failed to spawn: {error}"),
                 };
@@ -366,7 +408,10 @@ impl Launcher {
     fn stop_server(&mut self) {
         if let Some(mut server) = self.child.take() {
             if let Err(error) = server.kill() {
-                eprintln!("Could not stop server: {error}");
+                PROCESS_LOG.warn(
+                    format_args!("Could not stop server: {error}"),
+                    logger::metadata! { "pid" => server.id() },
+                );
             }
             let _ = server.wait();
         }
@@ -414,8 +459,7 @@ impl Launcher {
 
     fn build_tray(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let start_stop_item = MenuItem::with_id(START_ITEM_ID, "Start Server", true, None);
-        let status_item =
-            MenuItem::with_id(STATUS_ITEM_ID, "Status: Not running", false, None);
+        let status_item = MenuItem::with_id(STATUS_ITEM_ID, "Status: Not running", false, None);
         let quit_item = MenuItem::with_id(QUIT_ITEM_ID, "Quit", true, None);
         let menu = Menu::with_items(&[&start_stop_item, &status_item, &quit_item])?;
 
@@ -433,9 +477,7 @@ impl Launcher {
             .with_menu(Box::new(menu));
         match Self::load_tray_icon() {
             Some(icon) => {
-                builder = builder
-                    .with_icon(icon)
-                    .with_icon_as_template(true);
+                builder = builder.with_icon(icon).with_icon_as_template(true);
             }
             None => {
                 // Fallback to the old text label if the icon can't be decoded.
@@ -452,18 +494,24 @@ impl Launcher {
     fn load_tray_icon() -> Option<Icon> {
         const ICON_BYTES: &[u8] = include_bytes!("../assets/voult.png");
         let image = image::load_from_memory(ICON_BYTES)
-            .inspect_err(|error| eprintln!("Could not decode tray icon: {error}"))
+            .inspect_err(|error| {
+                TRAY_LOG.warn(
+                    format_args!("Could not decode tray icon: {error}"),
+                    logger::Metadata::new(),
+                );
+            })
             .ok()?
             .into_rgba8();
         let (width, height) = image.dimensions();
         Icon::from_rgba(image.into_raw(), width, height)
-            .inspect_err(|error| eprintln!("Could not create tray icon: {error}"))
+            .inspect_err(|error| {
+                TRAY_LOG.warn(
+                    format_args!("Could not create tray icon: {error}"),
+                    logger::Metadata::new(),
+                );
+            })
             .ok()
     }
-}
-
-fn info_log(message: &str) {
-    println!("[launcher] {message}");
 }
 
 impl ApplicationHandler<UserEvent> for Launcher {
@@ -473,7 +521,10 @@ impl ApplicationHandler<UserEvent> for Launcher {
         }
 
         if let Err(error) = self.build_tray() {
-            eprintln!("Could not create Voult menu bar item: {error}");
+            TRAY_LOG.error(
+                format_args!("Could not create Voult menu bar item: {error}"),
+                logger::Metadata::new(),
+            );
             event_loop.exit();
             return;
         }
@@ -482,7 +533,10 @@ impl ApplicationHandler<UserEvent> for Launcher {
         // immediately makes http://localhost:8080 usable.
         // Dev skips auto-start so launcher/server can be tested independently.
         if Environment::from_env().is_dev() {
-            info_log("Dev mode (VOULT_ENV=development): auto-start disabled — use \"Start Server\" in the tray menu");
+            LAUNCHER_LOG.log(
+                "Dev mode (VOULT_ENV=development): auto-start disabled — use \"Start Server\" in the tray menu",
+                logger::Metadata::new(),
+            );
             if self.is_port_open() {
                 // Still reflect current port state immediately without the
                 // 2s probe delay, but don't auto-open the browser in dev.
@@ -552,8 +606,16 @@ impl ApplicationHandler<UserEvent> for Launcher {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     config::load_dotenv();
+    let log_filter = logger::init();
+    LAUNCHER_LOG.log(
+        format_args!("launcher starting (VOULT_LOG_LEVEL={log_filter})"),
+        logger::Metadata::new(),
+    );
     if Environment::from_env().is_dev() {
-        eprintln!("[launcher] VOULT_ENV=development detected (dev mode)");
+        LAUNCHER_LOG.log(
+            "VOULT_ENV=development detected (dev mode)",
+            logger::Metadata::new(),
+        );
     }
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;

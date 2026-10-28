@@ -9,6 +9,8 @@ use crate::entity::vault::ActiveModel as VaultActiveModel;
 use crate::id_codec::uuid_to_db;
 use crate::session_auth::establish_vault_session;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Register);
+
 #[derive(Deserialize)]
 pub struct RegisterRequest {
     // Client-generated, stable vault identity embedded in the encrypted vault.
@@ -125,7 +127,10 @@ pub async fn register(
     let tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
-            log::error!("failed to create transaction: {:?}", e);
+            LOG.error(
+                format_args!("failed to create transaction: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to create vault",
@@ -168,7 +173,10 @@ pub async fn register(
                 || err_str.contains("unique constraint")
                 || err_str.contains("1555");
             if matches!(e, sea_orm::DbErr::Exec(_) | sea_orm::DbErr::Query(_)) && is_unique {
-                log::warn!("vault registration conflict: {:?}", e);
+                LOG.warn(
+                    format_args!("vault registration conflict: {:?}", e),
+                    logger::Metadata::new(),
+                );
                 let _ = tx.rollback().await;
                 return error_response(
                     StatusCode::CONFLICT,
@@ -178,7 +186,10 @@ pub async fn register(
             }
             // Also treat any Exec/Query with unique substring as conflict even if above missed
             if is_unique {
-                log::warn!("vault registration conflict (unique): {:?}", e);
+                LOG.warn(
+                    format_args!("vault registration conflict (unique): {:?}", e),
+                    logger::Metadata::new(),
+                );
                 let _ = tx.rollback().await;
                 return error_response(
                     StatusCode::CONFLICT,
@@ -186,7 +197,10 @@ pub async fn register(
                     "VAULT_EXISTS",
                 );
             }
-            log::error!("failed to create vault: {:?}", e);
+            LOG.error(
+                format_args!("failed to create vault: {:?}", e),
+                logger::Metadata::new(),
+            );
             let _ = tx.rollback().await;
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -197,7 +211,10 @@ pub async fn register(
     };
 
     if let Err(e) = tx.commit().await {
-        log::error!("failed to commit transaction: {:?}", e);
+        LOG.error(
+            format_args!("failed to commit transaction: {:?}", e),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to create vault",
@@ -207,7 +224,10 @@ pub async fn register(
 
     // Establish a vault-scoped session for the newly created vault.
     if let Err(e) = establish_vault_session(&session, &inserted_vault.id) {
-        log::error!("failed to establish session: {:?}", e);
+        LOG.error(
+            format_args!("failed to establish session: {:?}", e),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to establish session",
@@ -218,7 +238,10 @@ pub async fn register(
     let vault_id = match Uuid::parse_str(&inserted_vault.id) {
         Ok(id) => id,
         Err(e) => {
-            log::error!("invalid UUID in inserted vault.id: {:?}", e);
+            LOG.error(
+                format_args!("invalid UUID in inserted vault.id: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "invalid vault id in database",
@@ -331,7 +354,10 @@ mod tests {
 
         let v = find_vault(&pool).await.expect("vault row exists");
 
-        assert_eq!(v.recovery_verifier.as_deref(), Some("cmVjb3ZlcnktdmVyaWZpZXI="));
+        assert_eq!(
+            v.recovery_verifier.as_deref(),
+            Some("cmVjb3ZlcnktdmVyaWZpZXI=")
+        );
         assert_eq!(v.recovery_salt.as_deref(), Some("cmVjb3Zlcnktc2FsdA=="));
         assert_eq!(v.recovery_wrap.as_deref(), Some("cmVjb3Zlcnktd3JhcA=="));
         assert_eq!(v.recovery_wrap_iv.as_deref(), Some("cmVjdml2"));

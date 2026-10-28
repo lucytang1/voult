@@ -89,7 +89,7 @@ export function clearSelectedVaultId(): void {
  * rather than imported so that a malformed stored value is caught by the
  * validator below instead of being trusted as a typed enum.
  */
-const LOCK_REASONS = ["manual", "autolock", "peer", "session_expired"] as const;
+const LOCK_REASONS = ["manual", "autolock", "peer"] as const;
 export type StoredLockReason = (typeof LOCK_REASONS)[number];
 
 export interface StoredLockRecord {
@@ -141,4 +141,70 @@ export function persistLockRecord(record: StoredLockRecord): void {
 
 export function clearLockRecord(): void {
   removeRaw(LOCK_RECORD_KEY);
+}
+
+// --- Idle activity -------------------------------------------------------
+
+/**
+ * Last recorded activity while a vault was unlocked, per vault.
+ *
+ * The auto-lock timer is a *deadline*, not a background job: a closed tab or
+ * browser cannot run code at the five-minute mark. Persisting the timestamp
+ * lets the next start compare wall-clock idle time before it restores a key or
+ * renders a vault, so closing the app early does not reset the window.
+ *
+ * Not secret: a number. Never key material, a password, or vault contents.
+ */
+const ACTIVITY_PREFIX = "voult.lastActivity.";
+
+const activityKey = (vaultId: string) => `${ACTIVITY_PREFIX}${vaultId}`;
+
+/** Epoch ms of the last activity, or null when none has been recorded. */
+export function readLastActivity(vaultId: string): number | null {
+  const raw = readRaw(activityKey(vaultId));
+  if (raw === null) return null;
+  const parsed = Number(raw);
+  // A corrupt/far-future value could keep a vault open forever (negative idle
+  // time), so only accept a finite past-ish timestamp.
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > Date.now() + 60_000) {
+    console.warn("Discarding invalid last-activity timestamp", raw);
+    return null;
+  }
+  return parsed;
+}
+
+export function persistLastActivity(vaultId: string, at: number = Date.now()): void {
+  writeRaw(activityKey(vaultId), String(at));
+}
+
+export function clearLastActivity(vaultId: string): void {
+  removeRaw(activityKey(vaultId));
+}
+
+// --- One-time lock-policy migration -------------------------------------
+
+const POLICY_VERSION_KEY = "voult.lockPolicyVersion";
+/** Bump when the meaning of a stored lock reason changes. */
+const POLICY_VERSION = 2;
+
+/**
+ * Heal lock records written by the earlier build that published *timer* locks
+ * through `POST /lock`. Those bumps were recorded by peers as `peer` — a
+ * "someone deliberately locked this" decision — so the vault kept reopening
+ * locked even when the local timer permitted a restore.
+ *
+ * From POLICY_VERSION 2 only a manual lock can produce a peer record, so a
+ * pre-existing `peer` record is ambiguous. Discarding it once is the safe
+ * trade: the user simply unlocks (or stays unlocked) and a future deliberate
+ * lock is recorded normally. This runs once per browser profile.
+ */
+export function migrateLockPolicy(): void {
+  const current = readRaw(POLICY_VERSION_KEY);
+  if (current === String(POLICY_VERSION)) return;
+  const record = readLockRecord();
+  if (record?.reason === "peer") {
+    console.info("Discarding a legacy peer lock record (timer-lock propagation fix)");
+    clearLockRecord();
+  }
+  writeRaw(POLICY_VERSION_KEY, String(POLICY_VERSION));
 }

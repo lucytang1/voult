@@ -75,11 +75,13 @@ export const getWebAutolockMinutes = (): number =>
 export const setWebAutolockMinutes = (minutes: number): void => writeMinutes(WEB_KEY, minutes);
 
 /**
- * Inactivity timeout the *extension* should use. Stored here so the preference
- * has one home, but NOT yet delivered to the extension — the extension still
- * reads its own `voult.lockTimeoutMinutes` in chrome.storage.local. Wiring the
- * two needs a server-side per-vault settings record the extension pulls on its
- * next session check; until then this value is the user's intent only.
+ * The extension's own inactivity timeout.
+ *
+ * Deliberately independent from the web timer: the extension reads
+ * `voult.lockTimeoutMinutes` from its own `chrome.storage.local`, set from its
+ * settings screen (different origin, so the web app cannot write it). This
+ * accessor exists so both values share one definition of "Never" and the
+ * 4-hour ceiling if a delivery mechanism is added later.
  */
 export const getExtensionAutolockMinutes = (): number =>
   readMinutes(EXTENSION_KEY, DEFAULT_EXTENSION_AUTOLOCK_MINUTES);

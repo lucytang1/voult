@@ -14,6 +14,8 @@ use crate::entity::pair_code::{self, Entity as PairCode};
 use crate::error::{error_response, session_required};
 use crate::session_auth::session_vault_id;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Pair);
+
 // One-time extension-pairing codes (plans/extension-signin-flow.md §4b).
 //
 // The web app (authenticated) mints a short code; the extension (which shares
@@ -172,14 +174,17 @@ pub async fn pair_start(pool: web::Data<DbPool>, session: Session) -> HttpRespon
         expires_at: Set(expires_at),
     };
     if let Err(e) = am.insert(pool.get_ref()).await {
-        log::error!("failed to create pair code: {:?}", e);
+        LOG.error(
+            format_args!("failed to create pair code: {:?}", e),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to create pairing code",
             "DB_ERROR",
         );
     }
-    log::info!("pairing code minted");
+    LOG.log(format_args!("pairing code minted"), logger::Metadata::new());
     HttpResponse::Ok().json(PairStartResponse {
         code,
         expires_at: expires_at.to_rfc3339(),
@@ -254,7 +259,10 @@ pub async fn pair_consume(
             );
         }
         Err(e) => {
-            log::error!("failed to look up pair code: {:?}", e);
+            LOG.error(
+                format_args!("failed to look up pair code: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to redeem pairing code",
@@ -283,7 +291,10 @@ pub async fn pair_consume(
         .exec(pool.get_ref())
         .await;
     clear_code_attempts(&hash);
-    log::info!("pairing code redeemed");
+    LOG.log(
+        format_args!("pairing code redeemed"),
+        logger::Metadata::new(),
+    );
     HttpResponse::Ok().json(PairConsumeResponse {
         vault_id: record.vault_id,
     })

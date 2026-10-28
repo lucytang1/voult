@@ -24,6 +24,7 @@ import { displayVaultName, hasKnownVaultName } from "@/src/lib/vault/name";
 import { fetchSession } from "@/src/lib/queries/session/query";
 import { initSQLite } from "@/src/lib/sqlite/web/init-db";
 import { upsertVaultId, upsertVaultVersion } from "@/src/lib/sqlite/web/services/client-state-service";
+import { forgetVaultFavicons } from "@/src/lib/favicon";
 
 /**
  * Vault Chooser (vault-centric).
@@ -177,9 +178,11 @@ export default function VaultChooser() {
 
       // Abandon the old vault's ciphertext cache before the new document
       // lands. Its device records and OPFS file stay namespaced for its own
-      // next unlock; initSQLite below releases the old handle.
+      // next unlock; initSQLite below releases the old handle. Icons are only
+      // dropped from memory — the on-disk records stay namespaced per vault,
+      // so switching back is instant and no icon can bleed across vaults.
       queryClient.removeQueries({ queryKey: ["vault"] });
-      if (previousVaultId) queryClient.removeQueries({ queryKey: ["favicon", previousVaultId] });
+      if (previousVaultId) forgetVaultFavicons(previousVaultId);
       queryClient.removeQueries({ queryKey: ["cloud"] });
 
       switchVaultOpen({

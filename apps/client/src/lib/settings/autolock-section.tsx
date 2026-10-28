@@ -1,12 +1,10 @@
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { Lock, Monitor, Puzzle, type LucideIcon } from "lucide-react";
+import { Lock, Monitor, type LucideIcon } from "lucide-react";
 import {
   AUTOLOCK_CHOICES,
   describeAutolock,
-  getExtensionAutolockMinutes,
   getWebAutolockMinutes,
-  setExtensionAutolockMinutes,
   setWebAutolockMinutes,
 } from "./index";
 
@@ -15,18 +13,18 @@ import {
  *
  * Both timers mean the same thing on their own surface — "lock me after this
  * much inactivity" — but they are enforced by different processes and are
- * deliberately independent values:
+ * deliberately independent values (a shared value would need a delivery
+ * mechanism the extension does not have):
  *
  *  - Web app: enforced here, by useAutolock() in the root layout.
  *  - Extension: enforced by the extension's own idle alarm against
- *    `voult.lockTimeoutMinutes` in chrome.storage.local. This app cannot write
- *    that storage, so the value below records the user's intent and is not yet
- *    delivered — see the footnote. Wiring it needs a per-vault settings record
- *    on the server that the extension pulls on its next session check.
+ *    `voult.lockTimeoutMinutes` in chrome.storage.local, set from the
+ *    extension's settings screen.
  *
- * Note that either timer firing also locks the *other* surface: both publish
- * via POST /api/lock, which bumps the shared server `lock_epoch`. Separate
- * values mean separate idle thresholds, not isolated locks.
+ * Either surface's **manual** lock also locks the other: both publish via
+ * POST /api/lock, which bumps the shared server `lock_epoch`. Idle timers are
+ * local to their surface — separate values mean separate idle thresholds, and a
+ * timer firing on one side must not lock the other.
  */
 
 function useAutolockValue(read: () => number, write: (minutes: number) => void) {
@@ -85,8 +83,8 @@ function TimerRow({ icon: Icon, label, description, minutes, onChange, footnote 
 
       {minutes <= 0 && (
         <Text className="mt-3 text-xs text-yellow-400">
-          {label} will stay unlocked until you lock it manually. Locking also stops surviving a
-          page reload.
+          {label} will not lock on inactivity. It can reopen on this device after a restart, while
+          the server is reachable. A manual lock still requires an explicit unlock.
         </Text>
       )}
       {footnote && <Text className="mt-3 text-xs text-muted-text">{footnote}</Text>}
@@ -96,10 +94,6 @@ function TimerRow({ icon: Icon, label, description, minutes, onChange, footnote 
 
 export function AutolockSection() {
   const [webMinutes, setWebMinutes] = useAutolockValue(getWebAutolockMinutes, setWebAutolockMinutes);
-  const [extensionMinutes, setExtensionMinutes] = useAutolockValue(
-    getExtensionAutolockMinutes,
-    setExtensionAutolockMinutes,
-  );
 
   return (
     <View className="rounded-2xl bg-surface1 overflow-hidden p-5">
@@ -116,19 +110,17 @@ export function AutolockSection() {
         <TimerRow
           icon={Monitor}
           label="Web app"
-          description="Locks this browser session after a period without activity, and unloads your vault keys."
+          description="Locks this browser after a period without activity, and unloads your vault keys."
           minutes={webMinutes}
           onChange={setWebMinutes}
         />
-        <TimerRow
-          icon={Puzzle}
-          label="Browser extension"
-          description="Locks the extension after a period without activity, before it will release a saved credential."
-          minutes={extensionMinutes}
-          onChange={setExtensionMinutes}
-          footnote="Not applied yet — the extension still reads its own timeout. Until this is wired up, set it from the extension's settings screen."
-        />
       </View>
+
+      <Text className="mt-4 text-xs text-muted-text">
+        The browser extension keeps its own independent timeout; set it from the extension's
+        settings screen. Timers are local to each surface — only pressing Lock in one place locks
+        the other.
+      </Text>
     </View>
   );
 }

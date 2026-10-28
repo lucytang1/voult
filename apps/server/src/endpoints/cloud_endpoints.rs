@@ -12,6 +12,8 @@ use crate::entity::cloud_pending_token;
 use crate::entity::cloud_token::{self, Entity as CloudTokenEntity};
 use crate::session_auth::session_vault_id;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Cloud);
+
 /// Resolve the single active provider from the binding. Before first binding,
 /// use the most recently connected credential; retained credentials for older
 /// providers are switch-back cache and must never override an active binding.
@@ -24,14 +26,20 @@ async fn selected_provider(pool: &DbPool, vault_id: &str) -> Option<ProviderKind
             return match ProviderKind::parse(&binding.provider_kind) {
                 Ok(kind) => Some(kind),
                 Err(err) => {
-                    log::error!("vault binding has unknown cloud provider: {}", err);
+                    LOG.error(
+                        format_args!("vault binding has unknown cloud provider: {}", err),
+                        logger::Metadata::new(),
+                    );
                     None
                 }
             };
         }
         Ok(None) => {}
         Err(err) => {
-            log::error!("failed to resolve cloud binding provider: {}", err);
+            LOG.error(
+                format_args!("failed to resolve cloud binding provider: {}", err),
+                logger::Metadata::new(),
+            );
             return None;
         }
     }
@@ -44,13 +52,19 @@ async fn selected_provider(pool: &DbPool, vault_id: &str) -> Option<ProviderKind
         Ok(Some(token)) => match ProviderKind::parse(&token.provider_kind) {
             Ok(kind) => Some(kind),
             Err(err) => {
-                log::error!("cloud token has unknown provider: {}", err);
+                LOG.error(
+                    format_args!("cloud token has unknown provider: {}", err),
+                    logger::Metadata::new(),
+                );
                 None
             }
         },
         Ok(None) => None,
         Err(err) => {
-            log::error!("failed to resolve active cloud provider: {}", err);
+            LOG.error(
+                format_args!("failed to resolve active cloud provider: {}", err),
+                logger::Metadata::new(),
+            );
             None
         }
     }
@@ -80,9 +94,12 @@ async fn live_session_vault_id(pool: &DbPool, session: &Session) -> Option<Strin
             if vault_exists(pool, &id).await {
                 Some(id)
             } else {
-                log::warn!(
-                    "session names vault {} which does not exist; treating as no session",
-                    &id[..8.min(id.len())]
+                LOG.warn(
+                    format_args!(
+                        "session names vault {} which does not exist; treating as no session",
+                        &id[..8.min(id.len())]
+                    ),
+                    logger::Metadata::new(),
                 );
                 session.purge();
                 None
@@ -136,9 +153,12 @@ pub async fn cloud_credentials(pool: web::Data<DbPool>, session: Session) -> Htt
     {
         Ok(rows) => rows,
         Err(err) => {
-            log::error!(
-                "failed to list cloud credentials for vault {}: {err}",
-                &vault_id[..8.min(vault_id.len())]
+            LOG.error(
+                format_args!(
+                    "failed to list cloud credentials for vault {}: {err}",
+                    &vault_id[..8.min(vault_id.len())]
+                ),
+                logger::Metadata::new(),
             );
             return HttpResponse::InternalServerError()
                 .json(serde_json::json!({"code":"DB_ERROR"}));
@@ -193,7 +213,10 @@ pub async fn cloud_auth_start(
         match oauth_flow::begin(pool.get_ref(), kind, vault_id_opt.as_deref()).await {
             Ok(v) => v,
             Err(e) => {
-                log::error!("Failed to start Google authorization: {}", e);
+                LOG.error(
+                    format_args!("Failed to start Google authorization: {}", e),
+                    logger::Metadata::new(),
+                );
                 return HttpResponse::InternalServerError().json(
                 serde_json::json!({"error_msg":"failed to start authorization","code":"DB_ERROR"}),
             );
@@ -203,12 +226,15 @@ pub async fn cloud_auth_start(
     if vault_id_opt.is_some() {
         let _ = oauth_flow::store_state_in_session(&session, &state);
     }
-    log::info!(
-        "Generated cloud OAuth state for vault {}",
-        vault_id_opt
-            .as_deref()
-            .map(|v| &v[..8.min(v.len())])
-            .unwrap_or("(pending)")
+    LOG.log(
+        format_args!(
+            "Generated cloud OAuth state for vault {}",
+            vault_id_opt
+                .as_deref()
+                .map(|v| &v[..8.min(v.len())])
+                .unwrap_or("(pending)")
+        ),
+        logger::Metadata::new(),
     );
     HttpResponse::Ok().json(AuthStartResponse { auth_url, state })
 }
@@ -245,7 +271,10 @@ async fn cloud_oauth_callback_inner(
     let post_auth_redirect = impl_.post_auth_redirect();
 
     if let Some(err) = &query.error {
-        log::warn!("cloud OAuth error: {}", err);
+        LOG.warn(
+            format_args!("cloud OAuth error: {}", err),
+            logger::Metadata::new(),
+        );
         return HttpResponse::Found()
             .insert_header((
                 "Location",
@@ -286,10 +315,13 @@ async fn cloud_oauth_callback_inner(
     if let Some(vault_id) = vault_id_opt {
         match oauth_flow::complete_for_vault(pool.get_ref(), kind, state, code, &vault_id).await {
             Ok((_acct, email)) => {
-                log::info!(
-                    "cloud OAuth success (vault-bound) for {} provider {}",
-                    &vault_id[..8.min(vault_id.len())],
-                    email.as_deref().unwrap_or("unknown")
+                LOG.log(
+                    format_args!(
+                        "cloud OAuth success (vault-bound) for {} provider {}",
+                        &vault_id[..8.min(vault_id.len())],
+                        email.as_deref().unwrap_or("unknown")
+                    ),
+                    logger::Metadata::new(),
                 );
                 HttpResponse::Found()
                     .insert_header((
@@ -307,7 +339,10 @@ async fn cloud_oauth_callback_inner(
                 // An invalid/expired state is a CSRF failure, not an exchange
                 // failure, and must be reported as such.
                 if e.detail().contains("state") {
-                    log::warn!("cloud OAuth state validation failed: {}", e);
+                    LOG.warn(
+                        format_args!("cloud OAuth state validation failed: {}", e),
+                        logger::Metadata::new(),
+                    );
                     return HttpResponse::Found()
                         .insert_header((
                             "Location",
@@ -320,16 +355,22 @@ async fn cloud_oauth_callback_inner(
                         ))
                         .finish();
                 }
-                log::warn!("cloud OAuth exchange failed: {}", e);
+                LOG.warn(
+                    format_args!("cloud OAuth exchange failed: {}", e),
+                    logger::Metadata::new(),
+                );
                 redirect_err(&e.redacted_detail().to_string())
             }
         }
     } else {
         match oauth_flow::complete_pending(pool.get_ref(), kind, state, code).await {
             Ok((_acct, email)) => {
-                log::info!(
-                    "cloud OAuth success (pending) provider {}",
-                    email.as_deref().unwrap_or("unknown")
+                LOG.log(
+                    format_args!(
+                        "cloud OAuth success (pending) provider {}",
+                        email.as_deref().unwrap_or("unknown")
+                    ),
+                    logger::Metadata::new(),
                 );
                 HttpResponse::Found()
                     .insert_header((
@@ -345,7 +386,10 @@ async fn cloud_oauth_callback_inner(
                     .finish()
             }
             Err(e) => {
-                log::warn!("cloud OAuth exchange failed: {}", e);
+                LOG.warn(
+                    format_args!("cloud OAuth exchange failed: {}", e),
+                    logger::Metadata::new(),
+                );
                 redirect_err(&e.redacted_detail().to_string())
             }
         }
@@ -400,7 +444,10 @@ pub async fn cloud_status(pool: web::Data<DbPool>, session: Session) -> HttpResp
             });
         }
         Err(e) => {
-            log::error!("failed to fetch cloud token: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch cloud token: {:?}", e),
+                logger::Metadata::new(),
+            );
             return HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error_msg":"db error","code":"DB_ERROR"}));
         }
@@ -431,14 +478,24 @@ pub async fn cloud_disconnect(pool: web::Data<DbPool>, session: Session) -> Http
     // Scoped to this provider only (see token_store::delete): credentials for
     // other providers are retained so switching back needs no fresh consent.
     if let Err(e) = token_store::delete(pool.get_ref(), kind, &vault_id).await {
-        log::error!("failed to delete cloud token: {}", e);
+        LOG.error(
+            format_args!("failed to delete cloud token: {}", e),
+            logger::Metadata::new(),
+        );
     }
 
     // cloud_binding is preserved: disconnecting removes the credential, not the
-    // vault, and not the remote file. The mirror will report auth_required.
-    log::info!(
-        "cloud disconnect for user {}",
-        &vault_id[..8.min(vault_id.len())]
+    // vault, and not the remote file. Recording `auth_required` immediately (and
+    // bumping the binding generation in the same write) means Settings shows
+    // "paused — reconnect" right away instead of waiting for a mirror to fail,
+    // and any upload still in flight can no longer report the copy as current.
+    mirror::mark_disconnected(pool.get_ref(), &vault_id).await;
+    LOG.log(
+        format_args!(
+            "cloud disconnect for user {}",
+            &vault_id[..8.min(vault_id.len())]
+        ),
+        logger::Metadata::new(),
     );
     HttpResponse::Ok().json(serde_json::json!({"disconnected": true}))
 }
@@ -464,6 +521,9 @@ struct BindingResponse {
     mirrored_vault_version: Option<i32>,
     /// Committed writes the Drive copy is missing (0 = backup current).
     versions_behind: i32,
+    /// Which incarnation of this binding the numbers above describe. The client
+    /// uses it to ignore a mutation response that was in flight across a switch.
+    binding_generation: i32,
     last_mirrored_at: Option<String>,
     last_mirror_error: Option<String>,
     created_at: String,
@@ -496,6 +556,7 @@ impl BindingResponse {
             vault_version,
             mirrored_vault_version: b.mirrored_vault_version,
             versions_behind,
+            binding_generation: b.binding_generation,
             last_mirrored_at: b.last_mirrored_at,
             last_mirror_error: b.last_mirror_error,
             created_at: b.created_at.to_rfc3339(),
@@ -537,7 +598,10 @@ pub async fn cloud_get_pending(
             }
         }
         Err(e) => {
-            log::error!("failed to fetch pending: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch pending: {:?}", e),
+                logger::Metadata::new(),
+            );
             return HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error_msg":"db error","code":"DB_ERROR"}));
         }
@@ -581,7 +645,10 @@ pub async fn cloud_get_binding(
             );
         }
         Err(e) => {
-            log::error!("failed to fetch binding: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch binding: {:?}", e),
+                logger::Metadata::new(),
+            );
             return HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error_msg":"db error","code":"DB_ERROR"}));
         }
@@ -606,7 +673,10 @@ pub async fn cloud_list_bindings(pool: web::Data<DbPool>, session: Session) -> H
     {
         Ok(b) => b,
         Err(e) => {
-            log::error!("failed to list bindings: {:?}", e);
+            LOG.error(
+                format_args!("failed to list bindings: {:?}", e),
+                logger::Metadata::new(),
+            );
             return HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error_msg":"db error","code":"DB_ERROR"}));
         }
@@ -621,9 +691,13 @@ pub async fn cloud_list_bindings(pool: web::Data<DbPool>, session: Session) -> H
 /// Explicit user-triggered backup ("Back up now" in Settings).
 ///
 /// The automatic mirror is detached and fire-and-forget, so the UI has no way
-/// to learn its outcome. This awaits the same CAS-gated mirror and returns the
-/// real result, so the user sees success, conflict, or a specific failure
-/// instead of a constant "enabled".
+/// to learn its outcome. This awaits a *forced* pass — it verifies the live
+/// provider revision (so a deleted or externally changed copy is reported rather
+/// than hidden behind a current watermark) and uploads even when the recorded
+/// watermark says the copy is current — and returns the real result. It still
+/// refuses to overwrite a copy that moved: "Back up now" is "try again", never
+/// "overwrite". A pass already running is waited for (bounded), so this never
+/// races one and reports a false conflict.
 #[post("/cloud/vaults/mirror")]
 pub async fn cloud_mirror_vault(pool: web::Data<DbPool>, session: Session) -> HttpResponse {
     let vault_id = match session_vault_id(&session) {
@@ -637,14 +711,20 @@ pub async fn cloud_mirror_vault(pool: web::Data<DbPool>, session: Session) -> Ht
 
     let outcome = mirror::mirror_now(pool.get_ref(), &vault_id).await;
     match &outcome {
-        mirror::MirrorOutcome::Mirrored { vault_version } => log::info!(
-            "Manual Drive backup completed for vault {} at version {}",
-            &vault_id[..8.min(vault_id.len())],
-            vault_version
+        mirror::MirrorOutcome::Mirrored { vault_version } => LOG.log(
+            format_args!(
+                "Manual Drive backup completed for vault {} at version {}",
+                &vault_id[..8.min(vault_id.len())],
+                vault_version
+            ),
+            logger::Metadata::new(),
         ),
-        mirror::MirrorOutcome::Conflict => log::warn!(
-            "Manual Drive backup refused for vault {}: the Drive copy changed since last sync",
-            &vault_id[..8.min(vault_id.len())]
+        mirror::MirrorOutcome::Conflict => LOG.warn(
+            format_args!(
+                "Manual Drive backup refused for vault {}: the Drive copy changed since last sync",
+                &vault_id[..8.min(vault_id.len())]
+            ),
+            logger::Metadata::new(),
         ),
         _ => {}
     }
@@ -777,10 +857,13 @@ pub async fn cloud_create_vault(
     let header = match package::parse_header(&package_bytes, &vault_id) {
         Ok(h) => h,
         Err(code) => {
-            log::warn!(
-                "Rejected cloud package for vault {}: {}",
-                &vault_id[..8.min(vault_id.len())],
-                code
+            LOG.warn(
+                format_args!(
+                    "Rejected cloud package for vault {}: {}",
+                    &vault_id[..8.min(vault_id.len())],
+                    code
+                ),
+                logger::Metadata::new(),
             );
             return provider_error_response(ProviderErrorKind::PackageInvalid, code);
         }
@@ -832,6 +915,9 @@ pub async fn cloud_create_vault(
         .and_then(|t| t.provider_account_id);
 
     if let Some(existing) = existing {
+        // This row is about to describe a new provider file. Bumping the
+        // generation invalidates any pass still running against the old one.
+        let next_generation = existing.binding_generation.saturating_add(1);
         let mut am: cloud_binding::ActiveModel = existing.into();
         am.remote_file_id = Set(Some(created.file_id.clone()));
         am.remote_revision = Set(Some(created.revision.clone()));
@@ -842,6 +928,7 @@ pub async fn cloud_create_vault(
         // below establishes an honest watermark by reading the server vault.
         am.mirrored_vault_version = Set(None);
         am.last_mirror_error = Set(None);
+        am.binding_generation = Set(next_generation);
         am.updated_at = Set(now.into());
         let _ = am.update(pool.get_ref()).await;
     } else {
@@ -855,6 +942,7 @@ pub async fn cloud_create_vault(
             mirrored_vault_version: Set(None),
             last_mirrored_at: Set(Some(now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))),
             last_mirror_error: Set(None),
+            binding_generation: Set(0),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
         };
@@ -862,17 +950,23 @@ pub async fn cloud_create_vault(
     }
 
     let enrollment_mirror = mirror::mirror_now(pool.get_ref(), &vault_id).await;
-    log::info!(
-        "Created cloud vault {} file {} at logical revision {}",
-        &body.vault_id[..8],
-        &created.file_id[..8.min(created.file_id.len())],
-        header.logical_revision
+    LOG.log(
+        format_args!(
+            "Created cloud vault {} file {} at logical revision {}",
+            &body.vault_id[..8],
+            &created.file_id[..8.min(created.file_id.len())],
+            header.logical_revision
+        ),
+        logger::Metadata::new(),
     );
     if let mirror::MirrorOutcome::Error { code } = &enrollment_mirror {
-        log::warn!(
-            "Cloud enrollment mirror for vault {} did not converge: {}",
-            &vault_id[..8.min(vault_id.len())],
-            code
+        LOG.warn(
+            format_args!(
+                "Cloud enrollment mirror for vault {} did not converge: {}",
+                &vault_id[..8.min(vault_id.len())],
+                code
+            ),
+            logger::Metadata::new(),
         );
     }
     HttpResponse::Ok().json(CloudCreateVaultResponse {
@@ -1085,18 +1179,17 @@ pub async fn cloud_replace_vault(
         Ok(new_rev) => {
             // Update the binding revision and the backup watermark together. A
             // Drive write that updated only `remote_revision` would leave
-            // Settings reporting the backup as stale when it is not.
-            if CloudBindingEntity::find()
+            // Settings reporting the backup as stale when it is not. Conditional
+            // on the generation the row is at now, so a switch that happened
+            // while this write was in flight keeps its own state.
+            if let Ok(Some(binding)) = CloudBindingEntity::find()
                 .filter(cloud_binding::Column::VaultId.eq(&vault_id))
                 .one(pool.get_ref())
                 .await
-                .ok()
-                .flatten()
-                .is_some()
             {
                 mirror::mark_mirrored(
                     pool.get_ref(),
-                    &vault_id,
+                    &mirror::BindingGuard::of(&binding),
                     header.logical_revision,
                     Some(&new_rev),
                 )
@@ -1156,6 +1249,7 @@ pub async fn cloud_upsert_binding(
             return HttpResponse::BadRequest().json(serde_json::json!({"code":"UNKNOWN_PROVIDER"}));
         }
     };
+    let mut claim = None;
     let (remote_file_id, remote_revision, enrollment) = if let Some(file_id) =
         body.remote_file_id.as_deref()
     {
@@ -1166,8 +1260,29 @@ pub async fn cloud_upsert_binding(
     } else {
         // Provider switch is an explicit action. Build the package from the
         // server-authoritative ciphertext, adopt/create the target provider's
-        // file, then mirror_now repairs an adopted stale copy before claiming
-        // any watermark. Existing credentials for this provider are retained.
+        // file, then mirror repairs an adopted stale copy before any watermark is
+        // claimed. Existing credentials for this provider are retained.
+        //
+        // The claim is taken BEFORE anything is created, and held across the
+        // binding write and the enrollment mirror. Switching while an upload is
+        // in flight therefore fails closed with no side effects — no orphan file
+        // at the target provider, no half-written binding — and a vault write
+        // during the switch cannot start a second pass against the half-written
+        // row.
+        let Some(acquired) = mirror::claim_waiting(&vault_id, mirror::SWITCH_CLAIM_WAIT).await
+        else {
+            LOG.log(
+                format_args!(
+                    "cloud switch for vault {} refused: a backup is still running",
+                    &vault_id[..8.min(vault_id.len())]
+                ),
+                logger::Metadata::new(),
+            );
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error_msg": "a backup is still running; try again in a moment",
+                "code": "BACKUP_IN_PROGRESS",
+            }));
+        };
         let access_token =
             match token_store::get_valid_access_token(pool.get_ref(), kind, &vault_id).await {
                 Ok(token) => token,
@@ -1189,7 +1304,10 @@ pub async fn cloud_upsert_binding(
                     .json(serde_json::json!({"code":"VAULT_NOT_FOUND"}));
             }
             Err(err) => {
-                log::error!("cloud switch could not load vault: {err}");
+                LOG.error(
+                    format_args!("cloud switch could not load vault: {err}"),
+                    logger::Metadata::new(),
+                );
                 return HttpResponse::InternalServerError()
                     .json(serde_json::json!({"code":"DB_ERROR"}));
             }
@@ -1205,6 +1323,7 @@ pub async fn cloud_upsert_binding(
             Ok(file) => file,
             Err(err) => return err.into_response(),
         };
+        claim = Some(acquired);
         (file.file_id, Some(file.revision), true)
     };
     let now = chrono::Utc::now();
@@ -1235,6 +1354,10 @@ pub async fn cloud_upsert_binding(
         .map(|v| v.version);
 
     if let Some(existing) = existing {
+        // This row is about to describe a different provider file. Bumping the
+        // generation invalidates any mirror pass still running against the old
+        // one, so it can no longer stamp its revision or status here.
+        let next_generation = existing.binding_generation.saturating_add(1);
         let mut am: cloud_binding::ActiveModel = existing.into();
         am.provider_kind = Set(kind.as_str().to_string());
         am.remote_file_id = Set(Some(remote_file_id.clone()));
@@ -1251,9 +1374,13 @@ pub async fn cloud_upsert_binding(
             });
             am.last_mirror_error = Set(None);
         }
+        am.binding_generation = Set(next_generation);
         am.updated_at = Set(now.into());
         if let Err(e) = am.update(pool.get_ref()).await {
-            log::error!("failed to update cloud binding: {:?}", e);
+            LOG.error(
+                format_args!("failed to update cloud binding: {:?}", e),
+                logger::Metadata::new(),
+            );
             return HttpResponse::InternalServerError().json(serde_json::json!({"error_msg":"failed to persist cloud binding","code":"DB_ERROR"}));
         }
     } else {
@@ -1274,16 +1401,22 @@ pub async fn cloud_upsert_binding(
                 .flatten()
                 .map(|_| now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))),
             last_mirror_error: Set(None),
+            binding_generation: Set(0),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
         };
         if let Err(e) = am.insert(pool.get_ref()).await {
-            log::error!("failed to insert cloud binding: {:?}", e);
+            LOG.error(
+                format_args!("failed to insert cloud binding: {:?}", e),
+                logger::Metadata::new(),
+            );
             return HttpResponse::InternalServerError().json(serde_json::json!({"error_msg":"failed to persist cloud binding","code":"DB_ERROR"}));
         }
     }
-    if enrollment {
-        let _ = mirror::mirror_now(pool.get_ref(), &vault_id).await;
+    // The switch already holds the claim, so the post-enrollment pass runs under
+    // it. `mirror_now` would wait on a claim we own and time out as MIRROR_BUSY.
+    if let Some(claim) = claim {
+        mirror::mirror_held(pool.get_ref(), claim, mirror::MirrorMode::Auto).await;
     }
     HttpResponse::Ok().json(serde_json::json!({"upserted": true, "vault_id": body.vault_id, "provider_kind": kind.as_str(), "remote_file_id": remote_file_id, "remote_revision": remote_revision}))
 }
@@ -1337,7 +1470,10 @@ pub async fn cloud_list_vaults_pending(
             );
         }
         Err(e) => {
-            log::error!("failed to fetch pending token: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch pending token: {:?}", e),
+                logger::Metadata::new(),
+            );
             return HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error_msg":"db error","code":"DB_ERROR"}));
         }
@@ -1389,7 +1525,10 @@ pub async fn cloud_read_vault_pending(
             );
         }
         Err(e) => {
-            log::error!("failed to fetch pending token: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch pending token: {:?}", e),
+                logger::Metadata::new(),
+            );
             return HttpResponse::InternalServerError()
                 .json(serde_json::json!({"error_msg":"db error","code":"DB_ERROR"}));
         }
@@ -1489,5 +1628,188 @@ pub async fn cloud_delete_vault(
             HttpResponse::Ok().json(serde_json::json!({"deleted": true, "file_id": file_id}))
         }
         Err(e) => e.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::DbPool;
+    use crate::endpoints::register;
+    use actix_web::cookie::{Cookie, Key};
+    use actix_web::{App, test};
+    use migration::MigratorTrait;
+    use sea_orm::{Database, EntityTrait};
+    use serde_json::json;
+
+    const VAULT_ID: &str = "3f2504e0-4f89-41d3-9a0c-0305e82c3302";
+
+    async fn test_pool() -> DbPool {
+        let pool = Database::connect("sqlite::memory:").await.expect("connect");
+        migration::Migrator::up(&pool, None).await.expect("migrate");
+        pool
+    }
+
+    /// A minimal vault row, for tests that only exercise binding bookkeeping.
+    async fn seed_vault(pool: &DbPool) {
+        use crate::entity::vault;
+        use sea_orm::Set;
+
+        let am = vault::ActiveModel {
+            id: Set(VAULT_ID.to_string()),
+            vault: Set("Y2lwaGVydGV4dA==".to_string()),
+            salt: Set("c2FsdA==".to_string()),
+            iterations: Set(60_000),
+            vaultiv: Set("aXY=".to_string()),
+            vault_verifier: Set("dmVyaWZpZXI=".to_string()),
+            version: Set(1),
+            crypto_version: Set(2),
+            ..Default::default()
+        };
+        am.insert(pool).await.expect("insert vault");
+    }
+
+    /// Registers a vault and returns `(app, session cookie)`, mirroring the
+    /// harness in `update_vault`'s tests: `call_service` does not carry cookies,
+    /// so the cookie from `/register` has to be replayed by hand.
+    macro_rules! authenticated_app {
+        ($pool:expr) => {{
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new($pool.clone()))
+                    .wrap(
+                        actix_session::SessionMiddleware::builder(
+                            actix_session::storage::CookieSessionStore::default(),
+                            // Cookie-session keys must be at least 64 bytes.
+                            Key::from(
+                                b"test-key-for-session-middleware-must-be-at-least-64-bytes-long!!",
+                            ),
+                        )
+                        .cookie_name("voult_session".to_string())
+                        .build(),
+                    )
+                    .service(register::register)
+                    .service(super::cloud_upsert_binding),
+            )
+            .await;
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/register")
+                    .set_json(json!({
+                        "vault_id": VAULT_ID,
+                        "vault_verifier": "dmVyaWZpZXI=",
+                        "salt": "c2FsdA==",
+                        "iterations": 60000,
+                        "vaultiv": "aXY=",
+                        "vault": "Y2lwaGVydGV4dA==",
+                        "crypto_version": 2,
+                        "vault_key_wrap": "d3JhcA==",
+                        "vault_key_wrap_iv": "d2l2",
+                        "recovery_verifier": "cmVjb3ZlcnktdmVyaWZpZXI=",
+                        "recovery_salt": "cmVjb3Zlcnktc2FsdA==",
+                        "recovery_wrap": "cmVjb3Zlcnktd3JhcA==",
+                        "recovery_wrap_iv": "cmVjdml2",
+                    }))
+                    .to_request(),
+            )
+            .await;
+            assert!(resp.status().is_success(), "register must seed the session");
+            let cookie: Cookie<'static> = resp
+                .response()
+                .cookies()
+                .find(|c| c.name() == "voult_session")
+                .expect("register must set the session cookie")
+                .clone()
+                .into_owned();
+            (app, cookie)
+        }};
+    }
+
+    /// A provider switch must refuse to start while a mirror holds the vault, and
+    /// it must refuse *before* touching the target provider: an orphan file plus a
+    /// half-written binding is exactly what the claim exists to prevent.
+    #[tokio::test]
+    async fn switch_is_refused_while_a_backup_is_in_flight() {
+        let pool = test_pool().await;
+        let (app, cookie) = authenticated_app!(pool);
+
+        // Stand in for an upload that is still running.
+        let held =
+            crate::cloud::mirror::claim_waiting(VAULT_ID, std::time::Duration::from_millis(1))
+                .await
+                .expect("claim");
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/cloud/binding?provider=dropbox")
+                .cookie(cookie)
+                .set_json(json!({"vault_id": VAULT_ID}))
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(resp.status(), 409, "a busy backup must refuse the switch");
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], "BACKUP_IN_PROGRESS");
+        assert!(
+            CloudBindingEntity::find()
+                .all(&pool)
+                .await
+                .expect("query")
+                .is_empty(),
+            "a refused switch must not write a binding"
+        );
+
+        drop(held);
+    }
+
+    /// Disconnecting must bump the generation and say why the copy stopped
+    /// moving, in one write: an upload in flight is then unable to report the
+    /// backup as current afterwards.
+    #[tokio::test]
+    async fn disconnect_pauses_the_binding_and_invalidates_inflight_state() {
+        use sea_orm::{ActiveModelTrait, Set};
+
+        let pool = test_pool().await;
+        seed_vault(&pool).await;
+        let binding = cloud_binding::ActiveModel {
+            vault_id: Set(VAULT_ID.to_string()),
+            provider_kind: Set(ProviderKind::Dropbox.as_str().to_string()),
+            remote_file_id: Set(Some("dbx-file".to_string())),
+            remote_revision: Set(Some("rev-1".to_string())),
+            sync_status: Set("idle".to_string()),
+            mirrored_vault_version: Set(Some(1)),
+            ..Default::default()
+        };
+        binding.insert(&pool).await.expect("seed binding");
+
+        let before = CloudBindingEntity::find_by_id(VAULT_ID.to_string())
+            .one(&pool)
+            .await
+            .expect("query")
+            .expect("binding");
+
+        crate::cloud::mirror::mark_disconnected(&pool, VAULT_ID).await;
+
+        let after = CloudBindingEntity::find_by_id(VAULT_ID.to_string())
+            .one(&pool)
+            .await
+            .expect("query")
+            .expect("binding");
+        assert_eq!(after.sync_status, "auth_required");
+        assert_eq!(after.last_mirror_error.as_deref(), Some("DISCONNECTED"));
+        assert_eq!(
+            after.binding_generation,
+            before.binding_generation + 1,
+            "a disconnect must invalidate passes that started before it"
+        );
+        assert_eq!(
+            after.remote_file_id.as_deref(),
+            Some("dbx-file"),
+            "the remote copy is preserved; only the credential is gone"
+        );
+        assert_eq!(after.mirrored_vault_version, Some(1));
     }
 }

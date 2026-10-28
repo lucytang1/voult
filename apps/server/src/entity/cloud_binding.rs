@@ -32,6 +32,15 @@ pub struct Model {
     /// Short provider error code from the last failed mirror attempt. Never a
     /// provider response body, token, or ciphertext.
     pub last_mirror_error: Option<String>,
+    /// Which *incarnation* of this binding the row describes.
+    ///
+    /// Bumped by every write that replaces what the binding points at — provider
+    /// switch/enrollment, import-adoption, and disconnect. Never bumped by the
+    /// mirror. A detached mirror pass captures this value once and may only write
+    /// state while it still matches, so a pass that started on the previous
+    /// provider can never stamp its revision, watermark or status onto the row
+    /// that now describes the new one.
+    pub binding_generation: i32,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

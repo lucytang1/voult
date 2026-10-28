@@ -16,12 +16,16 @@ import {
   selectedVaultId,
   VaultTransitionError,
   type LockReason,
+  type ServerSessionStatus,
   type VaultState,
 } from "./vault-state";
 import {
   clearLockRecord as clearStoredLockRecord,
+  clearLastActivity,
   clearSelectedVaultId,
+  persistLastActivity,
   persistLockRecord as persistStoredLockRecord,
+  readLastActivity,
   readLockRecord as readStoredLockRecord,
   persistSelectedVaultId,
   type StoredLockRecord,
@@ -53,8 +57,16 @@ const useAppStore = create<AppState>()((set) => ({
  *
  * Selection always lands `locked`: picking a vault never yields plaintext.
  * Callers that have a key commit it afterwards via `commitVaultUnlock`.
+ *
+ * `options.serverSession` exists because a selection can be restored from local
+ * storage while the cookie is known to be missing. "Selected this vault" and
+ * "authorized to call the server for it" are orthogonal, and defaulting the
+ * latter to `active` here would make a bootstrap without a cookie lie.
  */
-const selectVaultSession = (session: SessionState) => {
+const selectVaultSession = (
+  session: SessionState,
+  options: { serverSession?: ServerSessionStatus } = {},
+) => {
   // Durable before in-memory: if the tab dies between these two writes the
   // app must still come back pointed at this vault rather than at first-run.
   persistSelectedVaultId(session.vaultId);
@@ -70,8 +82,9 @@ const selectVaultSession = (session: SessionState) => {
       state.vault.status !== "no_vault" && state.vault.vaultId === session.vaultId
         ? state.selectionEpoch
         : state.selectionEpoch + 1,
-    // A session that just authenticated is by definition active.
-    serverSession: "active",
+    // An authenticated session is active unless the caller already knows the
+    // cookie is missing (bootstrap with a definitive 401).
+    serverSession: options.serverSession ?? "active",
     availability: "available",
   }));
 };
@@ -129,6 +142,9 @@ const commitVaultUnlock = (vaultKey: CryptoKey) => {
       vaultKey,
     }),
   });
+  // A fresh unlock is activity: start the idle deadline from now, not from
+  // whatever timestamp was persisted before the vault was last closed.
+  persistLastActivity(session.vaultId, Date.now());
 };
 
 const setAuthKey = (authKey: CryptoKey) => useAppStore.setState({ authKey });
@@ -145,6 +161,14 @@ const setSyncStatus = (isSyncing: boolean) =>
  */
 const updateLockEpoch = (lockEpoch: number) =>
   useAppStore.setState({ lockEpoch });
+
+/**
+ * Cache the password-wrapped envelope the lock screen uses to unlock locally.
+ * Captured *after* the local wipe (see `lockVaultNow`): it is an optimization
+ * for the next unlock, never a prerequisite for locking.
+ */
+const setLockMetadata = (lockMetadata: LockMetadata | null) =>
+  useAppStore.setState({ lockMetadata });
 
 // --- Vault state machine -------------------------------------------------
 //
@@ -324,11 +348,28 @@ export function clearLockRecord() {
 }
 
 /**
+ * Reads the durable activity timestamp for the currently selected vault.
+ *
+ * Scoped to the selection so one vault's idle time can never govern another's
+ * restore decision.
+ */
+export function readLastActivityForSelection(): number | null {
+  const selected = selectedVaultId(useAppStore.getState().vault);
+  return selected ? readLastActivity(selected) : null;
+}
+
+/**
  * Reads the durable lock record for the currently selected vault, discarding a
  * record that names a different vault (a stale record left by a switch).
+ *
+ * `expectedVaultId` exists for the bootstrap, which reads the record before it
+ * has committed the selection: without it, a stale record from another vault
+ * could decide this vault's restore policy.
  */
-export function readLockRecordForSelection(): StoredLockRecord | null {
-  const selected = selectedVaultId(useAppStore.getState().vault);
+export function readLockRecordForSelection(
+  expectedVaultId?: string,
+): StoredLockRecord | null {
+  const selected = expectedVaultId ?? selectedVaultId(useAppStore.getState().vault);
   const record = readStoredLockRecord();
   if (!record) return null;
   if (selected && record.vaultId !== selected) {
@@ -349,13 +390,14 @@ export function readLockRecordForSelection(): StoredLockRecord | null {
  * Callers that need to distinguish "lapsed, go ahead and unlock" from "no lock
  * ever happened" should call `decideRestore()` directly instead.
  */
-export function isLockStillActive(hasDeviceKey = false): boolean {
+export function isLockStillActive(hasDeviceMaterial = false): boolean {
   const state = useAppStore.getState();
   const decision = decideRestore({
     selectedVaultId: selectedVaultId(state.vault),
     record: readLockRecordForSelection(),
     autolockMinutes: getWebAutolockMinutes(),
-    hasDeviceKey,
+    hasDeviceMaterial,
+    lastActivityAt: readLastActivityForSelection(),
   });
   // A `no_selection` decision cannot happen here (we just read a selection or
   // not), but treat anything that isn't an explicit unlock as "stay locked".
@@ -398,23 +440,20 @@ const lockVaultStorage = (
 };
 
 /**
- * The core M2 transition: the server definitively rejected our cookie
- * (`SESSION_REQUIRED`).
+ * The server definitively rejected our cookie (`SESSION_REQUIRED`).
  *
- * Wipes keys and plaintext and marks the session missing, but **retains the
- * selection** and leaves the vault `locked(vaultId)`. This is the behaviour
- * change from M1, where an expired cookie dropped the app to `no_vault` and
- * sent the user back to first-run.
+ * This is an authorization fact, not a lock decision, so it no longer records a
+ * lock nor wipes local vault state:
  *
- * Why retaining it matters: the cookie is a transport fact, not the user's
- * identity. Dropping the selection would make an expired cookie look
- * indistinguishable from a fresh install, and would force the user to rediscover
- * and re-enter their vault. Instead they stay on *their* vault's lock screen,
- * where the master password re-establishes the session through the existing
- * verifier flow (`reauthenticateVaultSession`) and then unwraps locally.
- *
- * The device key and envelope are deliberately NOT deleted — see
- * `teardownVaultSession`, which used to delete them and no longer does.
+ *  - **Already unlocked** — keep the key, plaintext, version, epoch, and the
+ *    selection. The vault remains usable locally; sync/cloud calls pause until
+ *    the user reauthenticates. Wiping here is what made an expired cookie look
+ *    like a user lock and contradicted "Auto-lock: Never".
+ *  - **Locked** — keep the selection and device material. There is nothing
+ *    secret in memory to wipe; the lock record (if any) keeps its real reason.
+ *  - `session` is kept only while unlocked, where it is read as identity
+ *    (`vaultId`) by local code; `serverSession: "missing"` is the authoritative
+ *    signal that protected calls must not run.
  */
 const loseServerSession = () => {
   const state = useAppStore.getState();
@@ -423,25 +462,22 @@ const loseServerSession = () => {
     serverSession: state.serverSession,
     availability: state.availability,
   });
-
-  // Record why we are locked so a restart does not silently device-unlock a
-  // vault whose cookie is dead (device unlock starts with GET /session).
-  if (model.vault.status === "locked" && state.vault.status !== "locked") {
-    persistLockRecord("session_expired", state);
-  }
+  const stillUnlocked = state.vault.status === "unlocked";
 
   useAppStore.setState({
     vault: model.vault,
     serverSession: model.serverSession,
-    // The session object described a cookie that no longer authorizes
-    // anything; keeping it would let callers read a stale vaultId as if the
-    // session were live. The selection now lives in `vault`.
-    session: null,
+    // The key and plaintext are local secrets, not server state. Only drop the
+    // transient auth key (never needed after authentication).
     authKey: null,
-    decryptedVault: null,
-    vaultVersion: null,
-    lockEpoch: null,
-    lockMetadata: null,
+    // A locked vault has no key to keep a session object for; the lock screen
+    // uses `reauthenticateAndUnlock`. An unlocked vault keeps its identity.
+    session: stillUnlocked ? state.session : null,
+    decryptedVault: stillUnlocked ? state.decryptedVault : null,
+    vaultVersion: stillUnlocked ? state.vaultVersion : null,
+    // Preserve the epoch: it is non-sensitive, and clearing it would make the
+    // next successful check re-adopt an older epoch as if it were unknown.
+    lockMetadata: stillUnlocked ? state.lockMetadata : null,
   });
 };
 
@@ -495,6 +531,8 @@ const markServerSessionUnknown = () => {
  * data. The device key and envelope deletion is handled by the caller.
  */
 const clearSessionState = () => {
+  const selected = selectedVaultId(useAppStore.getState().vault);
+  if (selected) clearLastActivity(selected);
   clearLockRecord();
   clearSelectedVaultId();
   useAppStore.setState({
@@ -559,6 +597,8 @@ const switchVaultOpen = (args: {
   persistSelectedVaultId(session.vaultId);
   // Keep the pre-unlock label in step with the document we are installing.
   cacheVaultName(decryptedVault.vaultId, decryptedVault.name);
+  // Opening a vault is activity; the idle deadline starts here.
+  persistLastActivity(session.vaultId, Date.now());
 
   useAppStore.setState((state) => ({
     vault: commitUnlock({
@@ -599,6 +639,7 @@ export {
   setSyncStatus,
   updateLockEpoch,
   lockVaultStorage,
+  setLockMetadata,
   clearSessionState,
   addVaultItem,
   updateVaultItem,

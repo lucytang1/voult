@@ -41,11 +41,7 @@ pub fn json_config() -> web::JsonConfig {
                 "PAYLOAD_TOO_LARGE",
                 "request body too large".to_string(),
             ),
-            _ => (
-                StatusCode::BAD_REQUEST,
-                "INVALID_INPUT",
-                err.to_string(),
-            ),
+            _ => (StatusCode::BAD_REQUEST, "INVALID_INPUT", err.to_string()),
         };
         actix_web::error::InternalError::from_response(
             err,

@@ -8,6 +8,8 @@ use crate::session_auth::session_vault_id;
 
 use crate::db::DbPool;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Vault);
+
 #[derive(Serialize)]
 pub struct GetVaultResponse {
     pub vault: Vault,
@@ -65,7 +67,10 @@ pub async fn get_vault(pool: web::Data<DbPool>, session: Session) -> HttpRespons
             );
         }
         Err(e) => {
-            log::error!("failed to fetch vault: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch vault: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to fetch vault",

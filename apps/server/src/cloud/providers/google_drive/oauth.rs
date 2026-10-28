@@ -9,6 +9,8 @@ use crate::cloud::provider::TokenSet;
 
 use super::config::GoogleConfig;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Cloud);
+
 /// Google's token endpoint. Private to this module: no caller outside the Drive
 /// implementation may reference it.
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -54,7 +56,10 @@ pub async fn exchange_code(cfg: &GoogleConfig, code: &str) -> Result<TokenSet, P
         .map_err(|e| transport_error("token exchange", e))?;
 
     if !resp.status().is_success() {
-        log::warn!("Google token exchange failed with status {}", resp.status());
+        LOG.warn(
+            format_args!("Google token exchange failed with status {}", resp.status()),
+            logger::Metadata::new(),
+        );
         return Err(ProviderError::new(
             ProviderErrorKind::AuthRequired,
             format!("token exchange rejected with status {}", resp.status()),
@@ -87,7 +92,10 @@ pub async fn refresh(cfg: &GoogleConfig, refresh_token: &str) -> Result<TokenSet
         .map_err(|e| transport_error("token refresh", e))?;
 
     if !resp.status().is_success() {
-        log::warn!("Google token refresh failed with status {}", resp.status());
+        LOG.warn(
+            format_args!("Google token refresh failed with status {}", resp.status()),
+            logger::Metadata::new(),
+        );
         return Err(ProviderError::new(
             ProviderErrorKind::AuthRequired,
             format!("token refresh rejected with status {}", resp.status()),
@@ -128,7 +136,10 @@ pub async fn userinfo(access_token: &str) -> Result<(String, String), ProviderEr
         .map_err(|e| transport_error("userinfo", e))?;
 
     if !resp.status().is_success() {
-        log::warn!("Failed to fetch Google userinfo");
+        LOG.warn(
+            format_args!("Failed to fetch Google userinfo"),
+            logger::Metadata::new(),
+        );
         return Err(ProviderError::new(
             ProviderErrorKind::AuthRequired,
             format!("userinfo rejected with status {}", resp.status()),

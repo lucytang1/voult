@@ -18,6 +18,8 @@ use crate::cloud::{oauth_state, token_store};
 use crate::db::DbPool;
 use crate::entity::cloud_pending_token;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Cloud);
+
 /// Session key holding the in-flight state, for a quick cross-check against the
 /// database record.
 pub const SESSION_CLOUD_OAUTH_STATE: &str = "cloud_oauth_state";
@@ -192,7 +194,10 @@ async fn account_of(
         Err(e) => {
             // Display-only data: a failure is not worth failing the connection
             // over, but it should be visible in the log.
-            log::warn!("{kind} account lookup failed: {e}");
+            LOG.warn(
+                format_args!("{kind} account lookup failed: {e}"),
+                logger::Metadata::new(),
+            );
             None
         }
     }

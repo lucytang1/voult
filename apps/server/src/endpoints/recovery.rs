@@ -39,12 +39,15 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::db::DbPool;
+
 // Aliased: the module is `recovery_challenge`, which would otherwise collide with
 // this file's `recovery_challenge` handler.
 use crate::entity::recovery_challenge::{self as rc, Entity as Challenges};
 use crate::entity::vault::{self, Entity as Vaults};
 use crate::error::error_response;
 use crate::session_auth::establish_vault_session;
+
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Recovery);
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -245,7 +248,10 @@ pub async fn prune_expired_challenges(pool: &DatabaseConnection) {
         .exec(pool)
         .await
     {
-        log::warn!("recovery challenge sweep failed: {:?}", e);
+        LOG.warn(
+            format_args!("recovery challenge sweep failed: {:?}", e),
+            logger::Metadata::new(),
+        );
     }
 }
 
@@ -266,7 +272,10 @@ async fn prune_and_cap(pool: &DatabaseConnection, vault_id: &str) {
     {
         Ok(rows) => rows,
         Err(e) => {
-            log::error!("failed to count live recovery challenges: {:?}", e);
+            LOG.error(
+                format_args!("failed to count live recovery challenges: {:?}", e),
+                logger::Metadata::new(),
+            );
             return;
         }
     };
@@ -276,26 +285,32 @@ async fn prune_and_cap(pool: &DatabaseConnection, vault_id: &str) {
         return;
     }
     let to_drop = (excess - MAX_LIVE_CHALLENGES_PER_VAULT) as usize;
-    let selectors: Vec<String> = live.iter().take(to_drop).map(|c| c.selector.clone()).collect();
+    let selectors: Vec<String> = live
+        .iter()
+        .take(to_drop)
+        .map(|c| c.selector.clone())
+        .collect();
     if let Err(e) = Challenges::delete_many()
         .filter(rc::Column::Selector.is_in(selectors))
         .exec(pool)
         .await
     {
-        log::error!("failed to evict stale recovery challenges: {:?}", e);
+        LOG.error(
+            format_args!("failed to evict stale recovery challenges: {:?}", e),
+            logger::Metadata::new(),
+        );
     } else {
-        log::warn!("recovery challenge cap enforced; evicted {to_drop} oldest challenge(s)");
+        LOG.warn(
+            format_args!("recovery challenge cap enforced; evicted {to_drop} oldest challenge(s)"),
+            logger::Metadata::new(),
+        );
     }
 }
 
 /// Loads a challenge row and checks it is live, addressed to this vault, and
 /// internally consistent. Returns `None` for every failure so callers cannot
 /// distinguish the reasons.
-async fn load_live_challenge(
-    pool: &DbPool,
-    selector: &str,
-    vault_id: &str,
-) -> Option<rc::Model> {
+async fn load_live_challenge(pool: &DbPool, selector: &str, vault_id: &str) -> Option<rc::Model> {
     let row = Challenges::find()
         .filter(rc::Column::Selector.eq(selector))
         .one(pool)
@@ -354,11 +369,17 @@ async fn verify_recovery_proof(
     {
         Ok(Some(c)) => c,
         Ok(None) => {
-            log::warn!("{context} rejected: unknown selector vault_id={vault_id}");
+            LOG.warn(
+                format_args!("{context} rejected: unknown selector vault_id={vault_id}"),
+                logger::Metadata::new(),
+            );
             return Err(auth_failed());
         }
         Err(e) => {
-            log::error!("failed to load recovery challenge: {:?}", e);
+            LOG.error(
+                format_args!("failed to load recovery challenge: {:?}", e),
+                logger::Metadata::new(),
+            );
             return Err(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "recovery failed",
@@ -368,11 +389,17 @@ async fn verify_recovery_proof(
     };
 
     if challenge.vault_id != vault_id || challenge.expires_at < Utc::now() {
-        log::warn!("{context} rejected: challenge not usable vault_id={vault_id}");
+        LOG.warn(
+            format_args!("{context} rejected: challenge not usable vault_id={vault_id}"),
+            logger::Metadata::new(),
+        );
         return Err(auth_failed());
     }
     if challenge.challenge_hash != challenge_hash(vault_id, &challenge.challenge) {
-        log::warn!("{context} rejected: challenge integrity mismatch vault_id={vault_id}");
+        LOG.warn(
+            format_args!("{context} rejected: challenge integrity mismatch vault_id={vault_id}"),
+            logger::Metadata::new(),
+        );
         return Err(auth_failed());
     }
 
@@ -383,7 +410,10 @@ async fn verify_recovery_proof(
         .await
         .is_err()
     {
-        log::error!("failed to consume recovery challenge");
+        LOG.error(
+            format_args!("failed to consume recovery challenge"),
+            logger::Metadata::new(),
+        );
         return Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "recovery failed",
@@ -398,11 +428,17 @@ async fn verify_recovery_proof(
     {
         Ok(Some(v)) => v,
         Ok(None) => {
-            log::warn!("{context} rejected: vault not found vault_id={vault_id}");
+            LOG.warn(
+                format_args!("{context} rejected: vault not found vault_id={vault_id}"),
+                logger::Metadata::new(),
+            );
             return Err(auth_failed());
         }
         Err(e) => {
-            log::error!("failed to load vault for {context}: {:?}", e);
+            LOG.error(
+                format_args!("failed to load vault for {context}: {:?}", e),
+                logger::Metadata::new(),
+            );
             return Err(error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "recovery failed",
@@ -412,11 +448,19 @@ async fn verify_recovery_proof(
     };
 
     if vault.recovery_verifier.is_none() {
-        log::warn!("{context} rejected: vault has no recovery configured vault_id={vault_id}");
+        LOG.warn(
+            format_args!(
+                "{context} rejected: vault has no recovery configured vault_id={vault_id}"
+            ),
+            logger::Metadata::new(),
+        );
         return Err(auth_failed());
     }
     if !proof_is_valid(&vault, vault_id, &challenge.challenge, proof) {
-        log::warn!("{context} rejected: proof mismatch vault_id={vault_id}");
+        LOG.warn(
+            format_args!("{context} rejected: proof mismatch vault_id={vault_id}"),
+            logger::Metadata::new(),
+        );
         return Err(auth_failed());
     }
 
@@ -458,7 +502,10 @@ pub async fn recovery_challenge(
 ) -> HttpResponse {
     let ip = client_ip(&req);
     if !throttle.allow(&ip) {
-        log::warn!("recovery challenge refused: rate limited");
+        LOG.warn(
+            format_args!("recovery challenge refused: rate limited"),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::TOO_MANY_REQUESTS,
             "too many attempts, try again later",
@@ -478,11 +525,17 @@ pub async fn recovery_challenge(
     {
         Ok(Some(v)) => v,
         Ok(None) => {
-            log::warn!("recovery challenge refused: vault not found");
+            LOG.warn(
+                format_args!("recovery challenge refused: vault not found"),
+                logger::Metadata::new(),
+            );
             return no_recovery();
         }
         Err(e) => {
-            log::error!("failed to fetch vault for recovery challenge: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch vault for recovery challenge: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to create recovery challenge",
@@ -492,7 +545,10 @@ pub async fn recovery_challenge(
     };
 
     if vault.recovery_verifier.is_none() {
-        log::warn!("recovery challenge refused: vault has no recovery configured");
+        LOG.warn(
+            format_args!("recovery challenge refused: vault has no recovery configured"),
+            logger::Metadata::new(),
+        );
         return no_recovery();
     }
 
@@ -516,7 +572,10 @@ pub async fn recovery_challenge(
         expires_at: Set(expires_at),
     };
     if let Err(e) = am.insert(pool.get_ref()).await {
-        log::error!("failed to create recovery challenge: {:?}", e);
+        LOG.error(
+            format_args!("failed to create recovery challenge: {:?}", e),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to create recovery challenge",
@@ -525,7 +584,10 @@ pub async fn recovery_challenge(
     }
 
     // vault_id only — never the challenge, proof, verifier, or wrap.
-    log::warn!("recovery challenge issued vault_id={vault_id}");
+    LOG.warn(
+        format_args!("recovery challenge issued vault_id={vault_id}"),
+        logger::Metadata::new(),
+    );
     HttpResponse::Ok().json(ChallengeResponse {
         selector,
         challenge,
@@ -582,7 +644,10 @@ pub async fn recovery_unlock(
     let Some(challenge) =
         load_live_challenge(pool.get_ref(), request.selector.trim(), &vault_id).await
     else {
-        log::warn!("recovery unlock rejected: no live challenge vault_id={vault_id}");
+        LOG.warn(
+            format_args!("recovery unlock rejected: no live challenge vault_id={vault_id}"),
+            logger::Metadata::new(),
+        );
         return auth_failed();
     };
 
@@ -593,11 +658,17 @@ pub async fn recovery_unlock(
     {
         Ok(Some(v)) => v,
         Ok(None) => {
-            log::warn!("recovery unlock rejected: vault not found vault_id={vault_id}");
+            LOG.warn(
+                format_args!("recovery unlock rejected: vault not found vault_id={vault_id}"),
+                logger::Metadata::new(),
+            );
             return auth_failed();
         }
         Err(e) => {
-            log::error!("failed to fetch vault for recovery unlock: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch vault for recovery unlock: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "recovery failed",
@@ -607,21 +678,29 @@ pub async fn recovery_unlock(
     };
 
     if !proof_is_valid(&vault, &vault_id, &challenge.challenge, &proof) {
-        log::warn!("recovery unlock rejected: proof mismatch vault_id={vault_id}");
+        LOG.warn(
+            format_args!("recovery unlock rejected: proof mismatch vault_id={vault_id}"),
+            logger::Metadata::new(),
+        );
         return auth_failed();
     }
 
-    let (Some(wrap), Some(wrap_iv)) =
-        (vault.recovery_wrap.clone(), vault.recovery_wrap_iv.clone())
+    let (Some(wrap), Some(wrap_iv)) = (vault.recovery_wrap.clone(), vault.recovery_wrap_iv.clone())
     else {
         // recovery_verifier present but no envelope: a corrupt row. Reported as
         // a plain auth failure rather than a distinct code, to keep the failure
         // surface uniform.
-        log::error!("recovery unlock: vault has a verifier but no recovery envelope");
+        LOG.error(
+            format_args!("recovery unlock: vault has a verifier but no recovery envelope"),
+            logger::Metadata::new(),
+        );
         return auth_failed();
     };
 
-    log::warn!("recovery unlock succeeded vault_id={vault_id}");
+    LOG.warn(
+        format_args!("recovery unlock succeeded vault_id={vault_id}"),
+        logger::Metadata::new(),
+    );
     HttpResponse::Ok().json(UnlockResponse {
         recovery_wrap: wrap,
         recovery_wrap_iv: wrap_iv,
@@ -722,7 +801,10 @@ pub async fn recovery_rewrap(
     let tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
-            log::error!("failed to create transaction: {:?}", e);
+            LOG.error(
+                format_args!("failed to create transaction: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "recovery failed",
@@ -752,7 +834,10 @@ pub async fn recovery_rewrap(
     // key), so it is only meaningful for a vault already on v2.
     if vault.crypto_version != 2 {
         let _ = tx.rollback().await;
-        log::warn!("recovery rewrap rejected: unsupported crypto_version");
+        LOG.warn(
+            format_args!("recovery rewrap rejected: unsupported crypto_version"),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::CONFLICT,
             "vault is not on crypto version 2",
@@ -785,10 +870,7 @@ pub async fn recovery_rewrap(
             Expr::col(vault::Column::CredentialVersion).add(1),
         )
         .filter(vault::Column::Id.eq(&vault_id))
-        .filter(
-            vault::Column::CredentialVersion
-                .eq(request.credential_version),
-        )
+        .filter(vault::Column::CredentialVersion.eq(request.credential_version))
         .exec(&tx)
         .await;
 
@@ -796,7 +878,10 @@ pub async fn recovery_rewrap(
         Ok(r) => r.rows_affected,
         Err(e) => {
             let _ = tx.rollback().await;
-            log::error!("failed to rotate vault credential: {:?}", e);
+            LOG.error(
+                format_args!("failed to rotate vault credential: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "recovery failed",
@@ -807,7 +892,10 @@ pub async fn recovery_rewrap(
 
     if rows_affected == 0 {
         let _ = tx.rollback().await;
-        log::warn!("recovery rewrap rejected: stale credential_version");
+        LOG.warn(
+            format_args!("recovery rewrap rejected: stale credential_version"),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::CONFLICT,
             "recovery was already completed; start over",
@@ -821,7 +909,10 @@ pub async fn recovery_rewrap(
     let lock_epoch = vault.lock_epoch;
 
     if let Err(e) = tx.commit().await {
-        log::error!("failed to commit recovery transaction: {:?}", e);
+        LOG.error(
+            format_args!("failed to commit recovery transaction: {:?}", e),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "recovery failed",
@@ -832,7 +923,10 @@ pub async fn recovery_rewrap(
     // 5. Establish the session — after the commit, so a failure here never
     //    leaves an authenticated caller without a rotated credential.
     if let Err(e) = establish_vault_session(&session, &vault_id) {
-        log::error!("failed to establish session after recovery: {:?}", e);
+        LOG.error(
+            format_args!("failed to establish session after recovery: {:?}", e),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "recovery completed but session could not be established",
@@ -843,7 +937,10 @@ pub async fn recovery_rewrap(
     // The challenge is now spent, the password credential is rotated, and the
     // recovery path is untouched — so this vault can be recovered again with
     // the same recovery key (Rule R1).
-    log::warn!("recovery succeeded; password credential rotated vault_id={vault_id}");
+    LOG.warn(
+        format_args!("recovery succeeded; password credential rotated vault_id={vault_id}"),
+        logger::Metadata::new(),
+    );
     HttpResponse::Ok().json(RewrapResponse {
         vault_id,
         crypto_version,
@@ -897,7 +994,10 @@ pub async fn recovery_regenerate(
         return error_response(StatusCode::BAD_REQUEST, "invalid vault_id", "INVALID_INPUT");
     };
     if vault_id != session_vault {
-        log::warn!("recovery regenerate refused: vault does not match session");
+        LOG.warn(
+            format_args!("recovery regenerate refused: vault does not match session"),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::FORBIDDEN,
             "vault does not match session",
@@ -936,7 +1036,10 @@ pub async fn recovery_regenerate(
     let tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
-            log::error!("failed to create transaction: {:?}", e);
+            LOG.error(
+                format_args!("failed to create transaction: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "recovery rotation failed",
@@ -996,7 +1099,10 @@ pub async fn recovery_regenerate(
     match update {
         Ok(r) if r.rows_affected == 0 => {
             let _ = tx.rollback().await;
-            log::warn!("recovery regenerate rejected: stale recovery verifier");
+            LOG.warn(
+                format_args!("recovery regenerate rejected: stale recovery verifier"),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::CONFLICT,
                 "recovery key was already rotated; reload and try again",
@@ -1006,7 +1112,10 @@ pub async fn recovery_regenerate(
         Ok(_) => {}
         Err(e) => {
             let _ = tx.rollback().await;
-            log::error!("failed to rotate recovery material: {:?}", e);
+            LOG.error(
+                format_args!("failed to rotate recovery material: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "recovery rotation failed",
@@ -1016,7 +1125,10 @@ pub async fn recovery_regenerate(
     }
 
     if let Err(e) = tx.commit().await {
-        log::error!("failed to commit recovery rotation: {:?}", e);
+        LOG.error(
+            format_args!("failed to commit recovery rotation: {:?}", e),
+            logger::Metadata::new(),
+        );
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "recovery rotation failed",
@@ -1024,7 +1136,10 @@ pub async fn recovery_regenerate(
         );
     }
 
-    log::warn!("recovery key rotated vault_id={vault_id}");
+    LOG.warn(
+        format_args!("recovery key rotated vault_id={vault_id}"),
+        logger::Metadata::new(),
+    );
     HttpResponse::Ok().json(serde_json::json!({ "rotated": true }))
 }
 
@@ -1055,10 +1170,7 @@ mod tests {
                     // Per-app instance, so one test's budget cannot consume
                     // another's. Tests that exercise the limit install their own
                     // tight throttle instead.
-                    .app_data(web::Data::new(super::ChallengeThrottle::new(
-                        10_000,
-                        60,
-                    )))
+                    .app_data(web::Data::new(super::ChallengeThrottle::new(10_000, 60)))
                     .wrap(
                         actix_session::SessionMiddleware::builder(
                             actix_session::storage::CookieSessionStore::default(),
@@ -1145,9 +1257,8 @@ mod tests {
     }
 
     fn proof_for(verifier_b64: impl AsRef<str>, vault_id: &str, challenge: &str) -> String {
-        base64::engine::general_purpose::STANDARD.encode(
-            expected_proof(verifier_b64.as_ref(), vault_id, challenge).expect("proof"),
-        )
+        base64::engine::general_purpose::STANDARD
+            .encode(expected_proof(verifier_b64.as_ref(), vault_id, challenge).expect("proof"))
     }
 
     fn unlock_body(vault_id: &str, selector: &str, proof: &str) -> serde_json::Value {
@@ -1345,11 +1456,7 @@ mod tests {
             // wrong proof
             unlock_body(VAULT_ID, &selector, &bad),
             // unknown selector
-            unlock_body(
-                VAULT_ID,
-                "99999999-9999-4999-8999-999999999999",
-                &good,
-            ),
+            unlock_body(VAULT_ID, "99999999-9999-4999-8999-999999999999", &good),
             // selector issued for a different vault
             unlock_body(OTHER_VAULT_ID, &selector, &good),
             // proof computed for a different vault id
@@ -1385,14 +1492,14 @@ mod tests {
         // A caller must not be able to tell these apart — otherwise each one is
         // an oracle for vault existence, challenge liveness, or key correctness.
         for b in &bodies[1..] {
-            assert_eq!(
-                &bodies[0], b,
-                "recovery failures must be indistinguishable"
-            );
+            assert_eq!(&bodies[0], b, "recovery failures must be indistinguishable");
         }
         let parsed: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
         assert_eq!(parsed["code"], "AUTH_FAILED");
-        assert_eq!(parsed["error_msg"], "Recovery failed. Check the recovery key.");
+        assert_eq!(
+            parsed["error_msg"],
+            "Recovery failed. Check the recovery key."
+        );
     }
 
     // --- rewrap ------------------------------------------------------------
@@ -1427,14 +1534,20 @@ mod tests {
         assert_eq!(after.salt, b64_of(16, 0xC1));
         assert_eq!(after.vault_verifier, b64_of(32, 0xC2));
         assert_eq!(after.vault_key_wrap.as_deref(), Some(&b64_of(48, 0xC3)[..]));
-        assert_eq!(after.vault_key_wrap_iv.as_deref(), Some(&b64_of(12, 0xC4)[..]));
+        assert_eq!(
+            after.vault_key_wrap_iv.as_deref(),
+            Some(&b64_of(12, 0xC4)[..])
+        );
         assert_eq!(after.iterations, 60_000);
         assert_eq!(after.credential_version, 1);
 
         // --- must NOT change ----------------------------------------------
         // The vault key is unchanged, so the ciphertext is too.
         assert_eq!(after.vault, before.vault, "ciphertext must not change");
-        assert_eq!(after.vaultiv, before.vaultiv, "ciphertext IV must not change");
+        assert_eq!(
+            after.vaultiv, before.vaultiv,
+            "ciphertext IV must not change"
+        );
         // `version` is the document CAS counter; bumping it would invalidate
         // every pending sync intent's base_version for no reason.
         assert_eq!(
@@ -1993,10 +2106,16 @@ mod tests {
         let after = load_vault(&pool, VAULT_ID).await;
 
         // Changed: only the recovery material.
-        assert_eq!(after.recovery_verifier.as_deref(), Some(&b64_of(32, 0xD1)[..]));
+        assert_eq!(
+            after.recovery_verifier.as_deref(),
+            Some(&b64_of(32, 0xD1)[..])
+        );
         assert_eq!(after.recovery_salt.as_deref(), Some(&b64_of(16, 0xD2)[..]));
         assert_eq!(after.recovery_wrap.as_deref(), Some(&b64_of(48, 0xD3)[..]));
-        assert_eq!(after.recovery_wrap_iv.as_deref(), Some(&b64_of(12, 0xD4)[..]));
+        assert_eq!(
+            after.recovery_wrap_iv.as_deref(),
+            Some(&b64_of(12, 0xD4)[..])
+        );
 
         // Untouched: the password credential, the document, and the counter.
         // `credential_version` tracks the *password* credential, which a

@@ -9,6 +9,8 @@ use crate::error::{error_response, session_required};
 use crate::id_codec::uuid_from_db;
 use crate::session_auth::{clear_vault_session, session_vault_id};
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Session);
+
 #[derive(Serialize)]
 pub struct SessionResponse {
     pub authenticated: bool,
@@ -45,7 +47,10 @@ pub async fn get_session(pool: web::Data<DbPool>, session: Session) -> HttpRespo
             return session_required();
         }
         Err(e) => {
-            log::error!("failed to fetch vault: {:?}", e);
+            LOG.error(
+                format_args!("failed to fetch vault: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to fetch vault",
@@ -58,7 +63,10 @@ pub async fn get_session(pool: web::Data<DbPool>, session: Session) -> HttpRespo
     let _ = match uuid_from_db(&vault.id) {
         Ok(id) => id,
         Err(e) => {
-            log::error!("invalid UUID in vault.id: {:?}", e);
+            LOG.error(
+                format_args!("invalid UUID in vault.id: {:?}", e),
+                logger::Metadata::new(),
+            );
             return error_response(
                 actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
                 "invalid vault id in database",

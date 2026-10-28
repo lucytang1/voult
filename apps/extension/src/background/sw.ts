@@ -31,7 +31,9 @@ import {
   queryLogins,
   recordOAuthClick,
   resetOnboarding,
+  restoreOnStartup,
   saveOnboarding,
+  setFolderSelection,
   setPendingPrompt,
   syncSession,
   unlockWithDevice,
@@ -44,6 +46,7 @@ import {
   getLocalValue,
   getSessionValue,
   setLocalValue,
+  setSessionValue,
 } from "../lib/storage";
 
 function tabOrigin(tab: chrome.tabs.Tab | undefined): string | null {
@@ -60,19 +63,23 @@ chrome.runtime.onInstalled.addListener((details) => {
   console.info(`[voult] extension ${details.reason}`, { version: EXTENSION_VERSION });
 });
 
-// Silent device unlock on worker startup (fresh browser session), unless the
-// user explicitly locked (locked flag survives in chrome.storage.session).
+// Silent device unlock on worker/browser startup, governed by the durable lock
+// policy (`restoreOnStartup`): Never or a still-open idle window restores;
+// a manual/peer lock or an elapsed idle deadline stays locked.
 // When nothing is onboarded yet, opportunistically adopt the web session's
 // vault so the popup opens on the password screen instead of Connect.
 async function startupUnlock(): Promise<void> {
   try {
-    if (await getSessionValue<number>(LOCKED_FLAG_KEY)) return;
     let id = await getLocalValue<string>(ACTIVE_VAULT_KEY);
     if (!id) {
       id = await adoptSessionProbe();
       if (!id) return;
     }
-    await unlockWithDevice();
+    // Fast path for a lock recorded earlier in this browser session. The
+    // durable lock record is what survives a browser restart.
+    if (await getSessionValue<number>(LOCKED_FLAG_KEY)) return;
+    const unlocked = await restoreOnStartup();
+    if (!unlocked) await setSessionValue(LOCKED_FLAG_KEY, 1);
   } catch (e) {
     console.warn("[voult] startup unlock skipped", e);
   }
@@ -148,10 +155,23 @@ chrome.runtime.onMessage.addListener(
               await setLocalValue("voult.serverUrl", normalized);
             }
             if (msg.lockTimeoutMinutes !== undefined) {
-              const mins = Math.min(120, Math.max(1, Math.floor(msg.lockTimeoutMinutes)));
+              // 0 means "Never" (same sentinel as the web app). Clamp to the
+              // shared 4-hour ceiling; a corrupt value must not disable the
+              // timer silently.
+              const raw = Math.floor(msg.lockTimeoutMinutes);
+              const mins = Number.isFinite(raw) ? Math.min(240, Math.max(0, raw)) : 5;
               await setLocalValue("voult.lockTimeoutMinutes", mins);
             }
             sendResponse(await getPopupState());
+            break;
+          }
+          case "SET_FOLDER": {
+            // The popup's folder filter outlives the popup: the worker keeps it
+            // (cleared by every lock) and uses it to scope page suggestions and
+            // save destinations. The reply is a full state so this site's
+            // matches reflect the new scope.
+            await setFolderSelection(msg.folderId);
+            sendResponse(await getPopupState(msg.tabOrigin));
             break;
           }
           case "QUERY_LOGINS": {
@@ -222,16 +242,19 @@ chrome.runtime.onMessage.addListener(
             // A typed password wins over any in-flight SSO click on this
             // origin — the user chose the password path.
             clearPendingOAuthFor(candidateOrigin);
-            const verdict = await evaluateCandidate(msg.username, msg.password, candidateOrigin);
+            // The tab's own icon is what the user sees on the tab; the page's
+            // declared icon is only the fallback hint.
+            const icon = sender.tab?.favIconUrl ?? msg.faviconUrl ?? null;
+            const verdict = await evaluateCandidate(msg.username, msg.password, candidateOrigin, icon);
             // Retain the prompted capture (memory only) so a sign-in redirect
-            // destroying the page banner can re-show it on the next page.
+            // destroying the page card can re-show it on the next page.
             if (verdict.prompt) {
               setPendingPrompt({
                 username: msg.username,
                 password: msg.password,
                 origin: verdict.origin,
                 mode: verdict.mode,
-                faviconUrl: msg.faviconUrl ?? null,
+                faviconUrl: verdict.faviconUrl ?? icon,
                 at: Date.now(),
               });
             } else if (!verdict.prompt) {
@@ -254,13 +277,13 @@ chrome.runtime.onMessage.addListener(
             break;
           }
           case "CONFIRM_PENDING_SAVE": {
-            // User confirmed the re-shown banner on the post-redirect page.
+            // User confirmed the re-shown card on the post-redirect page.
             // The secret comes from worker memory — the new page never held it.
             const decisionOrigin = tabOrigin(sender.tab);
             if (!decisionOrigin) throw new Error("Unknown tab origin.");
             const canonical = originOfUrl(decisionOrigin);
             const icon = sender.tab?.favIconUrl ?? msg.faviconUrl ?? null;
-            const result = await confirmPendingPrompt(canonical, icon);
+            const result = await confirmPendingPrompt(canonical, icon, msg.folderId);
             sendResponse({ saved: result.saved, offline: result.offline });
             break;
           }
@@ -280,7 +303,14 @@ chrome.runtime.onMessage.addListener(
             // variant), then the page-declared icon. The worker re-validates
             // either; origin is still stamped from the sender tab.
             const icon = sender.tab?.favIconUrl ?? msg.faviconUrl ?? null;
-            const result = await pushSave(msg.username, msg.password, canonical, msg.mode, icon);
+            const result = await pushSave(
+              msg.username,
+              msg.password,
+              canonical,
+              msg.mode,
+              icon,
+              msg.folderId,
+            );
             // Resolved here — the post-redirect page must not re-prompt.
             // Offline keeps the retained prompt so a later page can retry.
             if (result.saved) clearPendingPrompt();
@@ -311,7 +341,13 @@ chrome.runtime.onMessage.addListener(
               break;
             }
             sendResponse(
-              await evaluateOAuthPageState(msg.offers, msg.hasLoginForm, msg.path, pageOrigin),
+              await evaluateOAuthPageState(
+                msg.offers,
+                msg.hasLoginForm,
+                msg.path,
+                pageOrigin,
+                sender.tab?.favIconUrl ?? msg.faviconUrl ?? null,
+              ),
             );
             break;
           }
@@ -323,7 +359,13 @@ chrome.runtime.onMessage.addListener(
             if (!decisionOrigin) throw new Error("Unknown tab origin.");
             const canonical = originOfUrl(decisionOrigin);
             const icon = sender.tab?.favIconUrl ?? msg.faviconUrl ?? null;
-            const result = await pushSaveOAuth(msg.provider, msg.account, canonical, icon);
+            const result = await pushSaveOAuth(
+              msg.provider,
+              msg.account,
+              canonical,
+              icon,
+              msg.folderId,
+            );
             sendResponse({ saved: result.saved, offline: result.offline });
             break;
           }
@@ -345,12 +387,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   void handleAlarm(alarm);
 });
 
-// Screen lock always locks the vault immediately (publishing best-effort so
-// the web app converges); system idle is covered by the inactivity alarm.
+// Screen lock always locks the vault immediately. It is an environmental event
+// like the idle timer, not a deliberate user "Lock" action, so it stays local
+// to this surface and does not bump the shared epoch.
 chrome.idle.onStateChanged.addListener((state) => {
   if (state === "locked" && isUnlocked()) {
     console.info("[voult] locked (screen locked)");
-    void publishLock();
+    void publishLock("autolock");
   }
 });
 

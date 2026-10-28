@@ -13,6 +13,8 @@ use crate::cloud::provider::{self, CloudProvider, ProviderKind, StoredToken, Tok
 use crate::db::DbPool;
 use crate::entity::cloud_token::{self, Entity as CloudTokenEntity};
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Cloud);
+
 /// Refresh this many seconds before actual expiry, so a token cannot expire in
 /// the middle of an upload.
 const EXPIRY_SKEW_SECONDS: i64 = 60;
@@ -190,7 +192,10 @@ async fn persist_refreshed(
         // A rotating provider may already have invalidated the old refresh
         // token. Losing the atomic row update therefore requires explicit
         // re-consent rather than a generic retry with stale credentials.
-        log::error!("failed to persist refreshed cloud credential: {e:?}");
+        LOG.error(
+            format_args!("failed to persist refreshed cloud credential: {e:?}"),
+            logger::Metadata::new(),
+        );
         ProviderError::new(
             ProviderErrorKind::AuthRequired,
             "could not persist refreshed credential; reconnect required",

@@ -182,15 +182,52 @@ applied by another:
 | TanStack Query cache | In-memory only | Cleared on lock and on 401 via the centralized teardown path. |
 | Zustand store | In-memory only | Wiped on lock. `vault: VaultState` is the single source of truth for selection and key presence. |
 | `localStorage["voult.selectedVault"]` | Profile-global | The selected vault id. Persisted so the app can restore *its* vault even when the session cookie is gone (M2). |
-| `localStorage["voult.lockRecord"]` | Profile-global | `{ vaultId, reason, lockedAt }` (`src/lib/state/selection-store.ts`). `reason` is `manual \| autolock \| peer \| session_expired`: the first three hold until an explicit unlock, `autolock` lapses after the window, `session_expired` forces a password re-auth. Replaces the old tab-scoped `sessionStorage["voult.lockedAt"]`. |
+| `localStorage["voult.lockRecord"]` | Profile-global | `{ vaultId, reason, lockedAt }` (`src/lib/state/selection-store.ts`). `reason` is `manual \| autolock \| peer`: `manual`/`peer` hold until an explicit unlock, `autolock` lapses after the window. Session expiry is deliberately not a lock reason. Replaces the old tab-scoped `sessionStorage["voult.lockedAt"]`. |
+| `localStorage["voult.lastActivity.<vaultId>"]` | Per-vault | Epoch ms of the last recorded activity while unlocked (throttled writes). The auto-lock deadline is evaluated against wall-clock time at startup/resume, so closing the tab does not reset the idle window. Not secret. |
 | `localStorage["voult.autolock.*"]` | Device-global | Web + extension autolock timeouts (`src/lib/settings/index.ts`). Not vault data: deliberately readable while the vault is locked, which SQLite is not. |
 | `localStorage["voult.vaultName.<vaultId>"]` | Per-vault | Last name confirmed by a decrypted document (`src/lib/vault/name.ts`). Exists only so the lock screen and vault chooser can render a label before the key is in memory. A label, never key material. |
 | `localStorage["voult.pendingVaultName.<vaultId>"]` | Per-vault | An optimistic rename whose `rename` intent has not reached the server yet. Outranks the cached name for display until sync confirms it. |
 
 Restart behaviour is decided by `decideRestore()` in `src/lib/state/vault-state.ts`,
 a pure function over `(selection, lock record, autolock setting, device key
-presence)` — so the policy is reviewable in one place rather than spread across
-the bootstrap.
+presence, last-activity timestamp)` — so the policy is reviewable in one place
+rather than spread across the bootstrap. A finite timer is enforced from the
+persisted last activity, not from app launch: reopening after the deadline
+stays locked even if the app was closed before the timer fired.
+
+Silent restore needs the **pair** of local device records, not just the key: a
+`device_key` with no `device_envelope` has nothing to unwrap, so the bootstrap
+reports `stay_locked (no_device_material)` and the lock screen does not offer
+"Unlock with this device". Every successful password unlock
+(`unlockFromEnvelope` in `src/lib/auth/flows.ts`) re-wraps the vault key into
+this browser's envelope, which is what gives a fresh origin — or one whose
+envelope was lost — a working device unlock for the *next* reload. Only the
+create/login/import/recover flows used to persist it, so an origin entered
+through the lock screen could never restore silently.
+
+## Session loss vs. sign-out
+
+These used to be the same code path and they are not the same thing:
+
+- **Session loss** (`SESSION_REQUIRED`, 401) is an *authorization* fact. The
+  cookie no longer permits API calls, but the user is still the owner of the
+  selected vault on this device. `teardownVaultSession()` marks
+  `serverSession: "missing"` only: an **unlocked** vault keeps its key,
+  plaintext, version, and open SQLite handle (local use continues; sync/cloud
+  work pauses), while a **locked** vault stays locked with its real lock reason.
+  The vault selection and the local device key + envelope are retained. Session
+  loss is never broadcast as a lock and never writes a lock record.
+- **Sign-out** (`clearSessionState`) genuinely deselects: selection, lock record,
+  session, and keys all go. There is no user-facing logout button; this runs when
+  there is genuinely no vault left (e.g. cleared app data).
+- **Vault switch observed from the server** (the cookie now names a different
+  vault) is the one case that ends local access to the selected vault:
+  `abandonVaultSelection()` closes SQLite, clears the selection and cache, and
+  the new vault is adopted locked on its next unlock.
+
+A network outage is neither. It leaves state untouched — offline is a normal
+state for the offline-first intent queue, and treating it as a revoked session
+would wipe the user's place in the app every time they worked on a plane.
 
 ## Switching vaults (M3)
 
@@ -222,7 +259,7 @@ cloud-import flows in `app/vault/index.tsx`, home's async decrypt effect, and
 `useGetVault`'s version write.
 
 `sync()` additionally pins on the **selection** rather than the session —
-M2 made `session` nullable while a vault is still selected, so the old
+the cookie can lapse while a vault is still selected, so the old
 `session?.vaultId` comparison would have stamped snapshots with an empty id
 after session loss.
 
@@ -233,27 +270,3 @@ OAuth: a **pending provider token never becomes a selection**. Pending state
 only lists candidate vaults and links a credential after an explicit,
 password-verified import. The only selection writes are a real cookie-backed
 session restore, a switch, and a create.
-
-## Session loss vs. sign-out (M2)
-
-These used to be the same code path and they are not the same thing:
-
-- **Session loss** (`SESSION_REQUIRED`, 401) is an *authorization* fact. The
-  cookie no longer permits API calls, but the user is still the owner of the
-  selected vault on this device. `teardownVaultSession()` therefore wipes keys
-  and plaintext, closes SQLite, clears the query cache, and marks
-  `serverSession: "missing"` — while **retaining the vault selection and the
-  local device key + envelope**. The user stays on `/lock` for their own vault
-  and re-authenticates with the master password
-  (`reauthenticateAndUnlock`), which re-establishes the session via the existing
-  verifier flow and then unwraps the key locally. Deleting the device material
-  here would silently downgrade every cookie expiry into a full password
-  re-entry, for no security gain.
-- **Sign-out** (`clearSessionState`) genuinely deselects: selection, lock record,
-  session, and keys all go. There is no user-facing logout button; this runs when
-  there is genuinely no vault left (e.g. cleared app data).
-
-A network outage is neither. It marks the session `unknown` and changes nothing
-else — offline is a normal state for the offline-first intent queue, and treating
-it as a revoked session would wipe the user's place in the app every time they
-worked on a plane.

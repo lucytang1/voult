@@ -19,13 +19,20 @@ right, and a top bar with the vault menu, search, and folder filter.
   `PopupState` carries them so the popup never re-implements folder semantics.
   `folderNameFor` / `itemsInFolder` / `countByFolder` are shared with the web
   app in `@voult/vault-core`.
+  The selection itself is worker state, not popup state: closing the popup keeps
+  it, every lock (manual, idle, peer, logout) clears it, and the next unlock
+  starts on *All folders*. It also scopes behaviour beyond the popup — page
+  suggestions only offer logins filed in the selected folder, and a save lands
+  there. It is mirrored in `chrome.storage.session` (opaque folder id / Unfiled
+  marker only) so a worker restart that device-unlocks the same vault restores
+  the filter.
 - **Details** — account, masked password (reveal/copy), SSO methods, and a
   fixed action card for Fill / Copy. Passwords never render until revealed.
   Creating, editing, and deleting stay in the web app.
 - **Locked / Connect** — same palette and menu, with the password/pairing
   flows unchanged.
 
-The injected page UI (suggest dropdown, save banner) intentionally stays
+The injected page UI (suggest dropdown, save card) intentionally stays
 vanilla TS in a closed Shadow DOM: content scripts are classic, import-free
 bundles, and shipping React into every page would cost size and isolation for
 no gain. The popup is the React surface.
@@ -73,6 +80,9 @@ cd apps/extension && npm install && npm run build
 - Unlocked: only same-origin matches suggested (exact/linked first, subdomain
   marked weaker); lookalike host (`examp1e`) gets nothing; cross-origin
   iframes never filled; `http` pages show insecure markers.
+- Suggestions are also scoped to the popup's folder filter: pick a folder with
+  no login for the site and focusing the field shows no dropdown; the login
+  appears again after switching to *All folders* (or its own folder).
 - Fill via dropdown click, `Ctrl/Cmd+Shift+L`, and popup Fill all dispatch
   framework-compatible input events; never auto-submits.
 - OAuth markers: dropdown rows read the account + provider (never fill);
@@ -81,10 +91,21 @@ cd apps/extension && npm install && npm run build
 
 ## M2 manual matrix (offer to save)
 
-- New login submit → one "Save login?" banner (username + origin, never the
-  password); Dismiss/Never leave nothing behind; Save persists across browser
-  restart (verify in the web app).
-- Changed password → "Update saved login?"; identical re-login is silent.
+- New login submit → one save card (Title / Username-email / masked Password —
+  the real password is never rendered); it names the destination folder in the
+  header pill, and "Not now" / the close button / the kebab's "Never for this
+  site" each leave nothing behind except that last one's origin rule. Add
+  persists across browser restart (verify in the web app).
+- Destination: the pill lists the vault's folders plus Unfiled and preselects
+  the folder currently selected in the popup (Unfiled when that bucket is in
+  view); with *All folders* selected it preselects the vault's default folder —
+  Personal (`DEFAULT_FOLDER_ID`, even if renamed), falling back to the first
+  folder when that folder was deleted. Picking another one files the saved
+  login there (verify the folder in the web app). The pill truncates, its
+  tooltip shows `<vault> › <folder>`. Update mode shows the same pill read-only,
+  because an update must not silently move the entry.
+- Changed password → "Update saved login?" with the same rows; identical
+  re-login is silent.
 - Offline save → "will retry" surfaced; candidate kept in memory only (never
   on disk); flushes on the next online save trigger.
 - Concurrent web-app + extension edits → `409` retry, per-field LWW, no
@@ -96,17 +117,18 @@ Test page needs two SSO buttons (Google + GitHub hrefs or text) on an
 `https` origin with a password form beside them.
 - Vault holding NO account for a provider + click "Continue with Google" →
   complete the IdP dance and return to the app (usually a page with no SSO
-  buttons, e.g. `/dashboard`) → one "Signed in with Google?" banner with a
-  single `Save "Sign in with Google"` button. Saving creates a passwordless
-  item with NO `username` and the method `Google` (verify in web app:
-  "Sign-in methods: Google", no password block); the popup and the suggest
-  dropdown label that row "Sign in with Google".
-- Vault holding ≥1 account for a provider → the banner lists exactly those
-  accounts as rows, nothing else; picking one creates/updates a passwordless
-  item whose `username` IS that account. The list is capped at 8. An account
-  qualifies if the vault has an explicit SSO method for that provider **or** a
-  login on the provider's own domain (`github.com` + handle `lucytang1` is
-  that person's GitHub account). Seed one in the web app first, e.g.
+  buttons, e.g. `/dashboard`) → one "Signed in with Google?" card that names
+  the method and offers Add (with no account in the vault, it saves the method
+  only). Saving creates a passwordless item with NO `username` and the method
+  `Google` (verify in web app: "Sign-in methods: Google", no password block);
+  the popup and the suggest dropdown label that row "Sign in with Google".
+- Vault holding ≥1 account for a provider → the card lists exactly those
+  accounts as radio rows (first preselected), nothing else; Add creates/updates
+  a passwordless item whose `username` IS the selected account. A row is a
+  choice, not a save — a mis-click cannot write. The list is capped at 8. An
+  account qualifies if the vault has an explicit SSO method for that provider
+  **or** a login on the provider's own domain (`github.com` + handle `lucytang1`
+  is that person's GitHub account). Seed one in the web app first, e.g.
   `you@gmail.com` and `you@acme.com` on some other site.
 - Picking an account the site already stores → no duplicate row, no error
   (the method is already there).

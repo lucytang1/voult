@@ -1,10 +1,10 @@
 import { v4 as uuidv4 } from "uuid";
 import { generateDeviceKey } from "./index.web";
-
-const DB_NAME = "voult";
-const DB_VERSION = 2;
-const STORE_NAME = "device_key";
-const ENVELOPE_STORE_NAME = "device_envelope";
+import {
+  DEVICE_ENVELOPE_STORE as ENVELOPE_STORE_NAME,
+  DEVICE_KEY_STORE as STORE_NAME,
+  openVaultDb as openDb,
+} from "../storage/indexed-db";
 
 // Records are keyed by vault id so multiple vaults can coexist in one browser
 // profile without overwriting each other's device key or vault-key envelope.
@@ -24,23 +24,6 @@ export interface DeviceEnvelopeRecord {
   wrapped_vault_key_iv: string;
   crypto_version: number;
   updated_at: string;
-}
-
-function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME);
-      }
-      if (!db.objectStoreNames.contains(ENVELOPE_STORE_NAME)) {
-        db.createObjectStore(ENVELOPE_STORE_NAME);
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
 }
 
 const isDeviceKeyRecord = (value: unknown): boolean =>

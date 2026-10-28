@@ -12,6 +12,7 @@
  * | Var | Required | Allowed values | Default | Notes |
  * |-----|----------|----------------|---------|-------|
  * | `VOULT_ENV` | Optional | `development` / `production` | `production` | Controls dev vs prod branching (DB path, etc.). Case-insensitive. Panics on any other value. |
+ * | `VOULT_LOG_LEVEL` | Optional | `debug` / `log` / `warn` / `error` (`info` aliases `log`) | `log` | Read by `crates/logger`, not by this module. Controls all server and launcher logging, including `log`-facade records from Actix, SeaORM/SQLx, and other dependencies. `RUST_LOG` is ignored. |
  * | `DATABASE_URL` | Optional | valid `sqlite://` URL | dev: `sqlite://voult.db?mode=rwc` (normalized to absolute), prod: `~/Library/Application Support/Voult/voult.db` | Panics if set but empty. |
  * | `SESSION_COOKIE_KEY` | Optional | `>=64` chars | per-install `session.key` (0600) | Panics if set but <64. |
  * | `STATIC_DIR` | Optional | path | bundle probe / `../client/dist` | — |
@@ -31,6 +32,9 @@ pub const ENV_SESSION_COOKIE_KEY: &str = "SESSION_COOKIE_KEY";
 pub const ENV_STATIC_DIR: &str = "STATIC_DIR";
 pub const ENV_CORS_ORIGINS: &str = "CORS_ORIGINS";
 
+/// Config logging context.
+const CONFIG_LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Config);
+
 // Strict environment — only two concrete values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Environment {
@@ -48,7 +52,10 @@ impl Environment {
                     "development" => Self::Development,
                     "production" => Self::Production,
                     "" => {
-                        log::warn!("{ENV_VOULT_ENV} is empty, defaulting to production");
+                        CONFIG_LOG.warn(
+                            format_args!("{ENV_VOULT_ENV} is empty, defaulting to production"),
+                            logger::metadata! { "env_var" => ENV_VOULT_ENV },
+                        );
                         Self::Production
                     }
                     other => panic!(
@@ -191,7 +198,10 @@ pub fn database_url(env: Environment) -> String {
 
         if env.is_dev() && is_relative_sqlite_url(&trimmed) {
             let normalized = normalize_dev_database_url(&trimmed);
-            log::info!("Normalized relative {ENV_DATABASE_URL} to {normalized}");
+            CONFIG_LOG.log(
+                format_args!("Normalized relative {ENV_DATABASE_URL} to {normalized}"),
+                logger::Metadata::new(),
+            );
             return normalized;
         }
 
@@ -200,8 +210,11 @@ pub fn database_url(env: Environment) -> String {
             let without = &trimmed["sqlite://".len()..];
             let path_part = without.split_once('?').map(|(p, _)| p).unwrap_or(without);
             if path_part == "voult.db" {
-                log::warn!(
-                    "Ignoring dev {ENV_DATABASE_URL} '{trimmed}' in production, using prod DB at Application Support"
+                CONFIG_LOG.warn(
+                    format_args!(
+                        "Ignoring dev {ENV_DATABASE_URL} '{trimmed}' in production, using prod DB at Application Support"
+                    ),
+                    logger::metadata! { "env_var" => ENV_DATABASE_URL },
                 );
                 // fall through to prod default
             } else {
@@ -215,13 +228,19 @@ pub fn database_url(env: Environment) -> String {
     // Fallback: per-install prod DB
     let data_dir = voult_data_dir();
     if let Err(e) = fs::create_dir_all(&data_dir) {
-        log::warn!(
-            "Could not create Voult data directory {}: {}",
-            data_dir.display(),
-            e
+        CONFIG_LOG.warn(
+            format_args!(
+                "Could not create Voult data directory {}: {}",
+                data_dir.display(),
+                e
+            ),
+            logger::Metadata::new(),
         );
     } else {
-        log::info!("Using Voult data directory: {}", data_dir.display());
+        CONFIG_LOG.log(
+            format_args!("Using Voult data directory: {}", data_dir.display()),
+            logger::Metadata::new(),
+        );
     }
     let db_path = data_dir.join("voult.db");
     format!("sqlite://{}?mode=rwc", db_path.display())

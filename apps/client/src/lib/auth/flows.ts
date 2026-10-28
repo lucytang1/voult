@@ -1,21 +1,12 @@
 import {
-  CRYPTO_VERSION,
-  PBKDF2_ITERATIONS,
-  b64,
   createAuthKey,
   decrypt,
   derivePasswordWrappingKey,
   getAuthVerifierB64,
   importVaultKey,
   unwrapKeyBytes,
-  wrapKeyBytes,
 } from "../crypto/index.web";
-import {
-  getDeviceEnvelope,
-  getDeviceKey,
-  getOrCreateDeviceKey,
-  saveDeviceEnvelope,
-} from "../crypto/device-key";
+import { getDeviceEnvelope, getDeviceKey } from "../crypto/device-key";
 import { fetchSession } from "../queries/session/query";
 import { fetchVault } from "../queries/vault/query";
 import { fetchCryptoParams } from "../queries/cryptoParams/query";
@@ -27,7 +18,8 @@ import {
   commitVaultUnlock,
   useAppStore,
 } from "../state";
-import { derivePasswordKeys as deriveVerifier, parseVaultJson } from "./utils";
+import { derivePasswordKeys as deriveVerifier, parseVaultJson, persistDeviceSecrets } from "./utils";
+import { selectedVaultId } from "../state/vault-state";
 import type { SessionState, DecryptedVault } from "../state/type";
 
 export interface UnlockedSession {
@@ -46,19 +38,6 @@ async function derivePasswordKeys(password: string, salt: string, iterations: nu
   const vaultVerifier = await getAuthVerifierB64(authKey);
   return { authKey, wrappingKey, vaultVerifier };
 }
-
-/** Wrap the vault key with the persisted browser device key and store the envelope locally. */
-async function persistDeviceEnvelope(vaultKeyRaw: Uint8Array, vaultId: string) {
-  const device = await getOrCreateDeviceKey(vaultId);
-  const { cipher, iv } = await wrapKeyBytes(vaultKeyRaw, device.key);
-  await saveDeviceEnvelope(vaultId, {
-    device_id: device.device_id,
-    wrapped_vault_key: b64(cipher),
-    wrapped_vault_key_iv: b64(iv),
-    crypto_version: CRYPTO_VERSION,
-  });
-}
-
 
 /**
  * Existing-session unlock after reload:
@@ -248,14 +227,34 @@ async function unlockFromEnvelope(
 ): Promise<void> {
   const { salt, iterations, vaultKeyWrap, vaultKeyWrapIv } = envelope;
   const wrappingKey = await derivePasswordWrappingKey(password, salt, iterations);
+  let vaultKeyRaw: Uint8Array;
   let vaultKey: CryptoKey;
   try {
-    vaultKey = await importVaultKey(await unwrapKeyBytes(vaultKeyWrap, vaultKeyWrapIv, wrappingKey));
+    vaultKeyRaw = await unwrapKeyBytes(vaultKeyWrap, vaultKeyWrapIv, wrappingKey);
+    vaultKey = await importVaultKey(vaultKeyRaw);
   } catch {
     throw new Error("Incorrect password.");
   }
   commitVaultUnlock(vaultKey);
   console.info("Vault unlocked with password");
+
+  // (Re)establish this browser's device-wrapped envelope from the key we just
+  // unwrapped. Without this, an origin whose only way in has been the master
+  // password never grows an envelope: the device key exists, but
+  // `unlockWithDevice()` finds nothing to unwrap, so every reload/restart falls
+  // back to the lock screen even with Autolock = Never. Best-effort — the vault
+  // is already open, and a storage failure only costs the next silent restore.
+  const vaultId = selectedVaultId(useAppStore.getState().vault);
+  if (vaultId) {
+    try {
+      await persistDeviceSecrets(vaultKeyRaw, vaultId);
+    } catch (e) {
+      console.warn("Unlocked, but could not store the device envelope", e);
+    }
+  }
+  // The imported CryptoKey has copied the bytes; drop the raw copy.
+  vaultKeyRaw.fill(0);
+
   // vaultVersion is intentionally left untouched so pending sync intents
   // keep a valid base_version across lock/unlock.
 }

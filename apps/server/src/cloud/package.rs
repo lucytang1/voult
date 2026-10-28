@@ -150,18 +150,12 @@ pub fn build(vault: &vault::Model) -> Result<Vec<u8>, &'static str> {
         });
     };
 
-    let (
-        Some(recovery_salt),
-        Some(recovery_verifier),
-        Some(recovery_wrap),
-        Some(recovery_wrap_iv),
-    ) = (
+    let (Some(recovery_salt), Some(recovery_verifier), Some(recovery_wrap), Some(recovery_wrap_iv)) = (
         vault.recovery_salt.as_ref(),
         vault.recovery_verifier.as_ref(),
         vault.recovery_wrap.as_ref(),
         vault.recovery_wrap_iv.as_ref(),
-    )
-    else {
+    ) else {
         return Err(ERR_MISSING_RECOVERY);
     };
 
@@ -238,7 +232,10 @@ mod tests {
         assert_eq!(json["passwordKeyEnvelope"]["wrappedVaultKey"], "d3JhcA==");
         assert_eq!(json["passwordKeyEnvelope"]["iv"], "d2l2");
         assert_eq!(json["recoveryEnvelope"]["salt"], "cmVjb3Zlcnktc2FsdA==");
-        assert_eq!(json["recoveryEnvelope"]["verifier"], "cmVjb3ZlcnktdmVyaWZpZXI=");
+        assert_eq!(
+            json["recoveryEnvelope"]["verifier"],
+            "cmVjb3ZlcnktdmVyaWZpZXI="
+        );
         assert_eq!(
             json["recoveryEnvelope"]["wrappedVaultKey"],
             "cmVjb3Zlcnktd3JhcA=="
@@ -313,7 +310,10 @@ mod tests {
 
         assert_eq!(json["cryptoParameters"]["salt"], "bmV3LXNhbHQ=");
         assert_eq!(json["cryptoParameters"]["iterations"], 120_000);
-        assert_eq!(json["passwordKeyEnvelope"]["wrappedVaultKey"], "bmV3LWdyYXA=");
+        assert_eq!(
+            json["passwordKeyEnvelope"]["wrappedVaultKey"],
+            "bmV3LWdyYXA="
+        );
         assert_eq!(json["passwordKeyEnvelope"]["iv"], "bmV3LWl2");
         // Ciphertext and revision are untouched by a credential rotation.
         assert_eq!(json["snapshot"]["ciphertext"], "Y2lwaGVydGV4dA==");

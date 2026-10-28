@@ -3,7 +3,7 @@ import { router } from "expo-router";
 import type { QueryClient } from "@tanstack/react-query";
 import { fetchSession } from "../queries/session/query";
 import { isNetworkError, isSessionRequired } from "../queries/http";
-import { teardownVaultSession, lockVaultStorage as closeVaultDb } from "../auth/teardown";
+import { teardownVaultSession, abandonVaultSelection, lockVaultStorage as closeVaultDb } from "../auth/teardown";
 import {
   lockVaultStorage as lockVaultKeys,
   markServerSessionActive,
@@ -18,8 +18,7 @@ import {
 } from "./session-channel";
 
 /**
- * Cross-surface session sync for the web app (M1/M2 of
- * plans/session-consistency.md).
+ * Cross-surface session sync for the web app.
  *
  * No interval poller by design: the check runs on window focus, tab
  * visibility, and network reconnect (check-on-use), plus instantly on
@@ -27,20 +26,21 @@ import {
  * see this channel (different origin), so web ↔ extension convergence always
  * flows through the server `lock_epoch` counter:
  *
- * - `POST /lock` (our own lock, or the extension's) bumps the epoch.
+ * - `POST /lock` (a deliberate manual lock on either surface) bumps the epoch.
+ *   Timed/idle locks never publish, because web and extension have independent
+ *   timeouts; otherwise the shorter timer would effectively govern both.
  * - Our next check observes `lock_epoch > lockEpoch` and wipes local keys.
  * - Unlock is per-device and never propagates: each side re-unwraps locally.
  *
  * Rules applied on every successful GET /session:
- * - 401 SESSION_REQUIRED → wipe keys/plaintext, close this vault's DB, mark the
- *   server session missing — but keep the vault *selected* and route to /lock
- *   for it. The selection and local device envelope survive; the master
- *   password re-authenticates (see `reauthenticateAndUnlock`). This is the M2
- *   change from routing to `/` and deleting the device key.
- * - transport error → mark the session unknown, change nothing else. A network
- *   outage is not evidence that the cookie is invalid.
- * - `vault_id` mismatch → another surface switched vaults → teardown the old
- *   vault and land with no selection; the new vault is adopted locked on its
+ * - 401 SESSION_REQUIRED → mark server access missing. An unlocked vault stays
+ *   unlocked (local use continues, sync pauses); a locked vault stays locked
+ *   with its real lock reason. Selection and device envelope survive. This is
+ *   NOT a lock and must never be broadcast as one.
+ * - transport error → leave everything untouched. A network outage is not
+ *   evidence that the cookie is invalid.
+ * - `vault_id` mismatch → another surface switched vaults → abandon this
+ *   selection and land at the chooser; the new vault is adopted locked on its
  *   next unlock, never auto-unlocked.
  * - epoch bump → lock now (wipe keys, close this vault's DB, drop ciphertext
  *   cache, route to /lock). Unknown local epoch (null) adopts without wiping.
@@ -60,7 +60,6 @@ export function useSessionSync(queryClient?: QueryClient) {
       if (useAppStore.getState().vault.status !== "unlocked") return;
       lockVaultKeys(null, "peer");
       queryClient?.removeQueries({ queryKey: ["vault"] });
-      queryClient?.removeQueries({ queryKey: ["favicon", vaultId] });
       queryClient?.removeQueries({ queryKey: ["cloud"] });
       await closeVaultDb();
       postSessionEvent("locked", vaultId, epoch);
@@ -68,20 +67,21 @@ export function useSessionSync(queryClient?: QueryClient) {
     };
 
     /**
-     * M2: the session is gone, but the vault selection is not.
+     * A definitive 401, not a lock.
      *
-     * This used to tear everything down and route to `/`, which made an expired
-     * cookie indistinguishable from a fresh install — the user lost their place
-     * in the app and had to rediscover their vault. Now teardown keeps the
-     * selection, and we route to `/lock` for *this* vault, where the master
-     * password re-establishes the session.
+     * An unlocked vault keeps its key and plaintext: the cookie authorizes
+     * server calls, it does not own local access. Only a vault that is already
+     * locked goes back to `/lock`; an unlocked one stays where it is and simply
+     * loses sync until the user reauthenticates.
      */
     const applySessionLost = async () => {
       const { vault } = useAppStore.getState();
       if (vault.status === "no_vault") return;
+      const wasUnlocked = vault.status === "unlocked";
       await teardownVaultSession(queryClient);
-      postSessionEvent("locked", null, null);
-      router.replace("/lock" as any);
+      // Deliberately no `postSessionEvent("locked", ...)`: announcing a lock
+      // would make peers wipe keys for a decision the user never made.
+      if (!wasUnlocked) router.replace("/lock" as any);
     };
 
     const checkSession = async () => {
@@ -96,10 +96,11 @@ export function useSessionSync(queryClient?: QueryClient) {
         markServerSessionActive();
 
         // Single-vault invariant: the cookie now names a different vault
-        // (peer logged in elsewhere). Tear down ours; adopt nothing.
+        // (peer logged in elsewhere). Abandon our selection and its keys; the
+        // other vault is adopted locked on its next unlock, never here.
         if (remote.vault_id !== current.session.vaultId) {
           const leftVaultId = current.session.vaultId;
-          await teardownVaultSession(queryClient);
+          await abandonVaultSelection(queryClient);
           postSessionEvent("vault-switch", leftVaultId, current.lockEpoch);
           router.replace("/" as any);
           return;

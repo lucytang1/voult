@@ -1,6 +1,8 @@
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::*;
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Migration);
+
 /// Makes the cloud-backup tables provider-neutral.
 ///
 /// Drive stops being the only cloud provider, so the tables that stored *its*
@@ -46,25 +48,48 @@ impl MigrationTrait for Migration {
         // warning about state it never had.
         for name in ["cloud_binding", "google_token", "google_pending_token"] {
             if manager.has_table(name).await? {
-                log::warn!(
-                    "{name}: dropping existing cloud backup state. Vaults are untouched and the \
-                     provider-side backup file is not deleted, but if a provider was linked, \
-                     re-link it from Settings to resume backing up."
+                LOG.warn(
+                    format_args!(
+                        "{name}: dropping existing cloud backup state. Vaults are untouched and the \
+                         provider-side backup file is not deleted, but if a provider was linked, \
+                         re-link it from Settings to resume backing up."
+                    ),
+                    logger::Metadata::new(),
                 );
             }
         }
 
         manager
-            .drop_table(Table::drop().table(LegacyGooglePendingToken::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(LegacyGooglePendingToken::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_table(Table::drop().table(LegacyGoogleToken::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(LegacyGoogleToken::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_table(Table::drop().table(OauthState::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(OauthState::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_table(Table::drop().table(CloudBinding::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(CloudBinding::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
 
         // --- cloud_token: one row per (vault, provider) ---
@@ -117,7 +142,11 @@ impl MigrationTrait for Migration {
                     .col(string(CloudPendingToken::ProviderKind).not_null())
                     .col(string(CloudPendingToken::AccessToken).not_null())
                     .col(string(CloudPendingToken::RefreshToken).null())
-                    .col(string(CloudPendingToken::TokenType).not_null().default("Bearer"))
+                    .col(
+                        string(CloudPendingToken::TokenType)
+                            .not_null()
+                            .default("Bearer"),
+                    )
                     .col(big_integer(CloudPendingToken::ExpiresAt).not_null())
                     .col(string(CloudPendingToken::Scope).null())
                     .col(string(CloudPendingToken::ProviderAccountId).null())
@@ -221,16 +250,36 @@ impl MigrationTrait for Migration {
         // Irreversible by design: no data was carried over, so there is nothing
         // to restore. An operator must re-link their provider after a downgrade.
         manager
-            .drop_table(Table::drop().table(CloudBinding::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(CloudBinding::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_table(Table::drop().table(OauthState::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(OauthState::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_table(Table::drop().table(CloudPendingToken::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(CloudPendingToken::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         manager
-            .drop_table(Table::drop().table(CloudToken::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(CloudToken::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         Ok(())
     }

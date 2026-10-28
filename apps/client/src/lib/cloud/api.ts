@@ -197,15 +197,32 @@ export interface CloudBinding {
   mirrored_vault_version?: number;
   /** Committed writes the Drive copy is missing (0 = backup current). */
   versions_behind: number;
+  /** Which incarnation of this binding the values above describe. Bumped by a
+   * provider switch, enrollment, import or disconnect, so a response that was in
+   * flight across one of those can be recognised as stale and dropped. */
+  binding_generation: number;
   last_mirrored_at?: string;
   last_mirror_error?: string;
   created_at: string;
   updated_at: string;
 }
 
-export async function getCloudBinding(vaultId: string): Promise<CloudBinding> {
-  const res = await http.get<CloudBinding>("/cloud/binding", { params: { vault_id: vaultId } });
-  return res.data;
+/**
+ * The vault's backup binding, or `null` when this vault has none.
+ *
+ * A missing binding is a normal state ("not backed up yet"), not an error, so it
+ * is returned as `null` rather than surfacing as a rejected query. Everything
+ * else still throws, which is what lets the UI distinguish "nothing configured"
+ * from "could not load".
+ */
+export async function getCloudBinding(vaultId: string): Promise<CloudBinding | null> {
+  try {
+    const res = await http.get<CloudBinding>("/cloud/binding", { params: { vault_id: vaultId } });
+    return res.data;
+  } catch (error: any) {
+    if (error?.response?.status === 404) return null;
+    throw error;
+  }
 }
 
 export async function listCloudBindings(): Promise<CloudBinding[]> {
