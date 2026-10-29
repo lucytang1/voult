@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::db::DbPool;
 use crate::entity::vault::ActiveModel as VaultActiveModel;
 use crate::id_codec::uuid_to_db;
+use crate::kdf::KdfParams;
 use crate::session_auth::establish_vault_session;
 
 const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Register);
@@ -19,7 +20,9 @@ pub struct RegisterRequest {
     // credential only — never the password or any key.
     pub vault_verifier: String,
     pub salt: String,
-    pub iterations: i32,
+    /// Password KDF profile. Required: the server cannot derive anything, and a
+    /// vault without a valid profile could never be unlocked.
+    pub kdf: KdfParams,
     pub vaultiv: String,
     pub vault: String,
     #[serde(default)]
@@ -52,7 +55,7 @@ pub struct RegisterRequest {
 pub struct RegisterResponse {
     pub vault_id: Uuid,
     pub vault: String,
-    pub iterations: i32,
+    pub kdf: KdfParams,
     pub vaultiv: String,
     pub salt: String,
     pub vault_key_wrap: Option<String>,
@@ -114,6 +117,27 @@ pub async fn register(
         );
     }
 
+    // The v2 hierarchy is the only one this server knows. A v1 registration has
+    // no password-wrapped envelope, so it could never be rotated or recovered;
+    // accepting one would create a permanently stranded vault.
+    if request.crypto_version != Some(2) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "crypto_version must be 2",
+            "UNSUPPORTED_CRYPTO_VERSION",
+        );
+    }
+    // Validate the profile before opening a transaction. An off-ladder tuple is
+    // rejected rather than stored: the server cannot interpret it, and a client
+    // that later reads it would refuse to derive.
+    if request.kdf.validate_for_write().is_err() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "unknown KDF profile",
+            "KDF_UNKNOWN",
+        );
+    }
+
     // The vault ID must be a well-formed UUID the client generated.
     let vault_uuid = match Uuid::parse_str(&request.vault_id) {
         Ok(u) => u,
@@ -122,7 +146,7 @@ pub async fn register(
         }
     };
 
-    let crypto_version = request.crypto_version.unwrap_or(1);
+    let crypto_version = 2;
 
     let tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -143,7 +167,7 @@ pub async fn register(
         id: Set(uuid_to_db(vault_uuid)),
         vault: Set(request.vault),
         salt: Set(request.salt),
-        iterations: Set(request.iterations),
+        kdf: Set(request.kdf.to_stored()),
         vaultiv: Set(request.vaultiv),
         vault_verifier: Set(request.vault_verifier),
         version: Set(1),
@@ -254,7 +278,7 @@ pub async fn register(
         vault_id,
         vault: inserted_vault.vault,
         salt: inserted_vault.salt,
-        iterations: inserted_vault.iterations,
+        kdf: request.kdf,
         vaultiv: inserted_vault.vaultiv,
         vault_key_wrap: inserted_vault.vault_key_wrap,
         vault_key_wrap_iv: inserted_vault.vault_key_wrap_iv,
@@ -314,7 +338,7 @@ mod tests {
             "vault_id": VAULT_ID,
             "vault_verifier": "dmVyaWZpZXI=",
             "salt": "c2FsdA==",
-            "iterations": 60000,
+            "kdf": { "algorithm": "argon2id", "memory_kib": 19456, "time_cost": 2, "parallelism": 1 },
             "vaultiv": "aXY=",
             "vault": "Y2lwaGVydGV4dA==",
             "crypto_version": 2,
@@ -468,6 +492,84 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(find_vault(&pool).await.is_none());
+    }
+
+    /// An off-ladder descriptor is rejected before any DB work. Accepting it
+    /// would store a vault whose password nobody — including this server — can
+    /// derive, because the client validates against the same closed ladder.
+    #[actix_web::test]
+    async fn registration_with_unknown_kdf_is_rejected() {
+        let pool = test_pool().await;
+        let app = test_app!(&pool);
+
+        let mut body = valid_body();
+        body["kdf"] = serde_json::json!({
+            "algorithm": "argon2id",
+            "memory_kib": 19_457,
+            "time_cost": 2,
+            "parallelism": 1
+        });
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/register")
+                .set_json(body)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], "KDF_UNKNOWN");
+        assert!(find_vault(&pool).await.is_none());
+    }
+
+    /// v1 registrations are gone: they carry no password-wrapped envelope and
+    /// could never be rotated, so the server refuses to create one.
+    #[actix_web::test]
+    async fn registration_with_crypto_version_1_is_rejected() {
+        let pool = test_pool().await;
+        let app = test_app!(&pool);
+
+        let mut body = valid_body();
+        body["crypto_version"] = serde_json::json!(1);
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/register")
+                .set_json(body)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], "UNSUPPORTED_CRYPTO_VERSION");
+        assert!(find_vault(&pool).await.is_none());
+    }
+
+    /// A missing `kdf` is a deserialization failure, which the shared JSON
+    /// config turns into the documented `INVALID_INPUT` envelope.
+    #[actix_web::test]
+    async fn registration_without_kdf_is_rejected() {
+        let pool = test_pool().await;
+        let app = test_app!(&pool);
+
+        let mut body = valid_body();
+        body.as_object_mut().expect("object").remove("kdf");
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/register")
+                .set_json(body)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], "INVALID_INPUT");
         assert!(find_vault(&pool).await.is_none());
     }
 

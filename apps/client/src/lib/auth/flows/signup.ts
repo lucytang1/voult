@@ -1,5 +1,4 @@
 import {
-    PBKDF2_ITERATIONS,
     CRYPTO_VERSION,
     newSaltB64,
     generateVaultKeyRaw,
@@ -8,8 +7,10 @@ import {
     wrapKeyBytes,
     b64,
     uuid,
+    derivePasswordKeys,
 } from "../../crypto/index.web";
-import { derivePasswordKeys, generateRecoveryMaterial, parseVaultJson } from "../utils";
+import { generateRecoveryMaterial, parseVaultJson } from "../utils";
+import { ensureKdfTarget } from "../kdf-upgrade";
 import type { PendingVaultRegistration } from "../../vault/registration";
 import { normalizeVaultName } from "../../vault/name";
 import { DEFAULT_FOLDER_ID, DEFAULT_FOLDER_NAME } from "@voult/vault-core";
@@ -31,7 +32,7 @@ import { DEFAULT_FOLDER_ID, DEFAULT_FOLDER_NAME } from "@voult/vault-core";
  * `PendingVaultRegistration`.
  *
  * Both envelopes wrap the SAME raw vault key:
- *   - the password envelope, under the PBKDF2-derived wrapping key;
+ *   - the password envelope, under the password-derived wrapping key;
  *   - the recovery envelope, under K_rec (Rule R1: the recovery envelope wraps
  *     `vaultKeyRaw` directly, never a password-derived key, so rotating the
  *     password later cannot destroy the recovery path).
@@ -60,7 +61,10 @@ export async function prepareSignupFlow(
     // The vault ID is generated client-side and never derived from any identity.
     const vaultId = uuid();
     const salt = newSaltB64();
-    const { vaultVerifier, wrappingKey } = await derivePasswordKeys(password, salt, PBKDF2_ITERATIONS);
+    // Calibrated for this device: highest ladder rung within the latency
+    // budget, never below the OWASP floor. Cached in localStorage.
+    const kdf = await ensureKdfTarget();
+    const { vaultVerifier, wrappingKey } = await derivePasswordKeys(password, salt, kdf);
 
     const vaultKeyRaw = generateVaultKeyRaw();
     const vaultKey = await importVaultKey(vaultKeyRaw);
@@ -86,7 +90,7 @@ export async function prepareSignupFlow(
             vault_id: vaultId,
             vault_verifier: vaultVerifier,
             salt,
-            iterations: PBKDF2_ITERATIONS,
+            kdf,
             vaultiv: b64(encryptedVault.iv),
             vault: b64(encryptedVault.cipher),
             crypto_version: CRYPTO_VERSION,

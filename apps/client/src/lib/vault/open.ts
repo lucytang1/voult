@@ -1,11 +1,10 @@
 import { passwordLoginFlow } from "../auth/flows/login";
-import { fetchCryptoParams } from "../queries/cryptoParams/query";
 import type { UnlockedSession } from "../auth/flows";
 
 /**
- * Opens (unlocks) a vault by its id. Requires the master password: crypto
- * params are fetched client-side, then the vaultVerifier is derived locally and
- * sent to /auth — the server never sees the password or keys.
+ * Opens (unlocks) a vault by its id. Requires the master password: the flow
+ * fetches the vault's salt/profile itself, derives the vaultVerifier locally and
+ * sends it to /auth — the server never sees the password or keys.
  */
 export async function openVaultFlow(args: {
   vaultId: string;
@@ -14,8 +13,7 @@ export async function openVaultFlow(args: {
   if (!args.masterPassword) {
     throw new Error("Master password required to open vault");
   }
-  const params = await fetchCryptoParams(args.vaultId);
-  return passwordLoginFlow(args.vaultId, args.masterPassword, params.salt, params.iterations);
+  return passwordLoginFlow(args.vaultId, args.masterPassword);
 }
 
 /**

@@ -45,6 +45,7 @@ use crate::db::DbPool;
 use crate::entity::recovery_challenge::{self as rc, Entity as Challenges};
 use crate::entity::vault::{self, Entity as Vaults};
 use crate::error::error_response;
+use crate::kdf::KdfParams;
 use crate::session_auth::establish_vault_session;
 
 const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Recovery);
@@ -65,12 +66,8 @@ const CHALLENGE_TTL_SECS: i64 = 10 * 60;
 /// spam (§13): a caller can make at most this many live challenges per vault.
 const MAX_LIVE_CHALLENGES_PER_VAULT: u64 = 3;
 
-/// PBKDF2 iteration floor for the credential the rewrap installs. Mirrors the
-/// client's PBKDF2_ITERATIONS; anything lower is rejected rather than stored.
-const MIN_NEW_ITERATIONS: i32 = 60_000;
-/// Upper bound so a hostile or buggy client cannot pin the server into an
-/// absurd KDF cost that later makes every password login slow.
-const MAX_NEW_ITERATIONS: i32 = 2_000_000;
+// The credential the rewrap installs must be a published KDF rung; see
+// `crate::kdf`. The old PBKDF2 iteration bounds are gone with the algorithm.
 
 /// Exact byte lengths the client is required to produce. Validated before any
 /// DB work so a malformed body cannot reach the vault row.
@@ -717,7 +714,9 @@ pub struct RewrapRequest {
     pub proof: String,
     pub credential_version: i32,
     pub new_salt: String,
-    pub new_iterations: i32,
+    /// Published KDF rung the new password credential uses. Self-describing;
+    /// the server validates it against the same ladder the client uses.
+    pub new_kdf: KdfParams,
     pub new_vault_verifier: String,
     pub new_vault_key_wrap: String,
     pub new_vault_key_wrap_iv: String,
@@ -731,7 +730,7 @@ pub struct RewrapResponse {
 }
 
 /// The only irreversible write in recovery: rotates the password credential
-/// (salt / iterations / verifier / password envelope) and establishes a session.
+/// (salt / KDF profile / verifier / password envelope) and establishes a session.
 ///
 /// Column discipline — this write must NOT touch:
 ///   * `vault`, `vaultiv` — the vault key is unchanged, so the ciphertext is too.
@@ -783,11 +782,14 @@ pub async fn recovery_rewrap(
             "INVALID_INPUT",
         );
     }
-    if !(MIN_NEW_ITERATIONS..=MAX_NEW_ITERATIONS).contains(&request.new_iterations) {
+    // The profile must be one of the published rungs. An off-ladder descriptor
+    // is rejected rather than stored: the client would refuse to derive it, so
+    // accepting it would install a credential nobody can use.
+    if request.new_kdf.validate_for_write().is_err() {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "new_iterations out of range",
-            "INVALID_INPUT",
+            "unknown KDF profile",
+            "KDF_UNKNOWN",
         );
     }
     if request.credential_version < 0 {
@@ -845,14 +847,46 @@ pub async fn recovery_rewrap(
         );
     }
 
+    // No downgrades: a recovery may move the credential up the ladder, never
+    // down. Recovering on a slow device is expected to reuse the stored rung,
+    // which the client picks via max(calibrated, stored).
+    let stored_kdf = match KdfParams::parse_stored(&vault.kdf) {
+        Ok(kdf) => kdf,
+        Err(_) => {
+            let _ = tx.rollback().await;
+            LOG.error(
+                format_args!("vault has an unparsable kdf column: {:?}", vault.id),
+                logger::Metadata::new(),
+            );
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid vault metadata",
+                "DATA_INTEGRITY_ERROR",
+            );
+        }
+    };
+    if request.new_kdf.rank() < stored_kdf.rank() {
+        let _ = tx.rollback().await;
+        LOG.warn(
+            format_args!(
+                "recovery rewrap rejected: KDF downgrade {} -> {}",
+                stored_kdf.describe(),
+                request.new_kdf.describe()
+            ),
+            logger::Metadata::new(),
+        );
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "KDF profile downgrade is not allowed",
+            "KDF_DOWNGRADE",
+        );
+    }
+
     // 4. Compare-and-swap on credential_version. Exactly one of N concurrent
     //    recoveries can win; the losers see rows_affected == 0 and get 409.
     let update = Vaults::update_many()
         .col_expr(vault::Column::Salt, Expr::value(request.new_salt.clone()))
-        .col_expr(
-            vault::Column::Iterations,
-            Expr::value(request.new_iterations),
-        )
+        .col_expr(vault::Column::Kdf, Expr::value(request.new_kdf.to_stored()))
         .col_expr(
             vault::Column::VaultVerifier,
             Expr::value(request.new_vault_verifier.clone()),
@@ -968,7 +1002,7 @@ pub struct RegenerateRequest {
 /// three unauthenticated endpoints, which exist precisely because the caller has
 /// no session.
 ///
-/// This does NOT touch `salt`, `iterations`, `vault_verifier`, `vault_key_wrap*`,
+/// This does NOT touch `salt`, `kdf`, `vault_verifier`, `vault_key_wrap*`,
 /// `version`, `lock_epoch`, or the `vault`/`vaultiv` ciphertext: the password
 /// credential is entirely unaffected, so a user rotating a stolen paper key does
 /// not have to change their master password. It also does not bump
@@ -1228,7 +1262,7 @@ mod tests {
             vault: Set(b64_of(16, 0xA1)),
             vaultiv: Set(b64_of(12, 0xA2)),
             salt: Set(b64_of(16, 0xA3)),
-            iterations: Set(60_000),
+            kdf: Set(crate::kdf::KdfParams::floor().to_stored()),
             vault_verifier: Set(b64_of(32, 0xA4)),
             vault_key_wrap: Set(Some(b64_of(48, 0xA5))),
             vault_key_wrap_iv: Set(Some(b64_of(12, 0xA6))),
@@ -1282,7 +1316,7 @@ mod tests {
             "proof": proof,
             "credential_version": credential_version,
             "new_salt": b64_of(16, 0xC1),
-            "new_iterations": 60000,
+            "new_kdf": { "algorithm": "argon2id", "memory_kib": 19456, "time_cost": 2, "parallelism": 1 },
             "new_vault_verifier": b64_of(32, 0xC2),
             "new_vault_key_wrap": b64_of(48, 0xC3),
             "new_vault_key_wrap_iv": b64_of(12, 0xC4),
@@ -1330,7 +1364,7 @@ mod tests {
             vault: Set(b64_of(16, 0xA1)),
             vaultiv: Set(b64_of(12, 0xA2)),
             salt: Set(b64_of(16, 0xA3)),
-            iterations: Set(60_000),
+            kdf: Set(crate::kdf::KdfParams::floor().to_stored()),
             vault_verifier: Set(b64_of(32, 0xA4)),
             version: Set(1),
             ..Default::default()
@@ -1538,7 +1572,10 @@ mod tests {
             after.vault_key_wrap_iv.as_deref(),
             Some(&b64_of(12, 0xC4)[..])
         );
-        assert_eq!(after.iterations, 60_000);
+        assert_eq!(
+            KdfParams::parse_stored(&after.kdf).expect("kdf parses"),
+            KdfParams::floor()
+        );
         assert_eq!(after.credential_version, 1);
 
         // --- must NOT change ----------------------------------------------
@@ -1735,12 +1772,22 @@ mod tests {
         cases.push(("new_salt not base64", c));
 
         let mut c = rewrap_body(VAULT_ID, &selector, &proof, 0);
-        c["new_iterations"] = serde_json::Value::from(1_000);
-        cases.push(("iterations below floor", c));
+        c["new_kdf"] = serde_json::json!({
+            "algorithm": "argon2id",
+            "memory_kib": 1_000,
+            "time_cost": 2,
+            "parallelism": 1
+        });
+        cases.push(("KDF below the floor", c));
 
         let mut c = rewrap_body(VAULT_ID, &selector, &proof, 0);
-        c["new_iterations"] = serde_json::Value::from(50_000_000);
-        cases.push(("iterations above ceiling", c));
+        c["new_kdf"] = serde_json::json!({
+            "algorithm": "argon2id",
+            "memory_kib": 19_456,
+            "time_cost": 2,
+            "parallelism": 4
+        });
+        cases.push(("off-ladder KDF", c));
 
         let mut c = rewrap_body(VAULT_ID, &selector, &proof, 0);
         c["credential_version"] = serde_json::Value::from(-1);
@@ -2046,7 +2093,7 @@ mod tests {
                         "vault_id": VAULT_ID,
                         "vault_verifier": b64_of(32, 0xA4),
                         "salt": b64_of(16, 0xA3),
-                        "iterations": 60000,
+                        "kdf": { "algorithm": "argon2id", "memory_kib": 19456, "time_cost": 2, "parallelism": 1 },
                         "vaultiv": b64_of(12, 0xA2),
                         "vault": b64_of(16, 0xA1),
                         "crypto_version": 2,
@@ -2121,7 +2168,7 @@ mod tests {
         // `credential_version` tracks the *password* credential, which a
         // recovery rotation does not touch.
         assert_eq!(after.salt, before.salt);
-        assert_eq!(after.iterations, before.iterations);
+        assert_eq!(after.kdf, before.kdf);
         assert_eq!(after.vault_verifier, before.vault_verifier);
         assert_eq!(after.vault_key_wrap, before.vault_key_wrap);
         assert_eq!(after.vault_key_wrap_iv, before.vault_key_wrap_iv);

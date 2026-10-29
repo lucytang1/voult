@@ -1,8 +1,11 @@
+import type { KdfParams } from "@voult/vault-core";
+
 export type RegisterRequest = {
     vault_id: string;
     vault_verifier: string;
     salt: string;
-    iterations: number;
+    /** Password KDF profile chosen at creation (calibrated on this device). */
+    kdf: KdfParams;
     vaultiv: string;
     vault: string;
     crypto_version: number;
@@ -21,7 +24,7 @@ export type RegisterResponse = {
     vault_id: string;
     vault: string;
     salt: string;
-    iterations: number;
+    kdf: KdfParams;
     vaultiv: string;
     vault_key_wrap: string | null;
     vault_key_wrap_iv: string | null;

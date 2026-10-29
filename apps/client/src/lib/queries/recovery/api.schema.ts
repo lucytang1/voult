@@ -1,3 +1,5 @@
+import type { KdfParams } from "@voult/vault-core";
+
 // Wire types for the vault-recovery endpoints (case 3).
 //
 // Note the asymmetry that is deliberate, not accidental: `/recovery/challenge`
@@ -36,7 +38,8 @@ export type RecoveryRewrapRequest = {
     proof: string;
     credential_version: number;
     new_salt: string;
-    new_iterations: number;
+    /** Published KDF rung the new password credential uses. */
+    new_kdf: KdfParams;
     new_vault_verifier: string;
     new_vault_key_wrap: string;
     new_vault_key_wrap_iv: string;

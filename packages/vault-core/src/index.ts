@@ -3,7 +3,6 @@
 
 export {
   CRYPTO_VERSION,
-  PBKDF2_ITERATIONS,
   b64,
   fromB64,
   newSaltB64,
@@ -17,8 +16,7 @@ export {
   wrapKeyBytes,
   unwrapKeyBytes,
   generateDeviceKey,
-  derivePasswordWrappingKey,
-  createAuthKey,
+  derivePasswordKeys,
   RECOVERY_SECRET_BYTES,
   RECOVERY_KEY_CHARS,
   RECOVERY_WRAP_INFO,
@@ -32,6 +30,24 @@ export {
   computeRecoveryProof,
   recoveryAad,
 } from "./crypto.js";
+
+export {
+  KDF_LADDER,
+  KDF_LADDER_VERSION,
+  KDF_FLOOR,
+  DEFAULT_KDF,
+  DEFAULT_KDF_BUDGET_MS,
+  KDF_SALT_BYTES,
+  UnknownKdfProfileError,
+  calibrateKdf,
+  derivePasswordRoot,
+  describeKdf,
+  isKdfParams,
+  isKnownKdf,
+  kdfEquals,
+  kdfRank,
+} from "./kdf.js";
+export type { KdfParams } from "./kdf.js";
 
 export {
   VaultItemSchema,

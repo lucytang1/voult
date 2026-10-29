@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::DbPool;
 use crate::entity::vault::{self, Entity as Vaults};
+use crate::kdf::KdfParams;
 
 const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Auth);
 
@@ -16,16 +17,19 @@ pub struct GetCryptoParamsRequest {
 #[derive(Serialize)]
 pub struct GetCryptoParamsResponse {
     pub salt: String,
-    pub iterations: i32,
+    /// The vault's password KDF profile, self-describing. The client validates
+    /// it against its own ladder before deriving anything, so a server that
+    /// serves an absurd value cannot make the client allocate it.
+    pub kdf: KdfParams,
     /// HKDF salt for the recovery wrapping key, base64. A recovering client
     /// needs it before it can derive K_rec, and this endpoint is already
     /// reachable without a session.
     ///
     /// Widening this response leaks strictly nothing new: the endpoint already
-    /// returns `salt`/`iterations` pre-auth and already answers
-    /// VAULT_NOT_FOUND, i.e. it is already a vault-existence oracle (flagged P1
-    /// at ROADMAP:69). A dedicated `GET /api/recovery/params` would have added a
-    /// *second* unauthenticated oracle for the same fact.
+    /// returns `salt`/`kdf` pre-auth and already answers VAULT_NOT_FOUND, i.e.
+    /// it is already a vault-existence oracle (flagged P1 at ROADMAP:69). A
+    /// dedicated `GET /api/recovery/params` would have added a *second*
+    /// unauthenticated oracle for the same fact.
     ///
     /// `recovery_wrap` / `recovery_verifier` are deliberately NOT exposed here —
     /// neither is an input to recovery, and releasing the envelope pre-auth
@@ -89,12 +93,29 @@ pub async fn get_crypto_params(
         }
     };
 
+    // A stored descriptor that does not parse is a server-side integrity bug,
+    // never a client input problem: every write path validates it first.
+    let kdf = match KdfParams::parse_stored(&vault.kdf) {
+        Ok(kdf) => kdf,
+        Err(_) => {
+            LOG.error(
+                format_args!("vault has an unparsable kdf column: {:?}", vault.id),
+                logger::Metadata::new(),
+            );
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "vault has invalid KDF metadata",
+                "DATA_INTEGRITY_ERROR",
+            );
+        }
+    };
+
     let response = GetCryptoParamsResponse {
         salt: vault.salt,
-        iterations: vault.iterations,
-        // A vault can only be missing these if it predates the recovery
-        // migration, so absent recovery_salt here still yields
-        // has_recovery = false rather than a misleading true.
+        kdf,
+        // Recovery is mandatory for every vault created through the API, so
+        // absent recovery_salt here still yields has_recovery = false rather
+        // than a misleading true.
         recovery_salt: vault.recovery_salt,
         has_recovery: vault.recovery_verifier.is_some(),
     };

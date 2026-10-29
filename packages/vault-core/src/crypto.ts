@@ -9,17 +9,20 @@
 //  - uuid() prefers crypto.randomUUID, then getRandomValues, and only then a
 //    (non-cryptographic, clearly marked) Math.random fallback.
 
-const ITERATIONS = 60000;
+import { b64, fromB64 } from "./bytes.js";
+import { derivePasswordRoot, type KdfParams } from "./kdf.js";
 
 export const CRYPTO_VERSION = 2;
-export const PBKDF2_ITERATIONS = ITERATIONS;
+// Re-exported so every existing `from "../crypto"` import keeps working; the
+// implementation moved to bytes.ts so kdf.ts can use it without a cycle.
+export { b64, fromB64 };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 // HKDF info labels. Authentication and vault-key wrapping use distinct labels
 // so the two derived keys are cryptographically separated even though they
-// share one PBKDF2 root.
+// share one password root.
 const HKDF_INFO_AUTH = "auth";
 const HKDF_INFO_VAULT_WRAP = "vault-wrap-v2";
 
@@ -65,45 +68,6 @@ export function uuid(): string {
     const v = ch === "x" ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
-}
-
-export function b64(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes));
-}
-
-export function fromB64(s: string): Uint8Array {
-  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-}
-
-async function deriveRootKey(
-  masterPassword: string,
-  saltPwdBytes: Uint8Array,
-  iterations: number,
-): Promise<Uint8Array> {
-  // Copy into a fresh ArrayBuffer-backed view: WebCrypto's BufferSource types
-  // require ArrayBuffer (not SharedArrayBuffer), and Uint8Array.from() types
-  // as ArrayBufferLike under TS 5.7+ generics.
-  const saltBytes = Uint8Array.from(saltPwdBytes) as Uint8Array<ArrayBuffer>;
-  const cryptoApi = getCrypto();
-  const pwKey = await cryptoApi.subtle.importKey(
-    "raw",
-    encoder.encode(masterPassword),
-    "PBKDF2",
-    false,
-    ["deriveBits"],
-  );
-
-  const rootBits = await cryptoApi.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      hash: "SHA-256",
-      salt: saltBytes,
-      iterations,
-    },
-    pwKey,
-    256,
-  );
-  return new Uint8Array(rootBits);
 }
 
 async function hkdfExpand(
@@ -307,30 +271,32 @@ export async function generateDeviceKey(): Promise<CryptoKey> {
   ]);
 }
 
-/** Derives the password wrapping key: PBKDF2 root + HKDF("vault-wrap-v2"). */
-export async function derivePasswordWrappingKey(
+/**
+ * Derives both password-derived keys and the auth verifier from ONE root
+ * derivation.
+ *
+ * One root, two HKDF expansions. Deriving the auth key and the wrapping key
+ * separately would run Argon2 twice — two ~0.6 s derivations at the top rung —
+ * so every caller goes through this function. Raw key bytes are zeroed after
+ * import on a best-effort basis; the CryptoKeys themselves are non-extractable.
+ */
+export async function derivePasswordKeys(
   masterPassword: string,
   salt: string,
-  iterations: number,
-): Promise<CryptoKey> {
-  const saltPwdBytes = fromB64(salt);
-  const rootKey = await deriveRootKey(masterPassword, saltPwdBytes, iterations);
-  const rawWrapBytes = await hkdfExpand(rootKey, HKDF_INFO_VAULT_WRAP, 32);
-  return makeEncKey(rawWrapBytes, false);
-}
-
-// --- Auth helpers (unchanged contract) ----------------------------------
-
-export async function createAuthKey(
-  masterPassword: string,
-  salt: string,
-  iterations: number,
-): Promise<CryptoKey> {
-  const saltPwdBytes = fromB64(salt);
-  const rootKey = await deriveRootKey(masterPassword, saltPwdBytes, iterations);
+  kdf: KdfParams,
+): Promise<{ authKey: CryptoKey; wrappingKey: CryptoKey; vaultVerifier: string }> {
+  const rootKey = await derivePasswordRoot(masterPassword, salt, kdf);
   const rawAuthBytes = await hkdfExpand(rootKey, HKDF_INFO_AUTH, 32);
+  const rawWrapBytes = await hkdfExpand(rootKey, HKDF_INFO_VAULT_WRAP, 32);
+  rootKey.fill(0);
+
   const authKey = await makeAuthKey(rawAuthBytes);
-  return authKey;
+  const wrappingKey = await makeEncKey(rawWrapBytes, false);
+  rawAuthBytes.fill(0);
+  rawWrapBytes.fill(0);
+
+  const vaultVerifier = await getAuthVerifierB64(authKey);
+  return { authKey, wrappingKey, vaultVerifier };
 }
 
 /*  Vault Recovery
