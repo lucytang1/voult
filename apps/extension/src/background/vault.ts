@@ -788,7 +788,7 @@ function rankOf(item: VaultItem, pageOrigin: string): Rank | null {
   return r ? r.kind : null;
 }
 
-const rankOrder: Record<Rank, number> = { exact: 0, linked: 1, subdomain: 2 };
+const rankOrder: Record<Rank, number> = { exact: 0, linked: 1 };
 
 /** Items visible under the popup's current folder filter (null = whole vault). */
 function itemsInSelectedFolder(): VaultItem[] {
@@ -802,7 +802,9 @@ function itemsInSelectedFolder(): VaultItem[] {
 }
 
 /**
- * Logins matching a page origin, exact/linked before subdomain fallback.
+ * Logins matching a page origin, exact before explicitly linked. There is no
+ * subdomain/suffix fallback: a different host — including a parent or child —
+ * gets nothing unless the item links that origin explicitly.
  *
  * Suggestions follow the popup's folder filter: a login filed in another folder
  * is never offered for this page, and with no match left in view the content

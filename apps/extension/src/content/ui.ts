@@ -39,7 +39,6 @@ const STYLE = `
 .voult-text { min-width: 0; flex: 1; }
 .voult-user { font-weight: 600; display: block; }
 .voult-origin { color: #9aa0ae; font-size: 11px; display: block; }
-.voult-sub { color: #e0b34e; font-size: 11px; margin-left: 6px; }
 `;
 
 export interface DropdownCallbacks {
@@ -180,13 +179,9 @@ export function showDropdown(
     const ssoSuffix = methods.length > 0 && !identity.startsWith("Sign in with")
       ? ` · ${[...new Set(methods.map((s) => ssoProviderLabel(s.provider)))].join(", ")}`
       : "";
+    // Always the item's own stored origin — the page matched it exactly (or
+    // through an explicitly linked URL), so there is no "related site" label.
     org.textContent = `${m.origin}${ssoSuffix}`;
-    if (m.rank === "subdomain") {
-      const sub = document.createElement("span");
-      sub.className = "voult-sub";
-      sub.textContent = "subdomain match";
-      org.appendChild(sub);
-    }
     text.appendChild(user);
     text.appendChild(org);
     inner.appendChild(text);
