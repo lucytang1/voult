@@ -17,6 +17,7 @@ import { selectedVaultId } from "@/src/lib/state/vault-state";
 import { useVaultList, VaultSummary } from "@/src/lib/queries/vaults/query";
 import { openVaultFlow, requiresSwitchConfirmation } from "@/src/lib/vault/open";
 import { useCloudStatus, useCloudVaults, useLinkPendingCloudToken, usePendingCloudVaults, usePersistCloudBinding } from "@/src/lib/cloud/queries";
+import { oauthErrorMessage } from "@/src/lib/cloud/oauth-error";
 import { GoogleDriveIcon } from "../../../assets/images/GoogleDriveIcon";
 import type { VaultDescriptor } from "@/src/lib/cloud/api";
 import { importVaultFromCloud } from "@/src/lib/vault/import";
@@ -56,7 +57,7 @@ export default function VaultChooser() {
   const [googleImporting, setGoogleImporting] = useState(false);
   const [sessionRestoreError, setSessionRestoreError] = useState<string | null>(null);
   const handledConnectedCallback = useRef(false);
-  const params = useLocalSearchParams<{ cloud_connected?: string; cloud_error?: string; cloud_error_detail?: string; cloud_state?: string; provider?: string }>();
+  const params = useLocalSearchParams<{ cloud_connected?: string; cloud_error?: string; cloud_state?: string; provider?: string }>();
   const pendingState = (params as any).cloud_state as string | undefined
     || (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("cloud_state") || undefined : undefined);
   const isGoogleCallback = !!pendingState || !!params.cloud_connected || !!params.cloud_error;
@@ -390,8 +391,7 @@ export default function VaultChooser() {
         )}
         {params.cloud_error && (
           <View className="bg-red-900/20 border border-red-800 rounded-lg p-3 mt-3">
-            <Text className="text-red-400 text-xs">Google error: {params.cloud_error}</Text>
-            {params.cloud_error_detail && <Text className="text-red-300 text-xs mt-1">Details: {params.cloud_error_detail}</Text>}
+            <Text className="text-red-400 text-xs">Cloud connection error: {oauthErrorMessage(params.cloud_error)}</Text>
           </View>
         )}
         {googleError && (

@@ -5,6 +5,8 @@ mod endpoints;
 mod entity;
 mod error;
 mod id_codec;
+mod log_safety;
+mod request_log;
 mod session_auth;
 mod static_site;
 
@@ -14,7 +16,6 @@ use actix_session::config::PersistentSession;
 use actix_session::storage::CookieSessionStore;
 use actix_web::cookie::time::Duration;
 use actix_web::cookie::{Key, SameSite};
-use actix_web::middleware;
 use actix_web::middleware::DefaultHeaders;
 use actix_web::{App, HttpServer, web};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -179,7 +180,10 @@ async fn main() -> std::io::Result<()> {
 
     let database_url = config::database_url(env);
     CONFIG_LOG.log(
-        format_args!("DATABASE_URL resolved to {}", database_url),
+        format_args!(
+            "DATABASE_URL resolved to {}",
+            log_safety::database_url_for_log(&database_url)
+        ),
         logger::Metadata::new(),
     );
 
@@ -304,9 +308,13 @@ async fn main() -> std::io::Result<()> {
                     .add(("Cross-Origin-Opener-Policy", "same-origin"))
                     .add(("Cross-Origin-Embedder-Policy", "require-corp")),
             )
-            .wrap(middleware::Logger::default())
             .wrap(session_middleware)
             .wrap(cors)
+            // Outermost: logs the route template and status for every request,
+            // including CORS rejections and unhandled errors. The route template
+            // comes from Actix's route table, so no query/header/body value can
+            // reach the log (see `request_log`).
+            .wrap(request_log::RequestLog)
             .service(
                 web::scope("/api")
                     // Vault/session/ciphertext responses must never sit in a

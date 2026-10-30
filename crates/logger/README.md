@@ -63,7 +63,8 @@ const PROCESS_LOG: logger::LauncherLogger =
 There are two app context types, both hardcoded:
 
 - `ServerContext` — `Server`, `Config`, `Auth`, `Vault`, `Vaults`, `Register`,
-  `Lock`, `Pair`, `Session`, `Recovery`, `Favicon`, `Cloud`, `Migration`
+  `Lock`, `Pair`, `Session`, `Recovery`, `Favicon`, `Cloud`, `Request`,
+  `Migration`
 - `LauncherContext` — `Launcher`, `Config`, `Process`, `Tray`
 
 `ServerLogger` / `LauncherLogger` are type aliases for
@@ -167,23 +168,27 @@ duplicates the summary and is mostly escaped newlines.
 }
 ```
 
-### Actix request records
+### HTTP access log
 
-The default Actix `Logger` middleware emits one space-separated line. It is
-reformatted with the request and status as the message and connection details as
-metadata:
+Access logging is **not** a dependency formatter. The server installs its own
+query-free middleware (`apps/server/src/request_log.rs`), which logs the method,
+the matched route pattern, the status, and the duration — nothing else:
 
 ```text
-2026-10-28T04:05:23+00:00 LOG   (actix_web::middleware::logger) GET /api/get_vault 200 {
-  remote: '::1',
-  size: 1501,
-  duration: '0.534ms',
-  referer: 'http://localhost:8081/',
-  user_agent: 'Mozilla/5.0 …'
+2026-10-28T04:05:23+00:00 LOG   (request) GET /api/cloud/oauth/callback 302 {
+  duration_ms: 12
 }
 ```
 
-`-` placeholders for referer, user-agent, or size are omitted.
+The pattern comes from Actix's route table, so a path-param route logs its
+template (`/api/vaults/{id}`) and never the value. Requests that match no
+resource log `unmatched` (under `/api`) or `static` (the exported site). The
+middleware deliberately has no client IP, header, query, size, or body field.
+
+Do **not** add `actix_web::middleware::Logger`: its default `%r` field includes
+the query string, and its default format also logs `Referer` and `User-Agent`.
+That is exactly how vault ids, favicon site URLs, OAuth codes, and OAuth state
+used to reach this log.
 
 ## Global `log` backend
 
@@ -198,10 +203,20 @@ first, `init()` prints a warning and leaves it in place; direct `logger` /
 
 ## Security
 
-The logger does not redact anything. Never log master passwords, vault keys,
-wrapped key envelopes, verifiers, recovery keys/proofs, session cookies, OAuth
-codes/tokens, request bodies, or plaintext vault data. Metadata is not exempt.
-Debug-level third-party logs may include SQL text and bound parameters; keep
+The logger does not know field semantics. It escapes control characters in
+messages and metadata so an untrusted value cannot forge a second log line, but
+it cannot tell a secret from an ID: **call sites are responsible for what they
+pass.** Never log master passwords, vault keys, wrapped key envelopes, verifiers,
+recovery keys/proofs, session cookies, OAuth codes/states/tokens, provider
+emails, full vault ids, site URLs, request bodies, or plaintext vault data.
+Metadata is not exempt.
+
+The HTTP access log is query-free by construction: it receives a route pattern
+and a status, not the request target. That guarantee lives in
+`apps/server/src/request_log.rs`, not in this crate. Do not reintroduce Actix's
+`middleware::Logger`.
+
+Debug-level third-party logs may include SQL text (not bound values); keep
 production at `log`/`info`.
 
 ## Tests
