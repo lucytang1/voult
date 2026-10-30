@@ -6,7 +6,7 @@
 // scripts never see the vault — only per-gesture fill payloads and match
 // lists for the tab the worker derives from `sender.tab.url`.
 
-import type { ExtensionMessage } from "../lib/messaging";
+import type { ExtensionMessage, FillBestMessage } from "../lib/messaging";
 import { EXTENSION_VERSION } from "./version";
 import {
   adoptSessionProbe,
@@ -39,7 +39,7 @@ import {
   unlockWithDevice,
   unlockWithPassword,
 } from "./vault";
-import { originOfUrl } from "@voult/vault-core";
+import { decideFillBest, originOfUrl } from "@voult/vault-core";
 import {
   ACTIVE_VAULT_KEY,
   LOCKED_FLAG_KEY,
@@ -399,6 +399,8 @@ chrome.idle.onStateChanged.addListener((state) => {
 
 // Keyboard shortcut (Ctrl/Cmd+Shift+L): fill the single best match in the
 // active tab, or nudge the tab to show its suggestions when ambiguous.
+// `decideFillBest` is the only place that may choose an automatic fill; it
+// never selects a weak rank, so the shortcut cannot fill a merely related site.
 chrome.commands.onCommand.addListener((command) => {
   if (command !== "fill-best-match") return;
   void (async () => {
@@ -412,11 +414,16 @@ chrome.commands.onCommand.addListener((command) => {
       return;
     }
     const matches = queryLogins(pageOrigin);
-    if (matches.length === 0) return;
-    await chrome.tabs.sendMessage(tab.id, {
+    const decision = decideFillBest(matches);
+    if (decision.kind === "none") return;
+    const message: FillBestMessage = {
       type: "VOULT_FILL_BEST",
+      // Only an exact/linked single match gets a fillId. Otherwise the tab
+      // shows the chooser and the user picks a credential explicitly.
+      ...(decision.kind === "fill" ? { fillId: decision.match.id } : {}),
       ids: matches.map((m) => m.id),
-    });
+    };
+    await chrome.tabs.sendMessage(tab.id, message);
   })();
 });
 

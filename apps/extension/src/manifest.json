@@ -28,7 +28,7 @@
         "default": "Ctrl+Shift+L",
         "mac": "Command+Shift+L"
       },
-      "description": "Fill the best matching login for this site"
+      "description": "Fill the single matching login, or show matches"
     }
   },
   "content_security_policy": {
