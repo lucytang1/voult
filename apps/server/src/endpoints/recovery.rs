@@ -33,9 +33,6 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::db::DbPool;
@@ -45,6 +42,9 @@ use crate::db::DbPool;
 use crate::entity::recovery_challenge::{self as rc, Entity as Challenges};
 use crate::entity::vault::{self, Entity as Vaults};
 use crate::error::error_response;
+use crate::rate_limit::{
+    Limited, RateLimiter, RecoveryChallengeIp, RecoveryPreauthIp, Subject, VaultAdmin,
+};
 use crate::session_auth::establish_vault_session;
 
 const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Recovery);
@@ -81,76 +81,6 @@ const WRAP_LEN: usize = 48;
 const VERIFIER_LEN: usize = 32;
 const PROOF_LEN: usize = 32;
 const CHALLENGE_LEN: usize = 32;
-
-// --- Per-IP throttle for the unauthenticated challenge endpoint -------------
-
-/// Default budget: enough for one recovery plus a retry or two, far below
-/// anything a person actually needs.
-const CHALLENGE_MAX_PER_WINDOW: u32 = 10;
-const CHALLENGE_WINDOW_SECS: u64 = 60;
-
-/// Entries beyond this are swept on the next call, so a flood from many
-/// addresses cannot grow the map without bound.
-const THROTTLE_SWEEP_THRESHOLD: usize = 256;
-
-/// Sliding-window throttle for `POST /recovery/challenge`, keyed by client IP.
-///
-/// App-scoped rather than a process global: the eight Actix workers share one
-/// instance through the same `app_data`, so a single caller cannot get a fresh
-/// budget per worker — while a test still gets its own clean instance instead of
-/// contaminating every other test through shared process state.
-pub struct ChallengeThrottle {
-    entries: Mutex<HashMap<String, (u32, Instant)>>,
-    max_per_window: u32,
-    window_secs: u64,
-}
-
-impl Default for ChallengeThrottle {
-    fn default() -> Self {
-        Self::new(CHALLENGE_MAX_PER_WINDOW, CHALLENGE_WINDOW_SECS)
-    }
-}
-
-impl ChallengeThrottle {
-    pub fn new(max_per_window: u32, window_secs: u64) -> Self {
-        Self {
-            entries: Mutex::new(HashMap::new()),
-            max_per_window,
-            window_secs,
-        }
-    }
-
-    /// Charges one request to `key`. Returns false when the budget is spent.
-    ///
-    /// Fails OPEN on a poisoned lock: a panic elsewhere must not turn this
-    /// endpoint into a permanent outage, and the per-vault live cap plus the
-    /// challenge TTL already bound the real cost.
-    pub fn allow(&self, key: &str) -> bool {
-        let Ok(mut entries) = self.entries.lock() else {
-            return true;
-        };
-        if entries.len() > THROTTLE_SWEEP_THRESHOLD {
-            let window = Duration::from_secs(self.window_secs);
-            entries.retain(|_, (_, started)| started.elapsed() < window);
-        }
-
-        let now = Instant::now();
-        let window = Duration::from_secs(self.window_secs);
-        let entry = entries.entry(key.to_string()).or_insert((0, now));
-        if now.duration_since(entry.1) >= window {
-            *entry = (0, now);
-        }
-        entry.0 = entry.0.saturating_add(1);
-        entry.0 <= self.max_per_window
-    }
-}
-
-fn client_ip(req: &actix_web::HttpRequest) -> String {
-    req.connection_info()
-        .realip_remote_addr()
-        .unwrap_or("unknown")
-        .to_string()
-}
 
 // --- Shared helpers --------------------------------------------------------
 
@@ -489,30 +419,17 @@ pub struct ChallengeResponse {
 /// via GET /get_crypto_params — and it gives the client something actionable to
 /// say instead of a bare auth failure.
 ///
-/// Throttled per client IP. This endpoint is unauthenticated and writes a row on
-/// every call, so without a budget a single address could fill the table (and the
-/// server's write path) on its own. The per-vault live cap below is the second
-/// layer: it bounds the table even against a spray across many addresses.
+/// Throttled per client IP by the shared limiter (`RecoveryChallengeIp`,
+/// 10/min). This endpoint is unauthenticated and writes a row on every call, so
+/// without a budget a single address could fill the table (and the server's
+/// write path) on its own. The per-vault live cap below is the second layer: it
+/// bounds the table even against a spray across many addresses.
 #[post("/recovery/challenge")]
 pub async fn recovery_challenge(
     pool: web::Data<DbPool>,
-    req: actix_web::HttpRequest,
-    throttle: web::Data<ChallengeThrottle>,
+    _limit: Limited<RecoveryChallengeIp>,
     payload: web::Json<ChallengeRequest>,
 ) -> HttpResponse {
-    let ip = client_ip(&req);
-    if !throttle.allow(&ip) {
-        LOG.warn(
-            format_args!("recovery challenge refused: rate limited"),
-            logger::Metadata::new(),
-        );
-        return error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many attempts, try again later",
-            "RECOVERY_RATE_LIMITED",
-        );
-    }
-
     let request = payload.into_inner();
     let Some(vault_id) = canonical_uuid(&request.vault_id) else {
         return error_response(StatusCode::BAD_REQUEST, "invalid vault_id", "INVALID_INPUT");
@@ -631,6 +548,9 @@ pub struct UnlockResponse {
 #[post("/recovery/unlock")]
 pub async fn recovery_unlock(
     pool: web::Data<DbPool>,
+    // Unauthenticated and HMAC/DB work per call. Shares a 20/min budget with
+    // `rewrap`: one recovery is challenge + unlock + rewrap.
+    _limit: Limited<RecoveryPreauthIp>,
     payload: web::Json<UnlockRequest>,
 ) -> HttpResponse {
     let request = payload.into_inner();
@@ -746,6 +666,10 @@ pub struct RewrapResponse {
 #[post("/recovery/rewrap")]
 pub async fn recovery_rewrap(
     pool: web::Data<DbPool>,
+    // The only irreversible write in the flow, unauthenticated by design. The
+    // budget bounds DB/write load; guessing is already bounded by the 256-bit
+    // proof, and the challenge is single-use on the success path only.
+    _limit: Limited<RecoveryPreauthIp>,
     session: Session,
     payload: web::Json<RewrapRequest>,
 ) -> HttpResponse {
@@ -977,6 +901,7 @@ pub struct RegenerateRequest {
 #[post("/recovery/regenerate")]
 pub async fn recovery_regenerate(
     pool: web::Data<DbPool>,
+    limiter: web::Data<RateLimiter>,
     session: Session,
     payload: web::Json<RegenerateRequest>,
 ) -> HttpResponse {
@@ -1003,6 +928,15 @@ pub async fn recovery_regenerate(
             "vault does not match session",
             "VAULT_MISMATCH",
         );
+    }
+
+    // Rotation rewrites the recovery credential; it is rare and heavy, so it has
+    // its own budget rather than sharing the 60/min write budget.
+    if let Err(rejected) = limiter
+        .charge::<VaultAdmin>(&Subject::Vault(&vault_id))
+        .await
+    {
+        return rejected.into_response();
     }
 
     let Some(proof) = decode_exact(&request.proof, PROOF_LEN) else {
@@ -1167,10 +1101,12 @@ mod tests {
                 App::new()
                     .app_data(web::Data::new($pool.clone()))
                     .app_data(crate::endpoints::json_config())
-                    // Per-app instance, so one test's budget cannot consume
-                    // another's. Tests that exercise the limit install their own
-                    // tight throttle instead.
-                    .app_data(web::Data::new(super::ChallengeThrottle::new(10_000, 60)))
+                    // Registration is wired in to establish sessions. These
+                    // tests are not about rate limiting, so every budget is
+                    // effectively unbounded.
+                    .app_data(web::Data::new(crate::rate_limit::RateLimiter::permissive(
+                        $pool.clone(),
+                    )))
                     .wrap(
                         actix_session::SessionMiddleware::builder(
                             actix_session::storage::CookieSessionStore::default(),
@@ -1897,58 +1833,31 @@ mod tests {
         assert!(constant_time_eq(b"", b""));
     }
 
-    // --- hardening: throttle + sweeping -----------------------------------
+    // --- hardening: rate limit + sweeping ---------------------------------
 
-    // `#[test]` is shadowed in this module by `use actix_web::test`, so these
-    // use the same async test attribute as the rest of the suite.
-    #[actix_web::test]
-    async fn throttle_spends_a_budget_then_refuses() {
-        let t = ChallengeThrottle::new(3, 60);
-        assert!(t.allow("1.2.3.4"));
-        assert!(t.allow("1.2.3.4"));
-        assert!(t.allow("1.2.3.4"));
-        // Budget spent for this address.
-        assert!(!t.allow("1.2.3.4"));
-        assert!(!t.allow("1.2.3.4"));
-        // ...but only for this address.
-        assert!(t.allow("5.6.7.8"));
-    }
-
-    #[actix_web::test]
-    async fn throttle_window_resets_the_budget() {
-        let t = ChallengeThrottle::new(2, 0);
-        // A zero-second window is already elapsed on the first call, so it resets
-        // every time and the budget can never be exhausted.
-        for _ in 0..5 {
-            assert!(t.allow("1.2.3.4"));
-        }
-
-        // With a real window the budget is spent...
-        let t = ChallengeThrottle::new(2, 1);
-        assert!(t.allow("9.9.9.9"));
-        assert!(t.allow("9.9.9.9"));
-        assert!(!t.allow("9.9.9.9"));
-        // ...and recovers once the window has passed.
-        actix_web::rt::time::sleep(std::time::Duration::from_millis(1_100)).await;
-        assert!(t.allow("9.9.9.9"));
-    }
-
+    /// The challenge endpoint writes a row on every call and is unauthenticated.
+    /// The budget is enforced by the shared limiter, so all workers (and, with
+    /// one database, all instances) spend the same allowance.
     #[actix_web::test]
     async fn challenge_is_rate_limited_per_ip() {
         let pool = test_pool().await;
-        // Budget of 2 for this test's own app instance.
+        // Budget of 2 for this test's own limiter instance.
+        let limiter = crate::rate_limit::RateLimiter::for_tests(
+            pool.clone(),
+            &[("RecoveryChallengeIp", crate::rate_limit::Budget::new(2, 60))],
+        );
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(pool.clone()))
                 .app_data(crate::endpoints::json_config())
-                .app_data(web::Data::new(ChallengeThrottle::new(2, 60)))
+                .app_data(web::Data::new(limiter))
                 .service(super::recovery_challenge),
         )
         .await;
         seed_vault(&pool, VAULT_ID).await;
 
         let mut statuses = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..3 {
             let resp = test::call_service(
                 &app,
                 test::TestRequest::post()
@@ -1965,10 +1874,23 @@ mod tests {
             vec![
                 StatusCode::OK,
                 StatusCode::OK,
-                StatusCode::TOO_MANY_REQUESTS,
                 StatusCode::TOO_MANY_REQUESTS
             ]
         );
+
+        // The wire contract is unchanged: the recovery surface keeps its own
+        // code, and now carries Retry-After like every other refusal.
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/recovery/challenge")
+                .set_json(serde_json::json!({ "vault_id": VAULT_ID }))
+                .to_request(),
+        )
+        .await;
+        assert!(resp.headers().get("retry-after").is_some());
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], "RECOVERY_RATE_LIMITED");
 
         // The rate limit must not have written rows beyond the budget.
         let rows = Challenges::find()
@@ -2276,5 +2198,49 @@ mod tests {
             Some(b64_of(32, 0xD1)),
             "the winning rotation must stand"
         );
+    }
+
+    /// `unlock` and `rewrap` share one unauthenticated per-IP budget. The
+    /// challenge budget is separate; a full recovery (challenge + unlock +
+    /// rewrap) fits comfortably inside both.
+    #[actix_web::test]
+    async fn unlock_is_rate_limited_per_ip() {
+        let pool = test_pool().await;
+        let limiter = RateLimiter::for_tests(
+            pool.clone(),
+            &[("RecoveryPreauthIp", crate::rate_limit::Budget::new(1, 60))],
+        );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(crate::endpoints::json_config())
+                .app_data(web::Data::new(limiter))
+                .service(super::recovery_unlock),
+        )
+        .await;
+
+        let body = unlock_body(VAULT_ID, "selector", "proof");
+        let first = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/recovery/unlock")
+                .set_json(body.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::UNAUTHORIZED);
+
+        let second = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/recovery/unlock")
+                .set_json(body)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(second.headers().get("retry-after").is_some());
+        let body: serde_json::Value = test::read_body_json(second).await;
+        assert_eq!(body["code"], "RECOVERY_RATE_LIMITED");
     }
 }

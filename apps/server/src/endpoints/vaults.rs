@@ -1,6 +1,7 @@
 use crate::db::DbPool;
 use crate::entity::vault::{self, Entity as VaultEntity};
 use crate::id_codec::uuid_to_db;
+use crate::rate_limit::{RateLimiter, Subject, VaultWrite};
 use crate::session_auth::session_vault_id;
 use actix_session::Session;
 use actix_web::{HttpResponse, get, http::StatusCode, post, web};
@@ -52,6 +53,7 @@ fn err(s: StatusCode, m: &str, c: &str) -> HttpResponse {
 #[post("/vaults")]
 pub async fn create_vault(
     pool: web::Data<DbPool>,
+    limiter: web::Data<RateLimiter>,
     session: Session,
     payload: web::Json<CreateVaultRequest>,
 ) -> HttpResponse {
@@ -65,6 +67,14 @@ pub async fn create_vault(
             );
         }
     };
+    // Shares the write budget with `/update_vault`: both write a full vault row
+    // under the session's identity.
+    if let Err(rejected) = limiter
+        .charge::<VaultWrite>(&Subject::Vault(&vault_id_sess))
+        .await
+    {
+        return rejected.into_response();
+    }
     // vault already exists for this session -> conflict
     if VaultEntity::find()
         .filter(vault::Column::Id.eq(&vault_id_sess))

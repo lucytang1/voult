@@ -6,6 +6,7 @@ pub mod cloud_token;
 pub mod oauth_state;
 pub mod pair_code;
 pub mod prelude;
+pub mod rate_limit;
 pub mod recovery_challenge;
 pub mod session;
 pub mod vault;

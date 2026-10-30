@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::db::DbPool;
 use crate::entity::vault::ActiveModel as VaultActiveModel;
 use crate::id_codec::uuid_to_db;
+use crate::rate_limit::{Limited, RateLimiter, RegisterGlobal, RegisterIp, Subject};
 use crate::session_auth::establish_vault_session;
 
 const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Register);
@@ -75,9 +76,22 @@ fn error_response(status: StatusCode, error_msg: &str, code: &'static str) -> Ht
 #[post("/register")]
 pub async fn register(
     pool: web::Data<DbPool>,
+    limiter: web::Data<RateLimiter>,
+    // Per-IP budget. Extractors run before the handler, so a refused request
+    // never reaches it. (Actix polls extractor futures concurrently, so a
+    // malformed body may be answered by the JSON layer instead; either way the
+    // handler does not run.)
+    _limit: Limited<RegisterIp>,
     session: Session,
     payload: web::Json<RegisterRequest>,
 ) -> HttpResponse {
+    // Deployment-wide ceiling independent of IP diversity: every registration
+    // writes an attacker-sized row, so a botnet must not be able to fill the
+    // disk just by rotating addresses.
+    if let Err(rejected) = limiter.charge::<RegisterGlobal>(&Subject::Global).await {
+        return rejected.into_response();
+    }
+
     let request = payload.into_inner();
 
     // Validate the credentials BEFORE the transaction so a rejected request
@@ -269,6 +283,7 @@ mod tests {
     use crate::db::DbPool;
     use crate::endpoints::get_crypto_params;
     use crate::entity::vault::{self, Entity as VaultEntity};
+    use crate::rate_limit::{Budget, RateLimiter};
     use actix_web::App;
     use actix_web::cookie::Key;
     use actix_web::test;
@@ -289,6 +304,11 @@ mod tests {
             test::init_service(
                 App::new()
                     .app_data(web::Data::new($pool.clone()))
+                    // Rate limiting is not what these tests exercise; keep every
+                    // budget effectively unbounded so they cannot interfere.
+                    .app_data(web::Data::new(crate::rate_limit::RateLimiter::permissive(
+                        $pool.clone(),
+                    )))
                     .app_data(crate::endpoints::json_config())
                     .wrap(
                         actix_session::SessionMiddleware::builder(
@@ -507,5 +527,120 @@ mod tests {
             "the losing registration must not overwrite recovery"
         );
         assert_eq!(v.credential_version, 0);
+    }
+
+    /// Builds the app with an explicit limiter so a test can spend a small
+    /// budget. The permissive default is used by the tests above.
+    macro_rules! app_with_limiter {
+        ($pool:expr, $limiter:expr) => {
+            test::init_service(
+                App::new()
+                    .app_data(web::Data::new($pool.clone()))
+                    .app_data(web::Data::new($limiter))
+                    .app_data(crate::endpoints::json_config())
+                    .wrap(
+                        actix_session::SessionMiddleware::builder(
+                            actix_session::storage::CookieSessionStore::default(),
+                            Key::from(
+                                b"test-key-for-session-middleware-must-be-at-least-64-bytes-long!!",
+                            ),
+                        )
+                        .cookie_name("voult_session".to_string())
+                        .build(),
+                    )
+                    .service(register),
+            )
+            .await
+        };
+    }
+
+    fn register_request(body: serde_json::Value, peer: &str) -> test::TestRequest {
+        test::TestRequest::post()
+            .uri("/register")
+            .peer_addr(peer.parse().expect("peer"))
+            .set_json(body)
+    }
+
+    /// Registration is the disk-fill vector: one attacker-sized row per call.
+    /// The per-IP budget is the first line, and it refuses before the body is
+    /// parsed (the second call is a duplicate id, but it still spends budget).
+    #[actix_web::test]
+    async fn registration_is_limited_per_ip() {
+        let pool = test_pool().await;
+        let limiter = RateLimiter::for_tests(
+            pool.clone(),
+            &[
+                ("RegisterIp", Budget::new(2, 60)),
+                ("RegisterGlobal", Budget::new(100, 60)),
+            ],
+        );
+        let app = app_with_limiter!(&pool, limiter);
+
+        let first = test::call_service(
+            &app,
+            register_request(valid_body(), "1.1.1.1:1000").to_request(),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let second = test::call_service(
+            &app,
+            register_request(valid_body(), "1.1.1.1:1000").to_request(),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+
+        let third = test::call_service(
+            &app,
+            register_request(valid_body(), "1.1.1.1:1000").to_request(),
+        )
+        .await;
+        assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(third.headers().get("retry-after").is_some());
+        let body: serde_json::Value = test::read_body_json(third).await;
+        assert_eq!(body["code"], "RATE_LIMITED");
+
+        // A different address still gets its own budget.
+        let other = test::call_service(
+            &app,
+            register_request(valid_body(), "2.2.2.2:1000").to_request(),
+        )
+        .await;
+        assert_eq!(other.status(), StatusCode::CONFLICT);
+    }
+
+    /// The global ceiling is what stops a spray across many addresses. Two
+    /// different peers, one deployment-wide budget of one.
+    #[actix_web::test]
+    async fn registration_has_a_global_ceiling() {
+        let pool = test_pool().await;
+        let limiter = RateLimiter::for_tests(
+            pool.clone(),
+            &[
+                ("RegisterIp", Budget::new(100, 60)),
+                ("RegisterGlobal", Budget::new(1, 60)),
+            ],
+        );
+        let app = app_with_limiter!(&pool, limiter);
+
+        let first = test::call_service(
+            &app,
+            register_request(valid_body(), "1.1.1.1:1000").to_request(),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let mut second_body = valid_body();
+        second_body["vault_id"] = serde_json::Value::String(uuid::Uuid::new_v4().to_string());
+        let second = test::call_service(
+            &app,
+            register_request(second_body, "2.2.2.2:1000").to_request(),
+        )
+        .await;
+        assert_eq!(
+            second.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "a fresh IP must not bypass the global registration ceiling"
+        );
     }
 }

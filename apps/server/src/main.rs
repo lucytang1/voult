@@ -5,6 +5,7 @@ mod endpoints;
 mod entity;
 mod error;
 mod id_codec;
+mod rate_limit;
 mod session_auth;
 mod static_site;
 
@@ -225,6 +226,20 @@ async fn main() -> std::io::Result<()> {
     // no longer be honoured.
     recovery::prune_expired_challenges(db_data.get_ref()).await;
 
+    // Application rate limits (P0 abuse limits). The counters live in the same
+    // SQLite database, so every worker and every instance sharing this file sees
+    // one budget — an in-memory map would be multiplied by both. Built ONCE
+    // outside `HttpServer::new` because that closure runs per worker and
+    // constructing it inside would hand each worker a separate budget.
+    let rate_limiter = web::Data::new(rate_limit::RateLimiter::new(
+        db_data.get_ref().clone(),
+        rate_limit::production_budgets(),
+        config::trusted_proxies(),
+    ));
+    // Drop windows left over from the previous run, then say what is enforced.
+    rate_limiter.sweep_expired().await;
+    rate_limiter.log_startup_summary();
+
     // Credentialed requests (cookies) require explicit origins — never pair
     // `allow_any_origin()` with cookies.
     let cors_origins: Vec<String> = config::optional_env(config::ENV_CORS_ORIGINS)
@@ -254,16 +269,10 @@ async fn main() -> std::io::Result<()> {
         );
     }
 
-    // Built ONCE, outside the `HttpServer::new` closure. That closure runs once
-    // per worker, so constructing the throttle inside it would hand every worker
-    // its own budget and let a single client spend 10x the intended allowance.
-    // `web::Data` is an Arc, so cloning it into each worker shares one instance.
-    let recovery_throttle = web::Data::new(recovery::ChallengeThrottle::default());
-
-    // Same reason for both favicon halves: one shared upstream HTTP client keeps
-    // connection pooling (the previous per-request client paid a fresh DNS +
-    // TCP + TLS handshake for every icon), and one shared icon cache means an
-    // icon fetched by any worker is warm for all of them.
+    // Built ONCE, outside the `HttpServer::new` closure: sharing one upstream
+    // HTTP client keeps connection pooling (the previous per-request client paid
+    // a fresh DNS + TCP + TLS handshake for every icon), and one shared icon
+    // cache means an icon fetched by any worker is warm for all of them.
     let favicon_client = web::Data::new(favicon::build_http_client());
     let favicon_cache = web::Data::new(favicon::FaviconCache::new());
 
@@ -294,7 +303,8 @@ async fn main() -> std::io::Result<()> {
 
         App::new()
             .app_data(db_data.clone())
-            .app_data(recovery_throttle.clone())
+            .app_data(rate_limiter.clone())
+            .app_data(rate_limiter.clone())
             .app_data(favicon_client.clone())
             .app_data(favicon_cache.clone())
             // Required by sqlite-wasm OPFS (SharedArrayBuffer). Mirrors the

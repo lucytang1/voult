@@ -22,6 +22,38 @@ import { clearPendingVaultName, readPendingVaultName } from "../vault/name";
 
 const MAX_SYNC_RETRIES = 3;
 
+/**
+ * Thrown when the server refused a push with 429. Intents are durable and stay
+ * queued; the scheduler turns this into a delayed re-run instead of treating it
+ * as a lost write.
+ */
+export class SyncRateLimited extends Error {
+  readonly retryAfterMs: number;
+
+  constructor(retryAfterMs: number) {
+    super(`sync rate limited; retry after ${retryAfterMs}ms`);
+    this.name = "SyncRateLimited";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/** `Retry-After` (seconds) from a 429, or a small default when absent. */
+function rateLimitRetryAfterMs(error: unknown): number | null {
+  const response = (
+    error as {
+      response?: { status?: number; headers?: Record<string, unknown> };
+    }
+  )?.response;
+  if (response?.status !== 429) return null;
+  const raw = response.headers?.["retry-after"] ?? response.headers?.["Retry-After"];
+  const seconds = Number.parseInt(String(raw ?? ""), 10);
+  // Cap below the scheduler's own ceiling; the server's window is authoritative
+  // and a fresh Retry-After arrives on the next refusal.
+  return Number.isFinite(seconds) && seconds > 0
+    ? Math.min(seconds * 1_000, 60_000)
+    : 5_000;
+}
+
 //returns the decrypted document and vault version from the server
 const loadVaultFromServer = async (
   vaultKey: CryptoKey,
@@ -182,6 +214,14 @@ export async function sync() {
         // against the new snapshot in the next loop iteration.
         console.warn("Sync version conflict, retrying", { attempt });
         continue;
+      }
+      const retryAfterMs = rateLimitRetryAfterMs(error);
+      if (retryAfterMs !== null) {
+        // The server asked us to back off. This is transient: intents are
+        // already durable, so hand the wait to the scheduler instead of
+        // logging an error the user cannot act on.
+        console.info("[Sync] rate limited; intents stay queued", { retryAfterMs });
+        throw new SyncRateLimited(retryAfterMs);
       }
       console.error("Failed to update vault on server", error);
       return;

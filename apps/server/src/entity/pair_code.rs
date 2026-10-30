@@ -11,6 +11,11 @@ pub struct Model {
     pub selector: String,
     pub vault_id: String,
     pub code_hash: String,
+    // Consume attempts recorded against this code. Durable and shared so the
+    // cap is not multiplied by the worker/instance count (the old in-memory map
+    // was per process and never shrank). Bumped atomically by
+    // `POST /api/pair/consume`; dies with the row.
+    pub attempts: i32,
     pub created_at: DateTimeUtc,
     pub expires_at: DateTimeUtc,
 }
