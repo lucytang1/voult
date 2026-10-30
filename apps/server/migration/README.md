@@ -43,7 +43,7 @@
 ## Clean-start schema (vault-centric)
 
 The migration set is a single initial migration that creates the vault-centric
-schema: `vault` (primary identity, with `vault_verifier`), `session` (keyed by
+schema: `vault` (primary identity, with `verifier_salt`/`verifier_hash`), `session` (keyed by
 `vault_id`), and the Google/cloud tables all keyed by `vault_id`. There is **no
 `user`, `user_key`, or `user_vault` table** — the vault is the only identity and
 authorization boundary.

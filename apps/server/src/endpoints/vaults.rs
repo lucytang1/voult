@@ -1,3 +1,4 @@
+use crate::credentials;
 use crate::db::DbPool;
 use crate::entity::vault::{self, Entity as VaultEntity};
 use crate::id_codec::uuid_to_db;
@@ -22,7 +23,7 @@ pub struct CreateVaultRequest {
     pub vault_key_wrap: String,
     pub vault_key_wrap_iv: String,
     #[serde(default)]
-    pub vault_verifier: Option<String>,
+    pub vault_verifier: String,
     // --- Recovery (case 3) ------------------------------------------------
     // Required, exactly as on POST /register. This endpoint writes a complete
     // vault row, so leaving these optional would open a second way to create a
@@ -83,6 +84,16 @@ pub async fn create_vault(
             "INVALID_INPUT",
         );
     }
+    // Required, not `unwrap_or_default()`: a row with an empty credential is a
+    // vault nobody can ever log in to. `/vaults` is not referenced by any client
+    // today, but the route is live, so the invariant is enforced here.
+    if !credentials::acceptable(&req.vault_verifier) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "vault_verifier required",
+            "INVALID_INPUT",
+        );
+    }
     if req.vault_key_wrap.trim().is_empty() || req.vault_key_wrap_iv.trim().is_empty() {
         return err(
             StatusCode::BAD_REQUEST,
@@ -125,13 +136,22 @@ pub async fn create_vault(
         },
     };
     let cv = req.crypto_version.unwrap_or(2);
+    // Hash before the insert; the presented value is never stored.
+    let Some(credential) = credentials::new_credential(&req.vault_verifier) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "vault_verifier required",
+            "INVALID_INPUT",
+        );
+    };
     let am = vault::ActiveModel {
         id: Set(uuid_to_db(vault_uuid)),
         vault: Set(req.vault),
         salt: Set(req.salt),
         iterations: Set(req.iterations),
         vaultiv: Set(req.vaultiv),
-        vault_verifier: Set(req.vault_verifier.unwrap_or_default()),
+        verifier_salt: Set(credential.salt_b64),
+        verifier_hash: Set(credential.hash_b64),
         version: Set(1),
         crypto_version: Set(cv),
         vault_key_wrap: Set(Some(req.vault_key_wrap)),

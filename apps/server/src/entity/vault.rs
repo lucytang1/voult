@@ -11,10 +11,23 @@ pub struct Model {
     pub salt: String,
     pub iterations: i32,
     pub vaultiv: String,
-    // Verifier derived from the master password client-side. It is an
-    // authentication credential only — never the password, wrapping key, or
-    // vault key. The server uses it solely to confirm a correct unlock.
-    pub vault_verifier: String,
+    // --- Password credential at rest ---------------------------------------
+    //
+    // The client proves knowledge of a verifier derived from the master
+    // password; the server stores only
+    //   HMAC-SHA256(verifier_salt, "voult-verifier-v1|" + presented)
+    // (see `crate::credentials`). The presented verifier is the HMAC preimage
+    // and is NEVER persisted: storing it verbatim made this row a replayable
+    // login credential, because anyone who could read it could POST it to
+    // /auth and get a session without the password.
+    //
+    // `verifier_salt` is public (16 random bytes, base64). `verifier_hash` is
+    // the at-rest form of the credential: never log it, and never add a code
+    // path that compares the stored hash to a presented value (that would be
+    // pass-the-hash). An empty pair means "no usable credential" and fails
+    // closed — the state left behind by migration 8 for pre-existing rows.
+    pub verifier_salt: String,
+    pub verifier_hash: String,
     pub created_at: DateTimeUtc,
     pub version: i32,
     pub crypto_version: i32,
@@ -28,10 +41,13 @@ pub struct Model {
     //
     // recovery_verifier = HMAC-SHA256(K_rec, "recovery-verify-v1"). It is the
     // second authentication path: the server recomputes the expected proof from
-    // it without ever holding the secret or K_rec. Unlike vault_verifier it is
-    // not password-derived, so a DB dump gives an attacker nothing to brute
-    // force, and it is only ever presented bound to a fresh server challenge,
-    // so it is not replayable either.
+    // it without ever holding the secret or K_rec. Unlike the password
+    // credential it is not derived from a password, so a DB dump gives an
+    // attacker nothing to brute force, and it is only ever presented bound to a
+    // fresh server challenge, so it is not replayable as a login credential.
+    // (A dump can still *forge* a proof with this key; see
+    // plans/p0-verifier-replay.md §9.1 — out of scope for the password
+    // credential.)
     //
     // recovery_enabled is DERIVED: `recovery_verifier IS NOT NULL`. Both vault
     // creation endpoints reject a vault that arrives without it, so no row can

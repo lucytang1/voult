@@ -9,6 +9,13 @@ never receives a master password, plaintext vault, vault key, or derived key.
 KDF metadata, `vault_verifier`, and optional password-wrapped vault-key
 envelope. It creates the vault and establishes its session.
 
+`vault_verifier` crosses the wire but is **never stored**: the row keeps
+`verifier_salt` + `verifier_hash`, where
+`verifier_hash = HMAC-SHA256(verifier_salt, "voult-verifier-v1|" + presented)`
+(`src/credentials.rs`, migration `m20261028_000008`). Storing the value verbatim
+made one row a replayable login credential. The check is constant-time, and the
+stored hash is never accepted as input — the client always sends the preimage.
+
 `POST /auth` accepts `{ vault_id, vault_verifier }`. On success it establishes
 a session and returns only the vault's KDF, crypto-version, and encrypted
 key-envelope metadata needed for client-side unlock.

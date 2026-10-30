@@ -158,7 +158,7 @@ one irreversible write. `abandonPendingRecovery()` clears the in-memory state in
 Legacy-shaped local copy of the server-side column discipline:
 
 ```
-rewrap   (paths 2b)   touches:  salt, iterations, vault_verifier, vault_key_wrap*,
+rewrap   (paths 2b)   touches:  salt, iterations, verifier_*, vault_key_wrap*,
                                       credential_version (+1)
                   untouches:  vault, vaultiv (ciphertext), version (document CAS),
                               recovery_* (Rule R1), lock_epoch

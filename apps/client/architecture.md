@@ -14,7 +14,7 @@ envelope, sync log, and Google OAuth bindings.
   - `vaultiv: string` (base64-encoded IV)
   - `salt: string`
   - `iterations: number` (KDF cost; returned by `/get_vault` and `/get_crypto_params`)
-  - `vault_verifier: string` (HMAC-derived verifier from the master password; auth credential only, not the password or any key)
+  - `vault_verifier: string` (HMAC-derived verifier from the master password; auth credential only, not the password or any key. Sent on every password login; the **server stores only a salted HMAC of it**, never this value — so a copied server row cannot be replayed.)
   - `created_at`
   - `version`
   - `crypto_version`
@@ -108,7 +108,8 @@ End-to-end login flow as implemented today:
    - Computes `vaultVerifier` (an HMAC-based verifier, vault-scoped).
    - Returns `{ vault_id, vault_verifier }`.
 5. **Authenticate with server** using `useLogIn()`:
-   - `POST /auth` with `{ vault_id, vault_verifier }`.
+   - `POST /auth` with `{ vault_id, vault_verifier }` (the server hashes it on
+     arrival and compares against its stored hash; it never stores this value).
    - On success, the server returns only `vault_id`, salt, iterations,
      crypto_version, and the password-wrapped vault-key envelope — never a user
      object or email.
