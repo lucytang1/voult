@@ -23,6 +23,12 @@ echo "Version: $VERSION"
 
 # --- 1. Client build ---
 if [[ "$SKIP_CLIENT" == false ]]; then
+  # vault-core is a separate npm package consumed via `file:`. Its own
+  # dependencies (zod, typescript) are not installed by the client's `npm ci`,
+  # so build it here first — this is the step that used to fail on CI with
+  # "Cannot find module 'zod'". See scripts/build-vault-core.sh for details.
+  echo "--- Building shared vault-core package ---"
+  bash "$ROOT/scripts/build-vault-core.sh"
   echo "--- Building client (Expo web export) ---"
   pushd "$ROOT/apps/client" > /dev/null
   npm ci

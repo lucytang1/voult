@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build:core": "npm --prefix ../../packages/vault-core run build",
+    "build:core": "bash ../../scripts/build-vault-core.sh",
     "dev": "vite build --watch",
     "build": "npm run build:core && tsc --noEmit && vite build && node scripts/check-content-iife.mjs",
     "typecheck": "tsc --noEmit"

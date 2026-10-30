@@ -13,9 +13,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          # Two independent npm projects are installed during the build: the
+          # Expo client and the shared @voult/vault-core package it links to.
+          # Both lockfiles are part of the cache key.
+          cache-dependency-path: |
+            apps/client/package-lock.json
+            packages/vault-core/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+      # Installs + builds packages/vault-core first (its dependencies are not
+      # covered by the client's `npm ci` — see scripts/build-vault-core.sh),
+      # then the client export, the server, the launcher, and the DMG.
       - name: Build Voult.app + DMG
         run: ./scripts/build-release.sh
         env:
