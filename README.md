@@ -82,7 +82,7 @@ npm run sync:sqlite-web     # REQUIRED before web export — copies sqlite-wasm 
 ### 2) Client — build web bundle
 
 ```sh
-npm run build:web           # builds to dist/ (same-origin /api)
+npm run build:web           # builds to dist/ (same-origin /api) and runs the artifact gate
 # or dev server
 npm run web                 # http://localhost:8081
 npx tsc --noEmit            # typecheck
@@ -113,6 +113,7 @@ All env vars are optional with per-install defaults. Loaded from the current dir
 | `STATIC_DIR` | probe `Resources/dist` (Voult.app) then `../client/dist` | Override for custom bundle location |
 | `CORS_ORIGINS` | `http://localhost:8081,http://127.0.0.1:8081` | Comma-separated, credentials enabled |
 | `SESSION_COOKIE_SECURE` | `false` | Set `true` in prod with TLS |
+| `VOULT_HTTPS` | off | Set `1` only when the browser-facing origin is HTTPS (direct or trusted TLS proxy). Enables HSTS and CSP `upgrade-insecure-requests`; leave off for loopback HTTP. Does not set `SESSION_COOKIE_SECURE`. |
 | `SESSION_COOKIE_SAME_SITE` | `lax` | `strict` / `lax` / `none` |
 | `SESSION_TTL_SECONDS` | `604800` (7d idle) | Persistent session TTL |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Enable Drive sync; also need `GOOGLE_OAUTH_REDIRECT_URI` |
@@ -180,6 +181,8 @@ Vault-scoped tokens and bindings under `/api/google/*`. A pending-state OAuth fl
 ## Gotchas
 
 - COOP/COEP headers are required for SharedArrayBuffer (sqlite-wasm OPFS) — set on both server responses and the client's `_headers`. Don't remove.
+- Web security headers live in `apps/server/src/security_headers.rs` and are registered outermost. The CSP pins Expo's one inline hydration script by hash and allows `wasm-unsafe-eval` + same-origin workers for SQLite; if `npm run build:web` reports a new hash, update that file and `apps/client/public/_headers` together. `_headers` is the TLS static-host mirror and is ignored by Actix.
+- `/debug` is deleted, not dev-gated. `npm run build:web` runs `scripts/check-web-dist.mjs`, which fails on debug artifacts, source maps, secret-shaped strings, telemetry SDKs, and unlisted network hosts.
 - Server never handles plaintext — all crypto lives client-side; the session cookie stores only the vault ID.
 - Crypto hierarchy: PBKDF2 → HKDF auth / vault-wrap → random vault key (AES-GCM) + device-key wrap.
 - There is no server device table or logout endpoint — device envelope is client-only; session invalidation is cookie teardown.
@@ -199,7 +202,7 @@ Vault-scoped tokens and bindings under `/api/google/*`. A pending-state OAuth fl
 
 ## Security Notes
 
-Zero-knowledge protects honest-but-curious storage, but a compromised server that replaces the web bundle or an XSS / supply-chain compromise in the same origin can still access plaintext while unlocked. See the roadmap for open gaps (KDF strength, static verifier, rate limits, CSP, etc.). This repo is not a certified security audit.
+Zero-knowledge protects honest-but-curious storage, but a compromised server that replaces the web bundle or an XSS / supply-chain compromise in the same origin can still access plaintext while unlocked. The web app ships a strict CSP and response-header policy, and `npm run build:web` gates the artifact, but those do not stop a malicious replacement bundle served from the same origin. See the roadmap for remaining gaps (KDF strength, static verifier, rate limits, etc.). This repo is not a certified security audit.
 
 ---
 

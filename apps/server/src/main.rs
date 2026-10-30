@@ -5,6 +5,7 @@ mod endpoints;
 mod entity;
 mod error;
 mod id_codec;
+mod security_headers;
 mod session_auth;
 mod static_site;
 
@@ -267,6 +268,15 @@ async fn main() -> std::io::Result<()> {
     let favicon_client = web::Data::new(favicon::build_http_client());
     let favicon_cache = web::Data::new(favicon::FaviconCache::new());
 
+    // A deployment declaration, not a sniffed request property. HSTS and
+    // upgrade-insecure-requests are only meaningful when the browser-facing
+    // origin is HTTPS; the shipped server binds loopback HTTP.
+    let https = config::https_enabled();
+
+    SERVER_LOG.log(
+        format_args!("web security headers: https={https} hsts={https}"),
+        logger::metadata! { "https" => https },
+    );
     SERVER_LOG.log(
         "Starting server at http://localhost:8080",
         logger::Metadata::new(),
@@ -297,16 +307,14 @@ async fn main() -> std::io::Result<()> {
             .app_data(recovery_throttle.clone())
             .app_data(favicon_client.clone())
             .app_data(favicon_cache.clone())
-            // Required by sqlite-wasm OPFS (SharedArrayBuffer). Mirrors the
-            // client's public/_headers.
-            .wrap(
-                DefaultHeaders::new()
-                    .add(("Cross-Origin-Opener-Policy", "same-origin"))
-                    .add(("Cross-Origin-Embedder-Policy", "require-corp")),
-            )
             .wrap(middleware::Logger::default())
             .wrap(session_middleware)
             .wrap(cors)
+            // Registered last, so it is the outermost middleware: responses
+            // short-circuited by CORS (preflight) and middleware-generated
+            // errors still receive the policy. The previous COOP/COEP-only
+            // DefaultHeaders was registered first (innermost).
+            .wrap(security_headers::default_headers(https))
             .service(
                 web::scope("/api")
                     // Vault/session/ciphertext responses must never sit in a

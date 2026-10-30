@@ -17,6 +17,7 @@
  * | `SESSION_COOKIE_KEY` | Optional | `>=64` chars | per-install `session.key` (0600) | Panics if set but <64. |
  * | `STATIC_DIR` | Optional | path | bundle probe / `../client/dist` | — |
  * | `CORS_ORIGINS` | Optional | comma-separated | `http://localhost:8081,http://127.0.0.1:8081` | — |
+ * | `VOULT_HTTPS` | Optional | `1` / `true` (case-insensitive) | off | Declares that the browser-facing origin is HTTPS. Emits HSTS and `upgrade-insecure-requests`; leave off for loopback HTTP. |
  * | `SESSION_COOKIE_SECURE` / `SAME_SITE` / `TTL_SECONDS` | Optional | — | `false` / `lax` / `604800` | — |
  * | Cloud provider keys | Optional | provider-specific | — | See `cloud::provider::CloudProvider::env_keys`; unconfigured providers are omitted from `/cloud/providers`. |
  */
@@ -31,6 +32,7 @@ pub const ENV_DATABASE_URL: &str = "DATABASE_URL";
 pub const ENV_SESSION_COOKIE_KEY: &str = "SESSION_COOKIE_KEY";
 pub const ENV_STATIC_DIR: &str = "STATIC_DIR";
 pub const ENV_CORS_ORIGINS: &str = "CORS_ORIGINS";
+pub const ENV_VOULT_HTTPS: &str = "VOULT_HTTPS";
 
 /// Config logging context.
 const CONFIG_LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Config);
@@ -256,6 +258,19 @@ pub fn optional_env(key: &str) -> Option<String> {
         let t = v.trim().to_string();
         if t.is_empty() { None } else { Some(t) }
     })
+}
+
+/// True only when the operator declares that the browser-facing origin is
+/// HTTPS. This is deliberately explicit rather than derived from
+/// `X-Forwarded-Proto`: there is no trusted-proxy configuration in this repo,
+/// and a client-controlled header must not be able to turn HSTS on or off.
+///
+/// Used by `security_headers::HeaderPolicy`; it does not change cookie flags
+/// (`SESSION_COOKIE_SECURE` remains a separate deployment switch).
+pub fn https_enabled() -> bool {
+    optional_env(ENV_VOULT_HTTPS)
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// Returns trimmed value or panics with concrete message if missing/empty.

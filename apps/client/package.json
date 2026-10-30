@@ -7,7 +7,8 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "build:web": "npm --prefix ../../packages/vault-core run build && EXPO_PUBLIC_API_URL= expo export --platform web",
+    "build:web": "npm --prefix ../../packages/vault-core run build && EXPO_PUBLIC_API_URL= expo export --platform web && node scripts/check-web-dist.mjs",
+    "check:web-dist": "node scripts/check-web-dist.mjs",
     "sync:sqlite-web": "mkdir -p public/sqlite && cp node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3-worker1.mjs public/sqlite/sqlite3-worker1.mjs && cp node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3-opfs-async-proxy.js public/sqlite/sqlite3-opfs-async-proxy.js && cp node_modules/@sqlite.org/sqlite-wasm/dist/sqlite3.wasm public/sqlite/sqlite3.wasm",
     "postinstall": "patch-package"
   },
@@ -30,7 +31,6 @@
     "gl-matrix": "^3.4.4",
     "lucide-react": "^0.562.0",
     "nativewind": "^5.0.0-preview.2",
-    "posthog-react-native": "^4.23.0",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "react-native": "0.83.2",
