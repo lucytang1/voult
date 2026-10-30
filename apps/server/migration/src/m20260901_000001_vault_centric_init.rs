@@ -14,7 +14,7 @@ impl MigrationTrait for Migration {
                     .col(string(Vault::Id).not_null().primary_key())
                     .col(string(Vault::Vault).not_null())
                     .col(string(Vault::Salt).not_null())
-                    .col(integer(Vault::Iterations).not_null())
+                    .col(string(Vault::Kdf).not_null())
                     .col(string(Vault::Vaultiv).not_null())
                     .col(string(Vault::VaultVerifier).not_null())
                     .col(
@@ -218,7 +218,7 @@ enum Vault {
     Id,
     Vault,
     Salt,
-    Iterations,
+    Kdf,
     Vaultiv,
     VaultVerifier,
     CreatedAt,

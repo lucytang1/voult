@@ -21,14 +21,12 @@ import {
   DEFAULT_FOLDER_ID,
   DEFAULT_VAULT_NAME,
   b64,
-  createAuthKey,
   decrypt,
-  derivePasswordWrappingKey,
+  derivePasswordKeys,
   encrypt,
   fallbackFaviconUrl,
   faviconForItem,
   findItemForAccount,
-  getAuthVerifierB64,
   hasSsoSignIn,
   importVaultKey,
   isValidVaultId,
@@ -510,10 +508,14 @@ export async function unlockWithPassword(password: string): Promise<void> {
   if (!isValidVaultId(id)) throw new Error("No vault onboarded — connect the extension first.");
   const serverUrl = await getServerUrl();
   const params = await fetchCryptoParams(id, serverUrl);
-  const authKey = await createAuthKey(password, params.salt, params.iterations);
-  const vaultVerifier = await getAuthVerifierB64(authKey);
+  // One Argon2 run gives the verifier and the wrapping key. Deriving them
+  // separately would double a ~0.6 s KDF on every password unlock.
+  const { vaultVerifier, wrappingKey } = await derivePasswordKeys(
+    password,
+    params.salt,
+    params.kdf,
+  );
   await postAuth(id, vaultVerifier, serverUrl);
-  const wrappingKey = await derivePasswordWrappingKey(password, params.salt, params.iterations);
   const vaultData = await fetchVaultAfterAuth(serverUrl);
   const v = vaultData.vault;
   if (!v.vault_key_wrap || !v.vault_key_wrap_iv) {

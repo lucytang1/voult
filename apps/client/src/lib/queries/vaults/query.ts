@@ -1,12 +1,13 @@
 import { http } from "../http";
 import { useQuery } from "@tanstack/react-query";
+import type { KdfParams } from "@voult/vault-core";
 
 export interface CreateVaultRequest {
   vault_id?: string;
   vault: string;
   vaultiv: string;
   salt: string;
-  iterations: number;
+  kdf: KdfParams;
   crypto_version?: number;
   vault_key_wrap?: string;
   vault_key_wrap_iv?: string;
@@ -17,7 +18,7 @@ export interface CreateVaultResponse {
   vault: string;
   vaultiv: string;
   salt: string;
-  iterations: number;
+  kdf: KdfParams;
   version: number;
   crypto_version: number;
 }

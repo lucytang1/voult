@@ -10,6 +10,7 @@
 
 import * as z from "zod";
 import { canonicalizeOrigin } from "./origin.js";
+import type { KdfParams } from "./kdf.js";
 
 // OAuth sign-in memory: one VaultItem holds every way to sign into a site —
 // an optional stored password plus zero or more "Continue with X" methods.
@@ -429,12 +430,12 @@ export interface SessionState {
 
 /**
  * Material needed to re-derive the vault key locally when unlocking after a
- * lock. All values are zero-knowledge-safe (salt/iterations/wrapped key are
+ * lock. All values are zero-knowledge-safe (salt/KDF descriptor/wrapped key are
  * things the server already knows).
  */
 export interface LockMetadata {
   salt: string;
-  iterations: number;
+  kdf: KdfParams;
   vaultKeyWrap: string;
   vaultKeyWrapIv: string;
 }
@@ -559,9 +560,11 @@ export type VaultResponse = {
   vault: {
     vault: string;
     vaultiv: string;
-    iterations: number;
+    kdf: KdfParams;
     version: number;
     crypto_version: number;
+    /** CAS counter for the password credential; needed by a profile rotation. */
+    credential_version: number;
     vault_key_wrap: string | null;
     vault_key_wrap_iv: string | null;
   };
@@ -579,7 +582,7 @@ export type UpdateVaultRequest = {
 export type UpdateVaultResponse = {
   vault: string;
   vaultiv: string;
-  iterations: number;
+  kdf: KdfParams;
   version: number;
   crypto_version: number;
   vault_key_wrap: string | null;

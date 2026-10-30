@@ -5,6 +5,7 @@ mod endpoints;
 mod entity;
 mod error;
 mod id_codec;
+mod kdf;
 mod session_auth;
 mod static_site;
 
@@ -27,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use endpoints::{
     auth, cloud_endpoints, favicon, get_crypto_params, get_vault, lock, logout, pair, recovery,
-    register, session_status, update_vault, update_vault_password, vaults,
+    register, session_status, update_vault, vault_credential, vaults,
 };
 use static_site::static_site;
 
@@ -337,7 +338,7 @@ async fn main() -> std::io::Result<()> {
                     // Rotation is session-required: it is a deliberate change to a
                     // live vault made from inside the app, not a stranded user.
                     .service(recovery::recovery_regenerate)
-                    .service(update_vault_password::update_vault_password)
+                    .service(vault_credential::rotate_credential)
                     .service(vaults::create_vault)
                     .service(vaults::list_vaults)
                     .service(cloud_endpoints::cloud_providers)

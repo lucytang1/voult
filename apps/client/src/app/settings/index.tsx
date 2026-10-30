@@ -5,6 +5,7 @@ import { ArrowLeft, Blocks, CloudBackup, FolderLock, Vault, type LucideIcon } fr
 import { useAuthGuard } from "@/src/lib/auth/use-auth-guard";
 import { ExtensionPairing } from "@/src/lib/extension-pair";
 import { AutolockSection } from "@/src/lib/settings/autolock-section";
+import { KdfSection } from "@/src/lib/settings/kdf-section";
 import { DeviceUnlockSection } from "@/src/lib/settings/device-unlock-section";
 import { RecoveryKeySection } from "@/src/lib/settings/recovery-key-section";
 import { BackupSection } from "@/src/lib/settings/backup-section";
@@ -34,7 +35,7 @@ const SECTIONS: Record<string, { label: string; title: string; description: stri
   security: {
     label: "Security",
     title: "Security",
-    description: "Control how and when your vault locks itself.",
+    description: "Control lock behavior, vault protection, and recovery.",
     icon: FolderLock,
   },
 };
@@ -129,6 +130,7 @@ export default function Settings() {
           <>
             <AutolockSection />
             <RecoveryKeySection />
+            <KdfSection />
             <DeviceUnlockSection />
           </>
         ) : (

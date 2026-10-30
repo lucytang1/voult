@@ -5,6 +5,7 @@ use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 
 use crate::entity::vault::{self, Entity as Vault};
+use crate::kdf::KdfParams;
 use crate::session_auth::session_vault_id;
 
 use crate::db::DbPool;
@@ -28,7 +29,7 @@ struct UpdateVaultRequest {
 pub struct UpdateVaultResponse {
     pub vault: String,
     pub vaultiv: String,
-    pub iterations: u32,
+    pub kdf: KdfParams,
     pub version: u32,
     pub crypto_version: i32,
     pub vault_key_wrap: Option<String>,
@@ -85,6 +86,24 @@ pub async fn update_vault(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to fetch vault",
                 "DB_ERROR",
+            );
+        }
+    };
+
+    // The KDF descriptor is not touched by a document write, but parse it now
+    // so a corrupt row fails before the CAS rather than after a successful
+    // update.
+    let kdf = match KdfParams::parse_stored(&vault.kdf) {
+        Ok(kdf) => kdf,
+        Err(_) => {
+            LOG.error(
+                format_args!("vault has an unparsable kdf column: {:?}", vault.id),
+                logger::Metadata::new(),
+            );
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid vault metadata",
+                "DATA_INTEGRITY_ERROR",
             );
         }
     };
@@ -165,7 +184,7 @@ pub async fn update_vault(
     HttpResponse::Ok().json(UpdateVaultResponse {
         vault: new_vault,
         vaultiv: new_vaultiv,
-        iterations: vault.iterations as u32,
+        kdf,
         version: new_version,
         crypto_version: new_crypto_version,
         vault_key_wrap: new_vault_key_wrap,
@@ -258,7 +277,7 @@ mod tests {
                     "vault_id": VAULT_ID,
                     "vault_verifier": "dmVyaWZpZXI=",
                     "salt": "c2FsdA==",
-                    "iterations": 60000,
+                    "kdf": { "algorithm": "argon2id", "memory_kib": 19456, "time_cost": 2, "parallelism": 1 },
                     "vaultiv": "aXY=",
                     "vault": "Y2lwaGVydGV4dA==",
                     "crypto_version": 2,

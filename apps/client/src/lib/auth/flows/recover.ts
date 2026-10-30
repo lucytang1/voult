@@ -1,11 +1,11 @@
 import {
     CRYPTO_VERSION,
-    PBKDF2_ITERATIONS,
     b64,
     decrypt,
     deriveRecoveryWrapKey,
     computeRecoveryVerifier,
     computeRecoveryProof,
+    derivePasswordKeys,
     importVaultKey,
     newSaltB64,
     parseRecoveryKey,
@@ -14,14 +14,13 @@ import {
     wrapKeyBytes,
     RecoveryPdfError,
 } from "../../crypto/index.web";
-import {
-    postRecoveryChallenge,
-    postRecoveryRewrap,
-    postRecoveryUnlock,
-} from "../../queries/recovery/query";
+import { kdfRank } from "@voult/vault-core";
+import type { KdfParams } from "@voult/vault-core";
+import { postRecoveryChallenge, postRecoveryRewrap, postRecoveryUnlock } from "../../queries/recovery/query";
 import { fetchCryptoParams } from "../../queries/cryptoParams/query";
 import { fetchVault } from "../../queries/vault/query";
-import { derivePasswordKeys, parseVaultJson, persistDeviceSecrets } from "../utils";
+import { parseVaultJson, persistDeviceSecrets } from "../utils";
+import { ensureKdfTarget } from "../kdf-upgrade";
 import type { UnlockedSession } from "../utils";
 
 /**
@@ -82,6 +81,12 @@ interface PendingRecovery {
      * boundary for exactly that reason.
      */
     credentialVersion: number;
+    /**
+     * The vault's stored KDF profile at step 1. Step 2 must never install a
+     * weaker profile than the vault already has, even if this device calibrates
+     * lower.
+     */
+    storedKdf: KdfParams;
 }
 
 let pending: PendingRecovery | null = null;
@@ -144,7 +149,7 @@ export async function verifyRecoveryKey(args: {
         throw new Error("INVALID_RECOVERY_KEY");
     }
 
-    // No PBKDF2 on this path by design: the secret already carries 160 bits.
+    // No password KDF on this path by design: the secret already carries 160 bits.
     const K = await deriveRecoveryWrapKey(secretBytes, params.recovery_salt);
 
     // A fresh server nonce — this is what makes the proof non-replayable.
@@ -176,7 +181,13 @@ export async function verifyRecoveryKey(args: {
 
     // Replace any earlier attempt rather than accumulating.
     abandonPendingRecovery();
-    pending = { vaultId, verifier, vaultKeyRaw, credentialVersion: released.credential_version };
+    pending = {
+        vaultId,
+        verifier,
+        vaultKeyRaw,
+        credentialVersion: released.credential_version,
+        storedKdf: params.kdf,
+    };
     return { vaultId };
 }
 
@@ -190,7 +201,7 @@ export async function verifyRecoveryKey(args: {
 export async function completeRecovery(args: { newPassword: string }): Promise<RecoveredVault> {
     const state = pending;
     if (!state) throw new Error("RECOVERY_EXPIRED");
-    const { vaultId, verifier, vaultKeyRaw, credentialVersion } = state;
+    const { vaultId, verifier, vaultKeyRaw, credentialVersion, storedKdf } = state;
 
     try {
         // LOCAL VERIFICATION, before the single irreversible server write.
@@ -201,11 +212,17 @@ export async function completeRecovery(args: { newPassword: string }): Promise<R
         // locally, while failing is still free. Sending an unverified
         // credential to the server would be the one unrecoverable mistake this
         // flow can make.
+        //
+        // The target is this device's calibrated rung or the vault's existing
+        // rung, whichever is higher: a recovery on a slow device must not
+        // downgrade the vault.
+        const calibrated = await ensureKdfTarget();
+        const targetKdf = kdfRank(calibrated) >= kdfRank(storedKdf) ? calibrated : storedKdf;
         const newSalt = newSaltB64();
         const { wrappingKey, vaultVerifier } = await derivePasswordKeys(
             args.newPassword,
             newSalt,
-            PBKDF2_ITERATIONS,
+            targetKdf,
         );
         const newEnvelope = await wrapKeyBytes(vaultKeyRaw, wrappingKey);
         let roundTrip: Uint8Array;
@@ -233,7 +250,7 @@ export async function completeRecovery(args: { newPassword: string }): Promise<R
             proof: b64(proof),
             credential_version: credentialVersion,
             new_salt: newSalt,
-            new_iterations: PBKDF2_ITERATIONS,
+            new_kdf: targetKdf,
             new_vault_verifier: vaultVerifier,
             new_vault_key_wrap: b64(newEnvelope.cipher),
             new_vault_key_wrap_iv: b64(newEnvelope.iv),

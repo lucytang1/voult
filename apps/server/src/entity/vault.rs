@@ -9,7 +9,13 @@ pub struct Model {
     pub id: String,
     pub vault: String,
     pub salt: String,
-    pub iterations: i32,
+    // Password KDF descriptor, canonical JSON:
+    // {"algorithm":"argon2id","memory_kib":65536,"time_cost":3,"parallelism":1}
+    //
+    // The server never derives from this; it stores it, returns it pre-auth so
+    // the client can derive locally, and validates that it is a published rung.
+    // Stored as one canonical string so the row has a single representation.
+    pub kdf: String,
     pub vaultiv: String,
     // Verifier derived from the master password client-side. It is an
     // authentication credential only — never the password, wrapping key, or
@@ -40,8 +46,8 @@ pub struct Model {
     // HKDF salt for K_rec (16 B, base64). Needed before the client can derive
     // K_rec, so it is served pre-auth by GET /get_crypto_params.
     pub recovery_salt: Option<String>,
-    // AES-GCM envelope: recovery_wrap holds vaultKeyRaw DIRECTLY, never
-    // HKDF(PBKDF2(password)) — Rule R1. That is what lets the password
+    // AES-GCM envelope: recovery_wrap holds vaultKeyRaw DIRECTLY, never the
+    // password-derived wrapping key — Rule R1. That is what lets the password
     // credential be rotated during recovery without destroying the recovery
     // path. Must be unwrapped with AAD utf8("voult-env|v2|<vault_id>|recovery")
     // so it cannot be transplanted onto another vault's row.
