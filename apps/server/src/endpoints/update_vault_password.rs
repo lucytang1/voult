@@ -1,3 +1,4 @@
+use crate::credentials;
 use crate::db::DbPool;
 use crate::entity::vault::{self, Entity as VaultEntity};
 use crate::session_auth::session_vault_id;
@@ -29,12 +30,19 @@ pub async fn update_vault_password(
             );
         }
     };
-    let new_verifier = body.new_vault_verifier.clone();
-    if new_verifier.trim().is_empty() {
+    // Hash the new credential before touching the row: only the salt+hash pair
+    // is ever persisted.
+    //
+    // This endpoint still writes the credential and KDF metadata without a
+    // client-side rewrap of the vault-key envelope, so a caller can strand a
+    // vault (see SECURITY_AND_FEATURE_ROADMAP.md, "Complete password-change
+    // protocol atomically"). That is deliberately not fixed here — this change
+    // only guarantees the credential itself is never stored in plaintext.
+    let Some(credential) = credentials::new_credential(&body.new_vault_verifier) else {
         return HttpResponse::BadRequest().json(
             serde_json::json!({"error_msg":"new_vault_verifier required","code":"INVALID_INPUT"}),
         );
-    }
+    };
     let vault = match VaultEntity::find()
         .filter(vault::Column::Id.eq(&vault_id))
         .one(pool.get_ref())
@@ -52,7 +60,8 @@ pub async fn update_vault_password(
         }
     };
     let mut am: vault::ActiveModel = vault.into();
-    am.vault_verifier = Set(new_verifier);
+    am.verifier_salt = Set(credential.salt_b64);
+    am.verifier_hash = Set(credential.hash_b64);
     if let Some(s) = &body.new_salt {
         am.salt = Set(s.clone());
     }

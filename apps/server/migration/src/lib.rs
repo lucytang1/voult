@@ -12,6 +12,7 @@ mod m20261011_000004_cloud_binding_mirror_state;
 mod m20261012_000005_cloud_provider_neutral;
 mod m20261013_000006_vault_recovery;
 mod m20261027_000007_cloud_binding_generation;
+mod m20261028_000008_vault_verifier_hash;
 
 pub struct Migrator;
 
@@ -26,6 +27,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261012_000005_cloud_provider_neutral::Migration),
             Box::new(m20261013_000006_vault_recovery::Migration),
             Box::new(m20261027_000007_cloud_binding_generation::Migration),
+            Box::new(m20261028_000008_vault_verifier_hash::Migration),
         ]
     }
 }

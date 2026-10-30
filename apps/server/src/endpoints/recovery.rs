@@ -38,6 +38,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+use crate::credentials;
 use crate::db::DbPool;
 
 // Aliased: the module is `recovery_challenge`, which would otherwise collide with
@@ -772,6 +773,16 @@ pub async fn recovery_rewrap(
             "INVALID_INPUT",
         );
     }
+    // Hash the new password credential now; only the salt and hash are written.
+    // Fresh salt per rotation, so the stored value is never reused across a
+    // credential change.
+    let Some(new_credential) = credentials::new_credential(&request.new_vault_verifier) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid new_vault_verifier",
+            "INVALID_INPUT",
+        );
+    };
     // Paired or not at all: a half-written password envelope would leave the
     // vault unwrappable by any password.
     if decode_exact(&request.new_vault_key_wrap, WRAP_LEN).is_none()
@@ -854,8 +865,12 @@ pub async fn recovery_rewrap(
             Expr::value(request.new_iterations),
         )
         .col_expr(
-            vault::Column::VaultVerifier,
-            Expr::value(request.new_vault_verifier.clone()),
+            vault::Column::VerifierSalt,
+            Expr::value(new_credential.salt_b64),
+        )
+        .col_expr(
+            vault::Column::VerifierHash,
+            Expr::value(new_credential.hash_b64),
         )
         .col_expr(
             vault::Column::VaultKeyWrap,
@@ -968,7 +983,7 @@ pub struct RegenerateRequest {
 /// three unauthenticated endpoints, which exist precisely because the caller has
 /// no session.
 ///
-/// This does NOT touch `salt`, `iterations`, `vault_verifier`, `vault_key_wrap*`,
+/// This does NOT touch `salt`, `iterations`, `verifier_*`, `vault_key_wrap*`,
 /// `version`, `lock_epoch`, or the `vault`/`vaultiv` ciphertext: the password
 /// credential is entirely unaffected, so a user rotating a stolen paper key does
 /// not have to change their master password. It also does not bump
@@ -1223,13 +1238,17 @@ mod tests {
     /// Seeds a recoverable vault with distinctive sentinels in every column, so
     /// a test can assert precisely which ones the rewrap touched.
     async fn seed_vault(pool: &DbPool, vault_id: &str) -> vault::Model {
+        // A real salt+hash pair for the sentinel verifier, so the row is in the
+        // same shape a live vault has.
+        let credential = credentials::new_credential(&b64_of(32, 0xA4)).expect("seed credential");
         let am = vault::ActiveModel {
             id: Set(vault_id.to_string()),
             vault: Set(b64_of(16, 0xA1)),
             vaultiv: Set(b64_of(12, 0xA2)),
             salt: Set(b64_of(16, 0xA3)),
             iterations: Set(60_000),
-            vault_verifier: Set(b64_of(32, 0xA4)),
+            verifier_salt: Set(credential.salt_b64.clone()),
+            verifier_hash: Set(credential.hash_b64.clone()),
             vault_key_wrap: Set(Some(b64_of(48, 0xA5))),
             vault_key_wrap_iv: Set(Some(b64_of(12, 0xA6))),
             recovery_verifier: Set(Some(b64_of(32, 0xB1))),
@@ -1325,13 +1344,15 @@ mod tests {
         let pool = test_pool().await;
         let app = test_app!(&pool);
         // A vault whose recovery columns are explicitly NULL.
+        let credential = credentials::new_credential(&b64_of(32, 0xA4)).expect("seed credential");
         let am = vault::ActiveModel {
             id: Set(OTHER_VAULT_ID.to_string()),
             vault: Set(b64_of(16, 0xA1)),
             vaultiv: Set(b64_of(12, 0xA2)),
             salt: Set(b64_of(16, 0xA3)),
             iterations: Set(60_000),
-            vault_verifier: Set(b64_of(32, 0xA4)),
+            verifier_salt: Set(credential.salt_b64.clone()),
+            verifier_hash: Set(credential.hash_b64.clone()),
             version: Set(1),
             ..Default::default()
         };
@@ -1532,7 +1553,22 @@ mod tests {
 
         // --- must change: the password credential -------------------------
         assert_eq!(after.salt, b64_of(16, 0xC1));
-        assert_eq!(after.vault_verifier, b64_of(32, 0xC2));
+        assert!(
+            credentials::accepts(
+                &after.verifier_salt,
+                &after.verifier_hash,
+                &b64_of(32, 0xC2)
+            ),
+            "rewrap must install a credential that accepts the new verifier"
+        );
+        assert!(
+            !credentials::accepts(
+                &after.verifier_salt,
+                &after.verifier_hash,
+                &b64_of(32, 0xA4)
+            ),
+            "the pre-recovery verifier must stop working"
+        );
         assert_eq!(after.vault_key_wrap.as_deref(), Some(&b64_of(48, 0xC3)[..]));
         assert_eq!(
             after.vault_key_wrap_iv.as_deref(),
@@ -2122,7 +2158,8 @@ mod tests {
         // recovery rotation does not touch.
         assert_eq!(after.salt, before.salt);
         assert_eq!(after.iterations, before.iterations);
-        assert_eq!(after.vault_verifier, before.vault_verifier);
+        assert_eq!(after.verifier_salt, before.verifier_salt);
+        assert_eq!(after.verifier_hash, before.verifier_hash);
         assert_eq!(after.vault_key_wrap, before.vault_key_wrap);
         assert_eq!(after.vault_key_wrap_iv, before.vault_key_wrap_iv);
         assert_eq!(after.credential_version, before.credential_version);

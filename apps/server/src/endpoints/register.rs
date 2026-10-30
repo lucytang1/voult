@@ -4,6 +4,7 @@ use sea_orm::{ActiveModelTrait, Set, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::credentials;
 use crate::db::DbPool;
 use crate::entity::vault::ActiveModel as VaultActiveModel;
 use crate::id_codec::uuid_to_db;
@@ -84,7 +85,7 @@ pub async fn register(
     // never opens one, and never reaches a vault insert. Anything missing here
     // is a client bug, not a partial success.
     if request.vault_id.trim().is_empty()
-        || request.vault_verifier.trim().is_empty()
+        || !credentials::acceptable(&request.vault_verifier)
         || request.salt.trim().is_empty()
     {
         return error_response(
@@ -122,6 +123,16 @@ pub async fn register(
         }
     };
 
+    // Hash the verifier before the transaction opens: only the salt and the
+    // keyed hash are stored, never the presented value. See `credentials`.
+    let Some(credential) = credentials::new_credential(&request.vault_verifier) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "vault_verifier is invalid",
+            "INVALID_INPUT",
+        );
+    };
+
     let crypto_version = request.crypto_version.unwrap_or(1);
 
     let tx = match pool.begin().await {
@@ -145,7 +156,8 @@ pub async fn register(
         salt: Set(request.salt),
         iterations: Set(request.iterations),
         vaultiv: Set(request.vaultiv),
-        vault_verifier: Set(request.vault_verifier),
+        verifier_salt: Set(credential.salt_b64),
+        verifier_hash: Set(credential.hash_b64),
         version: Set(1),
         crypto_version: Set(crypto_version),
         vault_key_wrap: Set(Some(request.vault_key_wrap)),

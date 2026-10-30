@@ -19,10 +19,12 @@ impl MigrationTrait for Migration {
         // Vault recovery (case 3): a second envelope type wrapping `vaultKeyRaw`
         // under a key derived from the user's paper recovery secret.
         //
-        // recovery_verifier is a 256-bit HMAC output over K_rec. Unlike
-        // vault_verifier it is not derived from a password, so a database dump
-        // yields nothing to brute force, and it is only ever presented bound to
-        // a fresh server challenge — never as a static replayable credential.
+        // recovery_verifier is a 256-bit HMAC output over K_rec. Unlike the
+        // password credential it is not derived from a password, so a database
+        // dump yields nothing to brute force, and it is only ever presented
+        // bound to a fresh server challenge — never as a static replayable
+        // credential. (A dump can still forge a proof with this key; see
+        // plans/p0-verifier-replay.md §9.1.)
         //
         // All six columns are nullable because SQLite cannot ALTER a NOT NULL
         // column without a default; `recovery_enabled` is DERIVED as

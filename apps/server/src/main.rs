@@ -1,4 +1,5 @@
 mod cloud;
+mod credentials;
 mod datetime_codec;
 mod db;
 mod endpoints;
@@ -20,6 +21,7 @@ use actix_web::{App, HttpServer, web};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use migration::{Migrator, MigratorTrait};
 use rand::RngCore;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use std::env;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -224,6 +226,36 @@ async fn main() -> std::io::Result<()> {
     // than correctness — but it means a restart never resurrects rows that can
     // no longer be honoured.
     recovery::prune_expired_challenges(db_data.get_ref()).await;
+
+    // Credential audit. Migration 8 replaced the plaintext verifier with a
+    // keyed hash and deliberately backfilled nothing: the hash cannot be
+    // derived without the password the user typed at that moment. Any vault
+    // that predates it therefore has an empty credential pair and will answer
+    // AUTH_FAILED forever. Say so once, with a count only — never vault ids or
+    // values, which the log-sanitisation policy forbids. Recovery is the way
+    // back for those vaults (the recovery columns are untouched).
+    match entity::vault::Entity::find()
+        .select_only()
+        .column(entity::vault::Column::Id)
+        .filter(entity::vault::Column::VerifierHash.eq(""))
+        .into_tuple::<String>()
+        .all(db_data.get_ref())
+        .await
+    {
+        Ok(ids) if ids.is_empty() => {}
+        Ok(ids) => SERVER_LOG.warn(
+            format_args!(
+                "{} vault(s) have no usable password credential and cannot log in; they \
+                 predate the verifier-hash migration and must be recovered or recreated",
+                ids.len()
+            ),
+            logger::Metadata::new(),
+        ),
+        Err(e) => SERVER_LOG.error(
+            format_args!("credential audit failed: {e:?}"),
+            logger::Metadata::new(),
+        ),
+    }
 
     // Credentialed requests (cookies) require explicit origins — never pair
     // `allow_any_origin()` with cookies.

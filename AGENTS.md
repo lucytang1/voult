@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Password manager (voult): Expo web client + Actix-Web API server, both zero-knowledge (server only ever sees vault ciphertext, salt, iterations, `vault_verifier` HMAC, and wrapped vault-key envelopes — never master password, vault key, or plaintext).
+Password manager (voult): Expo web client + Actix-Web API server, both zero-knowledge (server only ever sees vault ciphertext, salt, iterations, `vault_verifier` HMAC (stored only as a salted HMAC, `apps/server/src/credentials.rs`), and wrapped vault-key envelopes — never master password, vault key, or plaintext).
 
 Vault is the only identity. There is no `user`/`email` table — `vault.id` is a client-generated UUID (`apps/client/src/lib/crypto/index.web.ts:38`) used as session principal (`apps/server/src/session_auth.rs:6`).
 

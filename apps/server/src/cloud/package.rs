@@ -198,7 +198,8 @@ mod tests {
             salt: "c2FsdA==".to_string(),
             iterations: 60_000,
             vaultiv: "aXY=".to_string(),
-            vault_verifier: "dmVyaWZpZXI=".to_string(),
+            verifier_salt: "dmVyaWZpZXItc2FsdA==".to_string(),
+            verifier_hash: "dmVyaWZpZXItaGFzaA==".to_string(),
             created_at: chrono::Utc::now(),
             version: 7,
             crypto_version: 2,
@@ -295,7 +296,8 @@ mod tests {
         // What rewrap writes: new salt/iterations/verifier + new envelope.
         post.salt = "bmV3LXNhbHQ=".to_string();
         post.iterations = 120_000;
-        post.vault_verifier = "bmV3LXZlcmlmaWVy".to_string();
+        post.verifier_salt = "bmV3LXNhbHQtYmFzZTY0".to_string();
+        post.verifier_hash = "bmV3LWhhc2gtYmFzZTY0".to_string();
         post.vault_key_wrap = Some("bmV3LWdyYXA=".to_string());
         post.vault_key_wrap_iv = Some("bmV3LWl2".to_string());
         // ...and what it must NOT touch.

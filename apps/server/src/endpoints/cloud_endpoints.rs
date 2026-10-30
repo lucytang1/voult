@@ -1661,7 +1661,8 @@ mod tests {
             salt: Set("c2FsdA==".to_string()),
             iterations: Set(60_000),
             vaultiv: Set("aXY=".to_string()),
-            vault_verifier: Set("dmVyaWZpZXI=".to_string()),
+            verifier_salt: Set("dmVyaWZpZXItc2FsdA==".to_string()),
+            verifier_hash: Set("dmVyaWZpZXItaGFzaA==".to_string()),
             version: Set(1),
             crypto_version: Set(2),
             ..Default::default()
