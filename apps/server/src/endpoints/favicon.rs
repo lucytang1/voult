@@ -179,7 +179,7 @@ impl CacheState {
 
 /// Process-lifetime icon cache, built **once** outside the `HttpServer::new`
 /// closure (that closure runs per worker, so building it inside would give each
-/// worker its own copy — see `recovery::ChallengeThrottle` for the same trap).
+/// worker its own copy — see `rate_limit::RateLimiter` for the same trap).
 ///
 /// In-memory by design: a disk cache here would be a plaintext list of the
 /// caller's vault sites sitting on the server, which the trust boundary forbids.

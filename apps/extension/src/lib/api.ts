@@ -25,6 +25,9 @@ async function request<T>(path: string, init: RequestInit, serverUrl: string): P
     headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
   });
   if (!res.ok) {
+    if (res.status === 429) {
+      throw new RateLimitedError(path, res.headers.get("retry-after"));
+    }
     const body = await res.text().catch(() => "");
     throw new Error(`API ${path} failed: ${res.status} ${body.slice(0, 200)}`);
   }
@@ -118,6 +121,26 @@ export async function postLock(serverUrl = DEFAULT_SERVER_URL): Promise<{ lock_e
 
 export function isVersionConflict(error: unknown): boolean {
   return error instanceof Error && error.message.includes(" 409 ");
+}
+
+/**
+ * A 429 from the API. Transient by contract: the caller's intent is untouched,
+ * so it can be retried after the server's window. `retryAfterMs` comes from
+ * `Retry-After` and is clamped — a save must not be blocked for an hour by a
+ * registration-sized window.
+ */
+export class RateLimitedError extends Error {
+  readonly retryAfterMs: number;
+
+  constructor(path: string, retryAfterHeader: string | null) {
+    super(`API ${path} rate limited`);
+    this.name = "RateLimitedError";
+    const seconds = Number.parseInt(retryAfterHeader ?? "", 10);
+    this.retryAfterMs =
+      Number.isFinite(seconds) && seconds > 0
+        ? Math.min(seconds * 1_000, 60_000)
+        : 5_000;
+  }
 }
 
 export function isNetworkError(error: unknown): boolean {

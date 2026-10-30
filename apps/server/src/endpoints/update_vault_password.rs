@@ -1,5 +1,6 @@
 use crate::db::DbPool;
 use crate::entity::vault::{self, Entity as VaultEntity};
+use crate::rate_limit::{RateLimiter, Subject, VaultWrite};
 use crate::session_auth::session_vault_id;
 use actix_session::Session;
 use actix_web::{HttpResponse, post, web};
@@ -18,6 +19,7 @@ pub struct UpdatePasswordRequest {
 #[post("/vault/password")]
 pub async fn update_vault_password(
     pool: web::Data<DbPool>,
+    limiter: web::Data<RateLimiter>,
     session: Session,
     body: web::Json<UpdatePasswordRequest>,
 ) -> HttpResponse {
@@ -29,6 +31,13 @@ pub async fn update_vault_password(
             );
         }
     };
+    // Credential rotation is a write under the session's identity.
+    if let Err(rejected) = limiter
+        .charge::<VaultWrite>(&Subject::Vault(&vault_id))
+        .await
+    {
+        return rejected.into_response();
+    }
     let new_verifier = body.new_vault_verifier.clone();
     if new_verifier.trim().is_empty() {
         return HttpResponse::BadRequest().json(

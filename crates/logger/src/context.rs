@@ -55,6 +55,8 @@ pub enum ServerContext {
     Session,
     /// Recovery challenge/unlock/rewrap/regenerate.
     Recovery,
+    /// Application rate limits and abuse counters.
+    RateLimit,
     /// Favicon proxy and cache.
     Favicon,
     /// Cloud provider bindings, OAuth, tokens, and mirroring.
@@ -76,6 +78,7 @@ impl LogContext for ServerContext {
             Self::Pair => "pair",
             Self::Session => "session",
             Self::Recovery => "recovery",
+            Self::RateLimit => "rate-limit",
             Self::Favicon => "favicon",
             Self::Cloud => "cloud",
             Self::Migration => "migration",
@@ -130,6 +133,7 @@ mod tests {
             (ServerContext::Pair, "pair"),
             (ServerContext::Session, "session"),
             (ServerContext::Recovery, "recovery"),
+            (ServerContext::RateLimit, "rate-limit"),
             (ServerContext::Favicon, "favicon"),
             (ServerContext::Cloud, "cloud"),
             (ServerContext::Migration, "migration"),

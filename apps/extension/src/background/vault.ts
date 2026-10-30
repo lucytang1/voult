@@ -49,6 +49,7 @@ import {
   type VaultItem,
 } from "@voult/vault-core";
 import {
+  DEFAULT_SERVER_URL,
   fetchCryptoParams,
   fetchSession,
   fetchVault,
@@ -60,7 +61,7 @@ import {
   postLock,
   postLogout,
   postUpdateVault,
-  DEFAULT_SERVER_URL,
+  RateLimitedError,
 } from "../lib/api";
 import {
   getDeviceEnvelope,
@@ -1436,6 +1437,20 @@ async function pushSingleIntent(
         // the new snapshot on the next iteration.
         console.warn("[voult] save version conflict, retrying", { attempt });
         continue;
+      }
+      if (e instanceof RateLimitedError) {
+        // A 429 is transient: the intent has not been written, and the caller
+        // keeps its pending save so nothing is lost. Wait once per attempt (the
+        // server's window can be much longer than this loop), then stop and let
+        // the user retry rather than hammering a spent budget.
+        if (attempt < MAX_SAVE_RETRIES) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.min(e.retryAfterMs, 2_000)),
+          );
+          continue;
+        }
+        console.warn("[voult] save rate limited; pending save retained");
+        return { saved: false, offline: false };
       }
       throw e;
     }

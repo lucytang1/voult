@@ -5,6 +5,7 @@ use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 
 use crate::entity::vault::{self, Entity as Vault};
+use crate::rate_limit::{RateLimiter, Subject, VaultWrite};
 use crate::session_auth::session_vault_id;
 
 use crate::db::DbPool;
@@ -51,6 +52,7 @@ fn error_response(status: StatusCode, error_msg: &str, code: &'static str) -> Ht
 #[post("/update_vault")]
 pub async fn update_vault(
     pool: web::Data<DbPool>,
+    limiter: web::Data<RateLimiter>,
     session: Session,
     payload: web::Json<UpdateVaultRequest>,
 ) -> HttpResponse {
@@ -64,6 +66,17 @@ pub async fn update_vault(
             );
         }
     };
+
+    // Keyed on the SESSION's vault, never on anything in the body: a stolen
+    // cookie for one vault must not be able to spend another vault's budget.
+    // 60/min is generous for sync (which coalesces) and for a human edit pace,
+    // while bounding disk writes and the post-commit provider mirror.
+    if let Err(rejected) = limiter
+        .charge::<VaultWrite>(&Subject::Vault(&vault_id))
+        .await
+    {
+        return rejected.into_response();
+    }
 
     let request = payload.into_inner();
 
@@ -179,6 +192,7 @@ mod tests {
     use crate::db::DbPool;
     use crate::endpoints::register;
     use crate::entity::vault::Entity as VaultEntity;
+    use crate::rate_limit::Budget;
     use actix_web::App;
     use actix_web::cookie::{Cookie, Key};
     use actix_web::test;
@@ -226,6 +240,12 @@ mod tests {
             test::init_service(
                 App::new()
                     .app_data(web::Data::new($pool.clone()))
+                    // Registration is wired in to establish the session; keep
+                    // its budgets effectively unbounded — these tests are not
+                    // about rate limiting.
+                    .app_data(web::Data::new(crate::rate_limit::RateLimiter::permissive(
+                        $pool.clone(),
+                    )))
                     .wrap(
                         actix_session::SessionMiddleware::builder(
                             actix_session::storage::CookieSessionStore::default(),
@@ -422,5 +442,273 @@ mod tests {
             4,
             "the vault write stands regardless of mirror outcome"
         );
+    }
+
+    /// Builds the same app as `test_app!` but with an explicit limiter, so a
+    /// test can spend a small write budget.
+    macro_rules! app_with_limiter {
+        ($pool:expr, $limiter:expr) => {
+            test::init_service(
+                App::new()
+                    .app_data(web::Data::new($pool.clone()))
+                    .app_data(web::Data::new($limiter))
+                    .wrap(
+                        actix_session::SessionMiddleware::builder(
+                            actix_session::storage::CookieSessionStore::default(),
+                            Key::from(
+                                b"test-key-for-session-middleware-must-be-at-least-64-bytes-long!!",
+                            ),
+                        )
+                        .cookie_name("voult_session".to_string())
+                        .build(),
+                    )
+                    .service(register::register)
+                    .service(super::update_vault),
+            )
+            .await
+        };
+    }
+
+    fn write_limiter(pool: &DbPool, max: u32) -> RateLimiter {
+        RateLimiter::for_tests(
+            pool.clone(),
+            &[
+                ("VaultWrite", Budget::new(max, 60)),
+                ("RegisterIp", Budget::new(1_000, 60)),
+                ("RegisterGlobal", Budget::new(1_000, 60)),
+            ],
+        )
+    }
+
+    /// Vault writes are the disk-fill / mirror-amplification vector once a
+    /// session exists. The budget is per session vault.
+    #[actix_web::test]
+    async fn writes_are_limited_per_session_vault() {
+        let pool = test_pool().await;
+        let (app, cookie) = {
+            // Register through a permissive app, then hand the cookie to a
+            // budgeted app: registration itself is not what this test measures.
+            let permissive = test_app!(&pool);
+            let resp = test::call_service(
+                &permissive,
+                test::TestRequest::post()
+                    .uri("/register")
+                    .set_json(json!({
+                        "vault_id": VAULT_ID,
+                        "vault_verifier": "dmVyaWZpZXI=",
+                        "salt": "c2FsdA==",
+                        "iterations": 60000,
+                        "vaultiv": "aXY=",
+                        "vault": "Y2lwaGVydGV4dA==",
+                        "crypto_version": 2,
+                        "vault_key_wrap": "d3JhcA==",
+                        "vault_key_wrap_iv": "d2l2",
+                        "recovery_verifier": "cmVjb3ZlcnktdmVyaWZpZXI=",
+                        "recovery_salt": "cmVjb3Zlcnktc2FsdA==",
+                        "recovery_wrap": "cmVjb3Zlcnktd3JhcA==",
+                        "recovery_wrap_iv": "cmVjdml2",
+                    }))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let cookie: Cookie<'static> = resp
+                .response()
+                .cookies()
+                .find(|c| c.name() == "voult_session")
+                .expect("session cookie")
+                .clone()
+                .into_owned();
+            let budgeted = app_with_limiter!(&pool, write_limiter(&pool, 2));
+            (budgeted, cookie)
+        };
+
+        let first = test::call_service(&app, write_request(1, &cookie).to_request()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = test::call_service(&app, write_request(2, &cookie).to_request()).await;
+        assert_eq!(second.status(), StatusCode::OK);
+
+        let third = test::call_service(&app, write_request(3, &cookie).to_request()).await;
+        assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(third.headers().get("retry-after").is_some());
+        let body: serde_json::Value = test::read_body_json(third).await;
+        assert_eq!(body["code"], "RATE_LIMITED");
+
+        // The refused write must not have landed.
+        let stored = VaultEntity::find_by_id(VAULT_ID)
+            .one(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.version, 3);
+    }
+
+    /// Locking is a safety action and reads are not amplification: neither is
+    /// rate-limited, even when the write budget is exhausted.
+    #[actix_web::test]
+    async fn exhausted_write_budget_still_allows_lock_and_reads() {
+        let pool = test_pool().await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(write_limiter(&pool, 1)))
+                .wrap(
+                    actix_session::SessionMiddleware::builder(
+                        actix_session::storage::CookieSessionStore::default(),
+                        Key::from(
+                            b"test-key-for-session-middleware-must-be-at-least-64-bytes-long!!",
+                        ),
+                    )
+                    .cookie_name("voult_session".to_string())
+                    .build(),
+                )
+                .service(register::register)
+                .service(super::update_vault)
+                .service(crate::endpoints::lock::lock)
+                .service(crate::endpoints::get_vault::get_vault),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/register")
+                .set_json(json!({
+                    "vault_id": VAULT_ID,
+                    "vault_verifier": "dmVyaWZpZXI=",
+                    "salt": "c2FsdA==",
+                    "iterations": 60000,
+                    "vaultiv": "aXY=",
+                    "vault": "Y2lwaGVydGV4dA==",
+                    "crypto_version": 2,
+                    "vault_key_wrap": "d3JhcA==",
+                    "vault_key_wrap_iv": "d2l2",
+                    "recovery_verifier": "cmVjb3ZlcnktdmVyaWZpZXI=",
+                    "recovery_salt": "cmVjb3Zlcnktc2FsdA==",
+                    "recovery_wrap": "cmVjb3Zlcnktd3JhcA==",
+                    "recovery_wrap_iv": "cmVjdml2",
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let cookie: Cookie<'static> = resp
+            .response()
+            .cookies()
+            .find(|c| c.name() == "voult_session")
+            .expect("session cookie")
+            .clone()
+            .into_owned();
+
+        let ok = test::call_service(&app, write_request(1, &cookie).to_request()).await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let refused = test::call_service(&app, write_request(2, &cookie).to_request()).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let lock = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/lock")
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(lock.status(), StatusCode::OK);
+
+        let read = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/get_vault")
+                .cookie(cookie)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(read.status(), StatusCode::OK);
+    }
+
+    /// `/vault/password` writes the same vault row under the same identity, so
+    /// it shares the `VaultWrite` budget instead of handing a stolen cookie a
+    /// second allowance by switching endpoints.
+    #[actix_web::test]
+    async fn password_change_shares_the_write_budget() {
+        let pool = test_pool().await;
+
+        // Register through a permissive app; the budgeted app below serves the
+        // two write endpoints.
+        let permissive = test_app!(&pool);
+        let resp = test::call_service(
+            &permissive,
+            test::TestRequest::post()
+                .uri("/register")
+                .set_json(json!({
+                    "vault_id": VAULT_ID,
+                    "vault_verifier": "dmVyaWZpZXI=",
+                    "salt": "c2FsdA==",
+                    "iterations": 60000,
+                    "vaultiv": "aXY=",
+                    "vault": "Y2lwaGVydGV4dA==",
+                    "crypto_version": 2,
+                    "vault_key_wrap": "d3JhcA==",
+                    "vault_key_wrap_iv": "d2l2",
+                    "recovery_verifier": "cmVjb3ZlcnktdmVyaWZpZXI=",
+                    "recovery_salt": "cmVjb3Zlcnktc2FsdA==",
+                    "recovery_wrap": "cmVjb3Zlcnktd3JhcA==",
+                    "recovery_wrap_iv": "cmVjdml2",
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let cookie: Cookie<'static> = resp
+            .response()
+            .cookies()
+            .find(|c| c.name() == "voult_session")
+            .expect("session cookie")
+            .clone()
+            .into_owned();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(write_limiter(&pool, 1)))
+                .wrap(
+                    actix_session::SessionMiddleware::builder(
+                        actix_session::storage::CookieSessionStore::default(),
+                        Key::from(
+                            b"test-key-for-session-middleware-must-be-at-least-64-bytes-long!!",
+                        ),
+                    )
+                    .cookie_name("voult_session".to_string())
+                    .build(),
+                )
+                .service(super::update_vault)
+                .service(crate::endpoints::update_vault_password::update_vault_password),
+        )
+        .await;
+
+        let changed = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/vault/password")
+                .cookie(cookie.clone())
+                .set_json(json!({ "new_vault_verifier": "bmV3LXZlcmlmaWVy" }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(changed.status(), StatusCode::OK);
+
+        let write = test::call_service(&app, write_request(1, &cookie).to_request()).await;
+        assert_eq!(
+            write.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the password change already spent the shared write budget"
+        );
+
+        let stored = VaultEntity::find_by_id(VAULT_ID)
+            .one(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.vault_verifier, "bmV3LXZlcmlmaWVy");
     }
 }

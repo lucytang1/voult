@@ -17,12 +17,14 @@
  * | `SESSION_COOKIE_KEY` | Optional | `>=64` chars | per-install `session.key` (0600) | Panics if set but <64. |
  * | `STATIC_DIR` | Optional | path | bundle probe / `../client/dist` | — |
  * | `CORS_ORIGINS` | Optional | comma-separated | `http://localhost:8081,http://127.0.0.1:8081` | — |
+ * | `TRUSTED_PROXY_IPS` | Optional | comma-separated exact IPs | empty | Peers allowed to set `X-Forwarded-For`. Ignored from any other peer. Panics on an invalid IP. |
  * | `SESSION_COOKIE_SECURE` / `SAME_SITE` / `TTL_SECONDS` | Optional | — | `false` / `lax` / `604800` | — |
  * | Cloud provider keys | Optional | provider-specific | — | See `cloud::provider::CloudProvider::env_keys`; unconfigured providers are omitted from `/cloud/providers`. |
  */
 
 use std::{
     env, fs,
+    net::IpAddr,
     path::{Path, PathBuf},
 };
 
@@ -31,6 +33,9 @@ pub const ENV_DATABASE_URL: &str = "DATABASE_URL";
 pub const ENV_SESSION_COOKIE_KEY: &str = "SESSION_COOKIE_KEY";
 pub const ENV_STATIC_DIR: &str = "STATIC_DIR";
 pub const ENV_CORS_ORIGINS: &str = "CORS_ORIGINS";
+/// Exact peer addresses allowed to set `X-Forwarded-For`. Empty by default:
+/// forwarded headers from any other peer are client-controlled and ignored.
+pub const ENV_TRUSTED_PROXY_IPS: &str = "TRUSTED_PROXY_IPS";
 
 /// Config logging context.
 const CONFIG_LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Config);
@@ -247,7 +252,7 @@ pub fn database_url(env: Environment) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// helpers for other env vars (used by main.rs)
+// helpers for other env vars (used in main.rs)
 // ---------------------------------------------------------------------------
 
 /// Returns `Some(trimmed)` if set and non-empty, else `None`.
@@ -262,4 +267,26 @@ pub fn optional_env(key: &str) -> Option<String> {
 #[allow(dead_code)]
 pub fn require_env(key: &str) -> String {
     optional_env(key).unwrap_or_else(|| panic!("Required env var {key} is not set"))
+}
+
+/// Parses `TRUSTED_PROXY_IPS` into exact peer addresses.
+///
+/// The list is compared against the **socket peer** only. A forwarded header is
+/// honoured when — and only when — the connection came from one of these
+/// addresses; for any other peer `X-Forwarded-For` is attacker-controlled and
+/// ignored. Invalid entries panic on purpose: silently dropping one would
+/// either weaken a limit or hide a typo in a security control.
+pub fn trusted_proxies() -> Vec<IpAddr> {
+    let Some(raw) = optional_env(ENV_TRUSTED_PROXY_IPS) else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry.parse::<IpAddr>().unwrap_or_else(|_| {
+                panic!("{ENV_TRUSTED_PROXY_IPS} contains an invalid IP address: '{entry}'")
+            })
+        })
+        .collect()
 }

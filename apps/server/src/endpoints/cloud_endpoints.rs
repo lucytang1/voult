@@ -1677,6 +1677,10 @@ mod tests {
             let app = test::init_service(
                 App::new()
                     .app_data(web::Data::new($pool.clone()))
+                    // Registration is wired in to establish the session.
+                    .app_data(web::Data::new(
+                        crate::rate_limit::RateLimiter::permissive($pool.clone()),
+                    ))
                     .wrap(
                         actix_session::SessionMiddleware::builder(
                             actix_session::storage::CookieSessionStore::default(),

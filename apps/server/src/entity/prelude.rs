@@ -7,5 +7,6 @@ pub use super::cloud_pending_token::Entity as CloudPendingToken;
 pub use super::cloud_token::Entity as CloudToken;
 pub use super::oauth_state::Entity as OauthState;
 pub use super::pair_code::Entity as PairCode;
+pub use super::rate_limit::Entity as RateLimit;
 pub use super::session::Entity as Session;
 pub use super::vault::Entity as Vault;

@@ -270,6 +270,20 @@ async function unlockFromEnvelope(
 function toUnlockError(e: unknown): Error {
   const status = (e as { response?: { status?: number } })?.response?.status;
   const msg = (e as { response?: { data?: { error_msg?: string } } })?.response?.data?.error_msg;
+  if (status === 429) {
+    // A throttled login is not a rejected password. Say how long the server
+    // asked us to wait so the user does not keep retrying a correct password.
+    const raw = (e as { response?: { headers?: Record<string, unknown> } })?.response
+      ?.headers?.["retry-after"];
+    const seconds = Number.parseInt(String(raw ?? ""), 10);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      const minutes = Math.ceil(seconds / 60);
+      return new Error(
+        `Too many attempts. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+      );
+    }
+    return new Error("Too many attempts. Try again later.");
+  }
   if (status === 401 || status === 403 || /invalid/i.test(msg ?? "")) {
     return new Error("Incorrect password.");
   }
