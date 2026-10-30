@@ -33,6 +33,7 @@ import {
   importVaultKey,
   isValidVaultId,
   itemsInFolder,
+  MAX_VAULT_CIPHERTEXT_BYTES,
   mergeVault,
   originOfUrl,
   rankOriginMatch,
@@ -1413,6 +1414,14 @@ async function pushSingleIntent(
       return { saved: true, offline: false };
     }
     const encrypted = await encrypt(JSON.stringify({ name: merged.name, folders: merged.folders, items: merged.items }), key);
+    if (encrypted.cipher.length > MAX_VAULT_CIPHERTEXT_BYTES) {
+      // Refuse locally: the server caps the same value. Throwing (rather than
+      // silently dropping the save) keeps the pending intent and tells the
+      // popup why nothing was written.
+      throw new Error(
+        `This vault is too large to save (${encrypted.cipher.length} bytes; limit ${MAX_VAULT_CIPHERTEXT_BYTES}).`,
+      );
+    }
     if (sessionChanged()) throw new Error("Session changed; save aborted.");
     try {
       const response = await postUpdateVault(

@@ -1,5 +1,5 @@
 use actix_session::Session;
-use actix_web::{HttpResponse, get, post, web};
+use actix_web::{HttpResponse, get, http::StatusCode, post, web};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
 
@@ -7,12 +7,54 @@ use crate::cloud::error::{ProviderErrorKind, provider_error_response};
 use crate::cloud::provider::{self, CloudProvider, ProviderKind};
 use crate::cloud::{mirror, oauth_flow, package, token_store};
 use crate::db::DbPool;
+use crate::endpoints::validate;
 use crate::entity::cloud_binding::{self, Entity as CloudBindingEntity};
 use crate::entity::cloud_pending_token;
 use crate::entity::cloud_token::{self, Entity as CloudTokenEntity};
+use crate::error::error_response;
 use crate::session_auth::session_vault_id;
 
 const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Cloud);
+
+/// Decodes a client-uploaded Voult package, refusing anything larger than the
+/// largest package a maximum-size vault can produce.
+///
+/// The field is either base64 of the package JSON (what the client sends) or
+/// raw JSON bytes, which older callers used. The encoded length is checked
+/// first so a body near the 12 MiB transport cap cannot be decoded into a
+/// second multi-megabyte allocation before being refused.
+fn decode_package(raw: &str) -> Result<Vec<u8>, HttpResponse> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "package is required",
+            "INVALID_INPUT",
+        ));
+    }
+    if trimmed.len() > validate::MAX_PACKAGE_B64_LEN {
+        return Err(package_too_large());
+    }
+    let bytes = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, trimmed) {
+        Ok(b) => b,
+        Err(_) => trimmed.as_bytes().to_vec(),
+    };
+    if bytes.len() > validate::MAX_PACKAGE_LEN {
+        return Err(package_too_large());
+    }
+    Ok(bytes)
+}
+
+fn package_too_large() -> HttpResponse {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        &format!(
+            "package must be at most {} bytes",
+            validate::MAX_PACKAGE_LEN
+        ),
+        "INVALID_INPUT",
+    )
+}
 
 /// Resolve the single active provider from the binding. Before first binding,
 /// use the most recently connected credential; retained credentials for older
@@ -819,35 +861,26 @@ pub async fn cloud_create_vault(
         }
     };
 
-    let Some(kind) = selected_provider(pool.get_ref(), &vault_id).await else {
-        return provider_error_response(
-            ProviderErrorKind::AuthRequired,
-            "active cloud provider is not connected",
-        );
-    };
-
     // A requested vault ID is only a consistency check; authorization comes
     // from the session and must never be selected from the request body.
-    if body.vault_id != vault_id {
+    let Some(body_vault_id) = validate::canonical_uuid_string(&body.vault_id) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "vault_id must be a canonical UUID v4",
+            "INVALID_INPUT",
+        );
+    };
+    if body_vault_id != vault_id {
         return HttpResponse::Forbidden()
             .json(serde_json::json!({"error_msg":"vault_id does not match session","code":"VAULT_MISMATCH"}));
     }
-    if uuid::Uuid::parse_str(&body.vault_id).is_err() {
-        return HttpResponse::BadRequest()
-            .json(serde_json::json!({"error_msg":"invalid vault_id","code":"INVALID_INPUT"}));
-    }
 
-    if body.package.is_empty() {
-        return HttpResponse::BadRequest()
-            .json(serde_json::json!({"error_msg":"package required","code":"INVALID_INPUT"}));
-    }
-
-    // Package is expected to be base64 ciphertext JSON or raw JSON; decode base64 if possible else treat as raw
-    let package_bytes =
-        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &body.package) {
-            Ok(b) => b,
-            Err(_) => body.package.as_bytes().to_vec(),
-        };
+    // Package is expected to be base64 ciphertext JSON or raw JSON. The size
+    // cap is the same one `update_vault` enforces on the ciphertext it carries.
+    let package_bytes = match decode_package(&body.package) {
+        Ok(bytes) => bytes,
+        Err(resp) => return resp,
+    };
 
     // The package is encrypted, but its *envelope* (vault id, logical revision,
     // crypto parameters) is plaintext by design. Parsing it lets the server
@@ -867,6 +900,13 @@ pub async fn cloud_create_vault(
             );
             return provider_error_response(ProviderErrorKind::PackageInvalid, code);
         }
+    };
+
+    let Some(kind) = selected_provider(pool.get_ref(), &vault_id).await else {
+        return provider_error_response(
+            ProviderErrorKind::AuthRequired,
+            "active cloud provider is not connected",
+        );
     };
 
     let access_token =
@@ -890,7 +930,7 @@ pub async fn cloud_create_vault(
     // Idempotent by vault_id: an existing file is re-adopted rather than
     // duplicated.
     let created = match impl_
-        .create_vault_file(&access_token, &body.vault_id, &package_bytes)
+        .create_vault_file(&access_token, &vault_id, &package_bytes)
         .await
     {
         Ok(f) => f,
@@ -933,7 +973,7 @@ pub async fn cloud_create_vault(
         let _ = am.update(pool.get_ref()).await;
     } else {
         let am = cloud_binding::ActiveModel {
-            vault_id: Set(body.vault_id.clone()),
+            vault_id: Set(vault_id.clone()),
             provider_kind: Set(kind.as_str().to_string()),
             provider_account_id: Set(provider_acct),
             remote_file_id: Set(Some(created.file_id.clone())),
@@ -953,7 +993,7 @@ pub async fn cloud_create_vault(
     LOG.log(
         format_args!(
             "Created cloud vault {} file {} at logical revision {}",
-            &body.vault_id[..8],
+            &vault_id[..8],
             &created.file_id[..8.min(created.file_id.len())],
             header.logical_revision
         ),
@@ -972,7 +1012,7 @@ pub async fn cloud_create_vault(
     HttpResponse::Ok().json(CloudCreateVaultResponse {
         file_id: created.file_id,
         remote_revision: created.revision,
-        vault_id: body.vault_id.clone(),
+        vault_id,
     })
 }
 
@@ -1110,15 +1150,36 @@ pub async fn cloud_replace_vault(
         }
     };
 
-    let Some(kind) = selected_provider(pool.get_ref(), &vault_id).await else {
-        return provider_error_response(
-            ProviderErrorKind::AuthRequired,
-            "active cloud provider is not connected",
-        );
-    };
+    // A requested vault ID is only a consistency check; authorization comes
+    // from the session. Canonicalise before comparing so an uppercase spelling
+    // is a 400 rather than a confusing 403.
+    if let Some(raw) = &body.vault_id {
+        let Some(body_vault_id) = validate::canonical_uuid_string(raw) else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "vault_id must be a canonical UUID v4",
+                "INVALID_INPUT",
+            );
+        };
+        if body_vault_id != vault_id {
+            return HttpResponse::Forbidden().json(
+                serde_json::json!({"error_msg":"vault_id does not match session","code":"VAULT_MISMATCH"}),
+            );
+        }
+    }
+    if let Some(raw) = &body.file_id {
+        if let Err(e) = validate::require_remote_id("file_id", raw) {
+            return e.response();
+        }
+    }
+    if let Some(raw) = &body.if_match_revision {
+        if let Err(e) = validate::require_remote_id("if_match_revision", raw) {
+            return e.response();
+        }
+    }
 
     let file_id = if let Some(fid) = &body.file_id {
-        fid.clone()
+        fid.trim().to_string()
     } else if body.vault_id.is_some() {
         let binding = CloudBindingEntity::find()
             .filter(cloud_binding::Column::VaultId.eq(&vault_id))
@@ -1136,17 +1197,23 @@ pub async fn cloud_replace_vault(
         );
     };
 
-    let package_bytes =
-        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &body.package) {
-            Ok(b) => b,
-            Err(_) => body.package.as_bytes().to_vec(),
-        };
+    let package_bytes = match decode_package(&body.package) {
+        Ok(bytes) => bytes,
+        Err(resp) => return resp,
+    };
 
     // Envelope-level validation only (vault id + logical revision); the
     // snapshot stays opaque ciphertext.
     let header = match package::parse_header(&package_bytes, &vault_id) {
         Ok(h) => h,
         Err(code) => return provider_error_response(ProviderErrorKind::PackageInvalid, code),
+    };
+
+    let Some(kind) = selected_provider(pool.get_ref(), &vault_id).await else {
+        return provider_error_response(
+            ProviderErrorKind::AuthRequired,
+            "active cloud provider is not connected",
+        );
     };
 
     let access_token =
@@ -1232,16 +1299,29 @@ pub async fn cloud_upsert_binding(
             );
         }
     };
-    if uuid::Uuid::parse_str(&body.vault_id).is_err() {
-        return HttpResponse::BadRequest()
-            .json(serde_json::json!({"error_msg":"invalid vault_id","code":"INVALID_INPUT"}));
-    }
     // Authorization comes from the session, never the body. Without this check
     // a session for vault A could rewrite the Drive binding of vault B, which
     // would redirect B's disaster-recovery copy.
-    if body.vault_id != vault_id {
+    let Some(body_vault_id) = validate::canonical_uuid_string(&body.vault_id) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "vault_id must be a canonical UUID v4",
+            "INVALID_INPUT",
+        );
+    };
+    if body_vault_id != vault_id {
         return HttpResponse::Forbidden()
             .json(serde_json::json!({"error_msg":"vault_id does not match session","code":"VAULT_MISMATCH"}));
+    }
+    if let Some(raw) = &body.remote_file_id {
+        if let Err(e) = validate::require_remote_id("remote_file_id", raw) {
+            return e.response();
+        }
+    }
+    if let Some(raw) = &body.remote_revision {
+        if let Err(e) = validate::require_remote_id("remote_revision", raw) {
+            return e.response();
+        }
     }
     let kind = match ProviderKind::parse(&query.provider) {
         Ok(kind) => kind,
@@ -1328,7 +1408,7 @@ pub async fn cloud_upsert_binding(
     };
     let now = chrono::Utc::now();
     let existing = CloudBindingEntity::find()
-        .filter(cloud_binding::Column::VaultId.eq(&body.vault_id))
+        .filter(cloud_binding::Column::VaultId.eq(&vault_id))
         .one(pool.get_ref())
         .await
         .unwrap_or(None);
@@ -1346,7 +1426,7 @@ pub async fn cloud_upsert_binding(
     // local vault's current version. Recording that keeps Settings from
     // reporting a fresh import as an unmirrored backup — and the next vault
     // write will advance it normally.
-    let current_version = crate::entity::vault::Entity::find_by_id(&body.vault_id)
+    let current_version = crate::entity::vault::Entity::find_by_id(&vault_id)
         .one(pool.get_ref())
         .await
         .ok()
@@ -1385,7 +1465,7 @@ pub async fn cloud_upsert_binding(
         }
     } else {
         let am = cloud_binding::ActiveModel {
-            vault_id: Set(body.vault_id.clone()),
+            vault_id: Set(vault_id.clone()),
             provider_kind: Set(kind.as_str().to_string()),
             provider_account_id: Set(provider_acct),
             remote_file_id: Set(Some(remote_file_id.clone())),
@@ -1418,7 +1498,7 @@ pub async fn cloud_upsert_binding(
     if let Some(claim) = claim {
         mirror::mirror_held(pool.get_ref(), claim, mirror::MirrorMode::Auto).await;
     }
-    HttpResponse::Ok().json(serde_json::json!({"upserted": true, "vault_id": body.vault_id, "provider_kind": kind.as_str(), "remote_file_id": remote_file_id, "remote_revision": remote_revision}))
+    HttpResponse::Ok().json(serde_json::json!({"upserted": true, "vault_id": vault_id, "provider_kind": kind.as_str(), "remote_file_id": remote_file_id, "remote_revision": remote_revision}))
 }
 
 #[derive(Deserialize)]
@@ -1577,6 +1657,26 @@ pub async fn cloud_delete_vault(
         }
     };
 
+    if let Some(raw) = &body.vault_id {
+        let Some(body_vault_id) = validate::canonical_uuid_string(raw) else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "vault_id must be a canonical UUID v4",
+                "INVALID_INPUT",
+            );
+        };
+        if body_vault_id != vault_id {
+            return HttpResponse::Forbidden().json(
+                serde_json::json!({"error_msg":"vault_id does not match session","code":"VAULT_MISMATCH"}),
+            );
+        }
+    }
+    if let Some(raw) = &body.file_id {
+        if let Err(e) = validate::require_remote_id("file_id", raw) {
+            return e.response();
+        }
+    }
+
     let Some(kind) = selected_provider(pool.get_ref(), &vault_id).await else {
         return provider_error_response(
             ProviderErrorKind::AuthRequired,
@@ -1585,7 +1685,7 @@ pub async fn cloud_delete_vault(
     };
 
     let file_id = if let Some(fid) = &body.file_id {
-        fid.clone()
+        fid.trim().to_string()
     } else if body.vault_id.is_some() {
         let binding = CloudBindingEntity::find()
             .filter(cloud_binding::Column::VaultId.eq(&vault_id))
@@ -1619,12 +1719,10 @@ pub async fn cloud_delete_vault(
     match impl_.delete_vault_file(&access_token, &file_id).await {
         Ok(()) => {
             // Remove binding but keep vault local per spec (disconnect does not delete local)
-            if let Some(vid) = &body.vault_id {
-                let _ = CloudBindingEntity::delete_many()
-                    .filter(cloud_binding::Column::VaultId.eq(vid))
-                    .exec(pool.get_ref())
-                    .await;
-            }
+            let _ = CloudBindingEntity::delete_many()
+                .filter(cloud_binding::Column::VaultId.eq(&vault_id))
+                .exec(pool.get_ref())
+                .await;
             HttpResponse::Ok().json(serde_json::json!({"deleted": true, "file_id": file_id}))
         }
         Err(e) => e.into_response(),
@@ -1648,6 +1746,12 @@ mod tests {
         let pool = Database::connect("sqlite::memory:").await.expect("connect");
         migration::Migrator::up(&pool, None).await.expect("migrate");
         pool
+    }
+
+    /// Deterministic base64 of an exact byte length.
+    fn b64_of(len: usize, fill: u8) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(vec![fill; len])
     }
 
     /// A minimal vault row, for tests that only exercise binding bookkeeping.
@@ -1677,6 +1781,7 @@ mod tests {
             let app = test::init_service(
                 App::new()
                     .app_data(web::Data::new($pool.clone()))
+                    .app_data(crate::endpoints::json_config())
                     .wrap(
                         actix_session::SessionMiddleware::builder(
                             actix_session::storage::CookieSessionStore::default(),
@@ -1698,18 +1803,18 @@ mod tests {
                     .uri("/register")
                     .set_json(json!({
                         "vault_id": VAULT_ID,
-                        "vault_verifier": "dmVyaWZpZXI=",
-                        "salt": "c2FsdA==",
+                        "vault_verifier": b64_of(32, 0xA4),
+                        "salt": b64_of(16, 0xA3),
                         "iterations": 60000,
-                        "vaultiv": "aXY=",
-                        "vault": "Y2lwaGVydGV4dA==",
+                        "vaultiv": b64_of(12, 0xA2),
+                        "vault": b64_of(64, 0xA1),
                         "crypto_version": 2,
-                        "vault_key_wrap": "d3JhcA==",
-                        "vault_key_wrap_iv": "d2l2",
-                        "recovery_verifier": "cmVjb3ZlcnktdmVyaWZpZXI=",
-                        "recovery_salt": "cmVjb3Zlcnktc2FsdA==",
-                        "recovery_wrap": "cmVjb3Zlcnktd3JhcA==",
-                        "recovery_wrap_iv": "cmVjdml2",
+                        "vault_key_wrap": b64_of(48, 0xA5),
+                        "vault_key_wrap_iv": b64_of(12, 0xA6),
+                        "recovery_verifier": b64_of(32, 0xB1),
+                        "recovery_salt": b64_of(16, 0xB2),
+                        "recovery_wrap": b64_of(48, 0xB3),
+                        "recovery_wrap_iv": b64_of(12, 0xB4),
                     }))
                     .to_request(),
             )
@@ -1811,5 +1916,36 @@ mod tests {
             "the remote copy is preserved; only the credential is gone"
         );
         assert_eq!(after.mirrored_vault_version, Some(1));
+    }
+}
+
+#[cfg(test)]
+mod package_cap_tests {
+    use super::*;
+
+    /// The package cap is enforced twice: on the encoded string before any
+    /// decode, and on the decoded bytes before JSON parsing. The client never
+    /// sends a package larger than `MAX_PACKAGE_LEN`, so a bigger one is either
+    /// hostile or corrupt.
+    #[test]
+    fn decode_package_enforces_the_size_cap() {
+        use base64::Engine as _;
+
+        // Encoded length over the cap: refused without decoding.
+        let oversized = "A".repeat(validate::MAX_PACKAGE_B64_LEN + 4);
+        assert!(decode_package(&oversized).is_err());
+
+        // A normal base64 package.
+        let small = base64::engine::general_purpose::STANDARD.encode(b"{}");
+        assert_eq!(decode_package(&small).unwrap(), b"{}");
+
+        // Raw JSON, the legacy accepted form.
+        assert_eq!(decode_package("{}").unwrap(), b"{}");
+
+        // Decoded bytes over the cap (raw form, under the encoded cap).
+        let raw = String::from_utf8(vec![b'x'; validate::MAX_PACKAGE_LEN + 1]).unwrap();
+        assert!(decode_package(&raw).is_err());
+
+        assert!(decode_package("   ").is_err());
     }
 }

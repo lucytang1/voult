@@ -39,6 +39,10 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::db::DbPool;
+use crate::endpoints::validate::{
+    CHALLENGE_LEN, IV_LEN, KEY_WRAP_LEN, PROOF_LEN, SALT_LEN, VERIFIER_LEN, canonical_uuid_string,
+    decode_exact, kdf_ok,
+};
 
 // Aliased: the module is `recovery_challenge`, which would otherwise collide with
 // this file's `recovery_challenge` handler.
@@ -65,22 +69,12 @@ const CHALLENGE_TTL_SECS: i64 = 10 * 60;
 /// spam (§13): a caller can make at most this many live challenges per vault.
 const MAX_LIVE_CHALLENGES_PER_VAULT: u64 = 3;
 
-/// PBKDF2 iteration floor for the credential the rewrap installs. Mirrors the
-/// client's PBKDF2_ITERATIONS; anything lower is rejected rather than stored.
-const MIN_NEW_ITERATIONS: i32 = 60_000;
-/// Upper bound so a hostile or buggy client cannot pin the server into an
-/// absurd KDF cost that later makes every password login slow.
-const MAX_NEW_ITERATIONS: i32 = 2_000_000;
+/// PBKDF2 iterations are bounded by `endpoints::validate` (write-time floor and
+/// ceiling); this module only asks whether a proposed count is acceptable.
 
-/// Exact byte lengths the client is required to produce. Validated before any
-/// DB work so a malformed body cannot reach the vault row.
-const SALT_LEN: usize = 16;
-const IV_LEN: usize = 12;
-/// 32-byte vault key + 16-byte GCM tag.
-const WRAP_LEN: usize = 48;
-const VERIFIER_LEN: usize = 32;
-const PROOF_LEN: usize = 32;
-const CHALLENGE_LEN: usize = 32;
+/// Exact byte lengths the client is required to produce. The values live in
+/// `endpoints::validate`; they are imported here so the recovery flow and the
+/// vault-creation flow cannot disagree about them.
 
 // --- Per-IP throttle for the unauthenticated challenge endpoint -------------
 
@@ -213,26 +207,6 @@ fn challenge_hash(vault_id: &str, challenge_b64: &str) -> String {
 
 fn hex_of(bytes: impl AsRef<[u8]>) -> String {
     bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Base64-decodes to exactly `len` bytes, or `None`.
-fn decode_exact(s: &str, len: usize) -> Option<Vec<u8>> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(s.trim())
-        .ok()?;
-    if bytes.len() != len {
-        return None;
-    }
-    Some(bytes)
-}
-
-/// Parses a canonical (lowercase, hyphenated) UUID. Rejects the uppercase and
-/// braced forms so a caller cannot produce two distinct rows for one vault by
-/// varying the spelling of the same id.
-fn canonical_uuid(raw: &str) -> Option<String> {
-    let parsed = Uuid::parse_str(raw.trim()).ok()?;
-    let canonical = parsed.to_string();
-    (canonical == raw.trim()).then_some(canonical)
 }
 
 /// Deletes every expired challenge row, everywhere.
@@ -514,7 +488,7 @@ pub async fn recovery_challenge(
     }
 
     let request = payload.into_inner();
-    let Some(vault_id) = canonical_uuid(&request.vault_id) else {
+    let Some(vault_id) = canonical_uuid_string(&request.vault_id) else {
         return error_response(StatusCode::BAD_REQUEST, "invalid vault_id", "INVALID_INPUT");
     };
 
@@ -634,12 +608,22 @@ pub async fn recovery_unlock(
     payload: web::Json<UnlockRequest>,
 ) -> HttpResponse {
     let request = payload.into_inner();
-    let Some(vault_id) = canonical_uuid(&request.vault_id) else {
+    let Some(vault_id) = canonical_uuid_string(&request.vault_id) else {
         return auth_failed();
     };
     let Some(proof) = decode_exact(&request.proof, PROOF_LEN) else {
         return auth_failed();
     };
+    // Shape-check the selector before the query, but keep the failure surface
+    // uniform: a value that cannot name a challenge must be indistinguishable
+    // from an unknown one (see `unlock_failures_are_byte_identical`).
+    if canonical_uuid_string(&request.selector).is_none() {
+        LOG.warn(
+            format_args!("recovery unlock rejected: malformed selector"),
+            logger::Metadata::new(),
+        );
+        return auth_failed();
+    }
 
     let Some(challenge) =
         load_live_challenge(pool.get_ref(), request.selector.trim(), &vault_id).await
@@ -752,12 +736,21 @@ pub async fn recovery_rewrap(
     let request = payload.into_inner();
 
     // --- Validate every input before touching the database. ---
-    let Some(vault_id) = canonical_uuid(&request.vault_id) else {
+    let Some(vault_id) = canonical_uuid_string(&request.vault_id) else {
         return error_response(StatusCode::BAD_REQUEST, "invalid vault_id", "INVALID_INPUT");
     };
     let Some(proof) = decode_exact(&request.proof, PROOF_LEN) else {
         return error_response(StatusCode::BAD_REQUEST, "invalid proof", "INVALID_INPUT");
     };
+    // A selector that cannot name a challenge is a proof failure, not a body
+    // failure: same 401 as a wrong proof, so shape cannot become an oracle.
+    if canonical_uuid_string(&request.selector).is_none() {
+        LOG.warn(
+            format_args!("recovery rewrap rejected: malformed selector"),
+            logger::Metadata::new(),
+        );
+        return auth_failed();
+    }
     if decode_exact(&request.new_salt, SALT_LEN).is_none() {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -774,7 +767,7 @@ pub async fn recovery_rewrap(
     }
     // Paired or not at all: a half-written password envelope would leave the
     // vault unwrappable by any password.
-    if decode_exact(&request.new_vault_key_wrap, WRAP_LEN).is_none()
+    if decode_exact(&request.new_vault_key_wrap, KEY_WRAP_LEN).is_none()
         || decode_exact(&request.new_vault_key_wrap_iv, IV_LEN).is_none()
     {
         return error_response(
@@ -783,7 +776,7 @@ pub async fn recovery_rewrap(
             "INVALID_INPUT",
         );
     }
-    if !(MIN_NEW_ITERATIONS..=MAX_NEW_ITERATIONS).contains(&request.new_iterations) {
+    if !kdf_ok(request.new_iterations) {
         return error_response(
             StatusCode::BAD_REQUEST,
             "new_iterations out of range",
@@ -990,7 +983,7 @@ pub async fn recovery_regenerate(
             return crate::error::session_required();
         }
     };
-    let Some(vault_id) = canonical_uuid(&request.vault_id) else {
+    let Some(vault_id) = canonical_uuid_string(&request.vault_id) else {
         return error_response(StatusCode::BAD_REQUEST, "invalid vault_id", "INVALID_INPUT");
     };
     if vault_id != session_vault {
@@ -1008,6 +1001,14 @@ pub async fn recovery_regenerate(
     let Some(proof) = decode_exact(&request.proof, PROOF_LEN) else {
         return error_response(StatusCode::BAD_REQUEST, "invalid proof", "INVALID_INPUT");
     };
+    // Same uniform failure as a wrong proof (see the rewrap handler).
+    if canonical_uuid_string(&request.selector).is_none() {
+        LOG.warn(
+            format_args!("recovery regenerate rejected: malformed selector"),
+            logger::Metadata::new(),
+        );
+        return auth_failed();
+    }
     if decode_exact(&request.new_recovery_verifier, VERIFIER_LEN).is_none() {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -1023,7 +1024,7 @@ pub async fn recovery_regenerate(
         );
     }
     // Paired or not at all, exactly as for the rewrap.
-    if decode_exact(&request.new_recovery_wrap, WRAP_LEN).is_none()
+    if decode_exact(&request.new_recovery_wrap, KEY_WRAP_LEN).is_none()
         || decode_exact(&request.new_recovery_wrap_iv, IV_LEN).is_none()
     {
         return error_response(
@@ -1457,6 +1458,9 @@ mod tests {
             unlock_body(VAULT_ID, &selector, &bad),
             // unknown selector
             unlock_body(VAULT_ID, "99999999-9999-4999-8999-999999999999", &good),
+            // malformed selector: shape is caller-side, so it must not become a
+            // distinguishable 400 on this endpoint
+            unlock_body(VAULT_ID, "not-a-uuid", &good),
             // selector issued for a different vault
             unlock_body(OTHER_VAULT_ID, &selector, &good),
             // proof computed for a different vault id
@@ -1749,6 +1753,10 @@ mod tests {
         let mut c = rewrap_body(VAULT_ID, &selector, &proof, 0);
         c["vault_id"] = serde_json::Value::String("not-a-uuid".to_string());
         cases.push(("malformed vault_id", c));
+
+        let mut c = rewrap_body(VAULT_ID, &selector, &proof, 0);
+        c["selector"] = serde_json::Value::String("not-a-uuid".to_string());
+        cases.push(("malformed selector", c));
 
         let mut c = rewrap_body(VAULT_ID, &selector, &proof, 0);
         c["proof"] = serde_json::Value::String(b64_of(32, 0xEE));
@@ -2048,7 +2056,7 @@ mod tests {
                         "salt": b64_of(16, 0xA3),
                         "iterations": 60000,
                         "vaultiv": b64_of(12, 0xA2),
-                        "vault": b64_of(16, 0xA1),
+                        "vault": b64_of(64, 0xA1),
                         "crypto_version": 2,
                         "vault_key_wrap": b64_of(48, 0xA5),
                         "vault_key_wrap_iv": b64_of(12, 0xA6),

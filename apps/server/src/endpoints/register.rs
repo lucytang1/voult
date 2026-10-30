@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::DbPool;
+use crate::endpoints::validate::{self, VaultMaterial};
 use crate::entity::vault::ActiveModel as VaultActiveModel;
+use crate::error::error_response;
 use crate::id_codec::uuid_to_db;
 use crate::session_auth::establish_vault_session;
 
@@ -22,8 +24,10 @@ pub struct RegisterRequest {
     pub iterations: i32,
     pub vaultiv: String,
     pub vault: String,
-    #[serde(default)]
-    pub crypto_version: Option<i32>,
+    // Required, and only ever `SUPPORTED_CRYPTO_VERSION`. A default here is how
+    // a v1 row (no envelope, unrestorable, unrecoverable) used to be creatable
+    // by simply omitting the field.
+    pub crypto_version: i32,
     // Encrypted envelope holding the vault key, wrapped by the master password.
     // Required: without it the vault can never be unlocked.
     pub vault_key_wrap: String,
@@ -59,19 +63,6 @@ pub struct RegisterResponse {
     pub vault_key_wrap_iv: Option<String>,
 }
 
-#[derive(Serialize)]
-struct ErrorResponse {
-    error_msg: String,
-    code: &'static str,
-}
-
-fn error_response(status: StatusCode, error_msg: &str, code: &'static str) -> HttpResponse {
-    HttpResponse::build(status).json(ErrorResponse {
-        error_msg: error_msg.to_string(),
-        code,
-    })
-}
-
 #[post("/register")]
 pub async fn register(
     pool: web::Data<DbPool>,
@@ -80,49 +71,32 @@ pub async fn register(
 ) -> HttpResponse {
     let request = payload.into_inner();
 
-    // Validate the credentials BEFORE the transaction so a rejected request
+    // Validate every credential BEFORE the transaction so a rejected request
     // never opens one, and never reaches a vault insert. Anything missing here
-    // is a client bug, not a partial success.
-    if request.vault_id.trim().is_empty()
-        || request.vault_verifier.trim().is_empty()
-        || request.salt.trim().is_empty()
-    {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "vault_id, vault_verifier and salt are required",
-            "INVALID_INPUT",
-        );
-    }
-    if request.vault_key_wrap.trim().is_empty() || request.vault_key_wrap_iv.trim().is_empty() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "vault_key_wrap and vault_key_wrap_iv are required",
-            "INVALID_INPUT",
-        );
-    }
-    // Recovery is mandatory: paired or not at all, so a half-written recovery
-    // envelope can never be stored alongside a live vault.
-    if request.recovery_verifier.trim().is_empty()
-        || request.recovery_salt.trim().is_empty()
-        || request.recovery_wrap.trim().is_empty()
-        || request.recovery_wrap_iv.trim().is_empty()
-    {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "recovery_verifier, recovery_salt, recovery_wrap and recovery_wrap_iv are required",
-            "INVALID_INPUT",
-        );
-    }
-
-    // The vault ID must be a well-formed UUID the client generated.
-    let vault_uuid = match Uuid::parse_str(&request.vault_id) {
-        Ok(u) => u,
-        Err(_) => {
-            return error_response(StatusCode::BAD_REQUEST, "invalid vault_id", "INVALID_INPUT");
-        }
+    // is a client bug, not a partial success. The 12 crypto fields share one
+    // validator with POST /vaults so the two creation paths cannot drift.
+    let vault_uuid = match validate::require_uuid("vault_id", &request.vault_id) {
+        Ok(id) => id,
+        Err(e) => return e.response(),
     };
+    if let Err(e) = validate::validate_vault_material(&VaultMaterial {
+        vault_verifier: &request.vault_verifier,
+        salt: &request.salt,
+        iterations: request.iterations,
+        vault_iv: &request.vaultiv,
+        vault: &request.vault,
+        crypto_version: request.crypto_version,
+        vault_key_wrap: &request.vault_key_wrap,
+        vault_key_wrap_iv: &request.vault_key_wrap_iv,
+        recovery_verifier: &request.recovery_verifier,
+        recovery_salt: &request.recovery_salt,
+        recovery_wrap: &request.recovery_wrap,
+        recovery_wrap_iv: &request.recovery_wrap_iv,
+    }) {
+        return e.response();
+    }
 
-    let crypto_version = request.crypto_version.unwrap_or(1);
+    let crypto_version = request.crypto_version;
 
     let tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -308,22 +282,30 @@ mod tests {
         };
     }
 
+    /// Deterministic base64 of an exact byte length, with a recognisable fill
+    /// so an unintended write is obvious in a diff.
+    fn b64_of(len: usize, fill: u8) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(vec![fill; len])
+    }
+
     /// A complete, valid registration body.
     fn valid_body() -> serde_json::Value {
         serde_json::json!({
             "vault_id": VAULT_ID,
-            "vault_verifier": "dmVyaWZpZXI=",
-            "salt": "c2FsdA==",
+            "vault_verifier": b64_of(32, 0xA4),
+            "salt": b64_of(16, 0xA3),
             "iterations": 60000,
-            "vaultiv": "aXY=",
-            "vault": "Y2lwaGVydGV4dA==",
+            "vaultiv": b64_of(12, 0xA2),
+            // 64 bytes: comfortably above the 17-byte ciphertext floor.
+            "vault": b64_of(64, 0xA1),
             "crypto_version": 2,
-            "vault_key_wrap": "d3JhcA==",
-            "vault_key_wrap_iv": "d2l2",
-            "recovery_verifier": "cmVjb3ZlcnktdmVyaWZpZXI=",
-            "recovery_salt": "cmVjb3Zlcnktc2FsdA==",
-            "recovery_wrap": "cmVjb3Zlcnktd3JhcA==",
-            "recovery_wrap_iv": "cmVjdml2",
+            "vault_key_wrap": b64_of(48, 0xA5),
+            "vault_key_wrap_iv": b64_of(12, 0xA6),
+            "recovery_verifier": b64_of(32, 0xB1),
+            "recovery_salt": b64_of(16, 0xB2),
+            "recovery_wrap": b64_of(48, 0xB3),
+            "recovery_wrap_iv": b64_of(12, 0xB4),
         })
     }
 
@@ -356,11 +338,14 @@ mod tests {
 
         assert_eq!(
             v.recovery_verifier.as_deref(),
-            Some("cmVjb3ZlcnktdmVyaWZpZXI=")
+            Some(b64_of(32, 0xB1).as_str())
         );
-        assert_eq!(v.recovery_salt.as_deref(), Some("cmVjb3Zlcnktc2FsdA=="));
-        assert_eq!(v.recovery_wrap.as_deref(), Some("cmVjb3Zlcnktd3JhcA=="));
-        assert_eq!(v.recovery_wrap_iv.as_deref(), Some("cmVjdml2"));
+        assert_eq!(v.recovery_salt.as_deref(), Some(b64_of(16, 0xB2).as_str()));
+        assert_eq!(v.recovery_wrap.as_deref(), Some(b64_of(48, 0xB3).as_str()));
+        assert_eq!(
+            v.recovery_wrap_iv.as_deref(),
+            Some(b64_of(12, 0xB4).as_str())
+        );
         assert!(
             v.recovery_created_at.is_some(),
             "recovery_created_at must be stamped at registration"
@@ -368,8 +353,11 @@ mod tests {
         assert_eq!(v.credential_version, 0);
 
         // The password envelope is untouched by the recovery additions.
-        assert_eq!(v.vault_key_wrap.as_deref(), Some("d3JhcA=="));
-        assert_eq!(v.vault_key_wrap_iv.as_deref(), Some("d2l2"));
+        assert_eq!(v.vault_key_wrap.as_deref(), Some(b64_of(48, 0xA5).as_str()));
+        assert_eq!(
+            v.vault_key_wrap_iv.as_deref(),
+            Some(b64_of(12, 0xA6).as_str())
+        );
     }
 
     /// M2: a fresh vault reports has_recovery and hands back the salt a
@@ -400,7 +388,7 @@ mod tests {
         let body: serde_json::Value = test::read_body_json(resp).await;
 
         assert_eq!(body["has_recovery"], true);
-        assert_eq!(body["recovery_salt"], "cmVjb3Zlcnktc2FsdA==");
+        assert_eq!(body["recovery_salt"], b64_of(16, 0xB2));
         // The envelope and verifier must NOT be exposed pre-auth.
         assert!(body.get("recovery_wrap").is_none());
         assert!(body.get("recovery_verifier").is_none());
@@ -471,6 +459,167 @@ mod tests {
         assert!(find_vault(&pool).await.is_none());
     }
 
+    /// Every field is a shape, not a suggestion. One mutation per field: the
+    /// request must be refused with the documented envelope, no vault row, and
+    /// no session cookie — i.e. nothing may happen before validation.
+    #[actix_web::test]
+    async fn registration_rejects_every_malformed_field_before_writing() {
+        let table: &[(&str, &str, serde_json::Value)] = &[
+            (
+                "uppercase vault_id",
+                "vault_id",
+                serde_json::json!(VAULT_ID.to_uppercase()),
+            ),
+            (
+                "non-v4 vault_id",
+                "vault_id",
+                serde_json::json!("3f2504e0-4f89-11d3-9a0c-0305e82c3301"),
+            ),
+            (
+                "short vault_verifier",
+                "vault_verifier",
+                serde_json::json!(b64_of(8, 0xA4)),
+            ),
+            ("non-base64 salt", "salt", serde_json::json!("not base64!!")),
+            (
+                "iterations below floor",
+                "iterations",
+                serde_json::json!(59_999),
+            ),
+            (
+                "iterations above ceiling",
+                "iterations",
+                serde_json::json!(2_000_001),
+            ),
+            (
+                "short vaultiv",
+                "vaultiv",
+                serde_json::json!(b64_of(8, 0xA2)),
+            ),
+            ("empty vault", "vault", serde_json::json!("")),
+            (
+                "oversized vault",
+                "vault",
+                serde_json::json!(b64_of(validate::MAX_CIPHERTEXT_LEN + 1, 0xA1)),
+            ),
+            ("crypto_version 1", "crypto_version", serde_json::json!(1)),
+            ("crypto_version 3", "crypto_version", serde_json::json!(3)),
+            (
+                "short vault_key_wrap",
+                "vault_key_wrap",
+                serde_json::json!(b64_of(32, 0xA5)),
+            ),
+            (
+                "short vault_key_wrap_iv",
+                "vault_key_wrap_iv",
+                serde_json::json!(b64_of(8, 0xA6)),
+            ),
+            (
+                "short recovery_verifier",
+                "recovery_verifier",
+                serde_json::json!(b64_of(16, 0xB1)),
+            ),
+            (
+                "short recovery_salt",
+                "recovery_salt",
+                serde_json::json!(b64_of(8, 0xB2)),
+            ),
+            (
+                "short recovery_wrap",
+                "recovery_wrap",
+                serde_json::json!(b64_of(32, 0xB3)),
+            ),
+            (
+                "short recovery_wrap_iv",
+                "recovery_wrap_iv",
+                serde_json::json!(b64_of(8, 0xB4)),
+            ),
+        ];
+
+        for (name, field, value) in table {
+            let pool = test_pool().await;
+            let app = test_app!(&pool);
+
+            let mut body = valid_body();
+            body[field] = value.clone();
+
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/register")
+                    .set_json(body)
+                    .to_request(),
+            )
+            .await;
+
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{name}");
+            assert!(
+                !resp
+                    .response()
+                    .cookies()
+                    .any(|c| c.name() == "voult_session"),
+                "{name} must not establish a session"
+            );
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["code"], "INVALID_INPUT", "{name}");
+            assert!(
+                body["error_msg"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(field),
+                "{name}: the message must name the offending field"
+            );
+            assert!(
+                find_vault(&pool).await.is_none(),
+                "{name} must not create a vault row"
+            );
+        }
+    }
+
+    /// The cap is a ceiling, not a target: exactly 4 MiB is still a valid row.
+    #[actix_web::test]
+    async fn registration_accepts_a_max_size_ciphertext() {
+        let pool = test_pool().await;
+        let app = test_app!(&pool);
+
+        let mut body = valid_body();
+        body["vault"] = serde_json::json!(b64_of(validate::MAX_CIPHERTEXT_LEN, 0xA1));
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/register")
+                .set_json(body)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    /// An omitted `crypto_version` is not "default to something": it is a
+    /// missing statement about how the ciphertext must be interpreted.
+    #[actix_web::test]
+    async fn registration_requires_explicit_crypto_version() {
+        let pool = test_pool().await;
+        let app = test_app!(&pool);
+
+        let mut body = valid_body();
+        body.as_object_mut().unwrap().remove("crypto_version");
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/register")
+                .set_json(body)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], "INVALID_INPUT");
+        assert!(find_vault(&pool).await.is_none());
+    }
+
     /// A duplicate vault_id still conflicts, and the conflict must not disturb
     /// the recovery material already stored on the original row.
     #[actix_web::test]
@@ -489,7 +638,7 @@ mod tests {
         assert_eq!(first.status(), StatusCode::CREATED);
 
         let mut second = valid_body();
-        second["recovery_verifier"] = serde_json::Value::String("dGFtcGVyZWQ=".to_string());
+        second["recovery_verifier"] = serde_json::Value::String(b64_of(32, 0xEE));
         let resp = test::call_service(
             &app,
             test::TestRequest::post()
@@ -503,7 +652,7 @@ mod tests {
         let v = find_vault(&pool).await.expect("original row survives");
         assert_eq!(
             v.recovery_verifier.as_deref(),
-            Some("cmVjb3ZlcnktdmVyaWZpZXI="),
+            Some(b64_of(32, 0xB1).as_str()),
             "the losing registration must not overwrite recovery"
         );
         assert_eq!(v.credential_version, 0);

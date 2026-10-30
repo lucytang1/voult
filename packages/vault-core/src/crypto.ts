@@ -9,6 +9,8 @@
 //  - uuid() prefers crypto.randomUUID, then getRandomValues, and only then a
 //    (non-cryptographic, clearly marked) Math.random fallback.
 
+import { assertKdfParams } from "./bounds.js";
+
 const ITERATIONS = 60000;
 
 export const CRYPTO_VERSION = 2;
@@ -80,6 +82,12 @@ async function deriveRootKey(
   saltPwdBytes: Uint8Array,
   iterations: number,
 ): Promise<Uint8Array> {
+  // Single choke point for every password-bearing path (createAuthKey,
+  // derivePasswordWrappingKey, and therefore signup, login, recovery rewrap and
+  // cloud import). Bounds are checked before WebCrypto does any work, so a
+  // hostile package or a corrupt row fails in microseconds instead of pinning
+  // the tab in PBKDF2 for minutes.
+  assertKdfParams(saltPwdBytes.length, iterations);
   // Copy into a fresh ArrayBuffer-backed view: WebCrypto's BufferSource types
   // require ArrayBuffer (not SharedArrayBuffer), and Uint8Array.from() types
   // as ArrayBufferLike under TS 5.7+ generics.
