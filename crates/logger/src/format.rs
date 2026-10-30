@@ -78,7 +78,7 @@ pub(crate) fn render_line(
     } else {
         line.push_str(&prefix);
     }
-    line.push_str(message);
+    push_escaped_message(&mut line, message);
 
     // Metadata is rendered as an indented object block so the message and each
     // field are visually distinct. The whole block stays uncoloured.
@@ -120,6 +120,25 @@ fn render_value(out: &mut String, value: &MetaValue) {
         },
         MetaValue::Error(value) | MetaValue::Unknown(value) => {
             push_single_quoted(out, value);
+        }
+    }
+}
+
+/// Escape control characters in a log message.
+///
+/// Messages are the one free-form part of a log line: they can contain a
+/// provider error, a URL, or another third-party string. Without this, a
+/// `\n` inside such a value forges a second log line (and a fake timestamp /
+/// level). Metadata already escapes its values; the message must do the same.
+/// Non-control characters, including non-ASCII text, pass through unchanged.
+fn push_escaped_message(out: &mut String, message: &str) {
+    for ch in message.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => out.extend(ch.escape_default()),
+            ch => out.push(ch),
         }
     }
 }
@@ -226,5 +245,34 @@ mod tests {
             colored.replace("\x1b[33m", "").replace("\x1b[0m", ""),
             plain
         );
+    }
+
+    #[test]
+    fn escapes_control_characters_in_the_message() {
+        let rendered = render_line(
+            Level::Warn,
+            "2026-10-27T18:08:01+00:00",
+            "cloud",
+            "provider said a\n2026-10-27T18:08:01+00:00 ERROR (config) forged",
+            &Metadata::new(),
+            false,
+        );
+
+        // The newline is escaped, so the forged "line" stays part of one line.
+        assert!(!rendered.contains('\n'));
+        assert!(rendered.contains("a\\n2026-10-27T18:08:01+00:00"));
+    }
+
+    #[test]
+    fn keeps_non_ascii_message_text() {
+        let rendered = render_line(
+            Level::Warn,
+            "2026-10-27T18:08:01+00:00",
+            "cloud",
+            "café — naïve",
+            &Metadata::new(),
+            false,
+        );
+        assert!(rendered.ends_with("café — naïve"));
     }
 }

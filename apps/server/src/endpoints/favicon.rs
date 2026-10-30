@@ -462,9 +462,14 @@ async fn fetch_icon(client: &reqwest::Client, url: &reqwest::Url) -> Result<Icon
             .send()
             .await
             .map_err(|e| {
+                // reqwest's Display includes the URL, which names a site in the
+                // caller's vault. Log only the failure class, never the text.
                 LOG.log(
-                    format_args!("favicon fetch failed: {e}"),
-                    logger::Metadata::new(),
+                    "favicon fetch failed",
+                    logger::metadata! {
+                        "timeout" => e.is_timeout(),
+                        "connect" => e.is_connect(),
+                    },
                 );
                 fetch_failure(
                     StatusCode::BAD_GATEWAY,
@@ -540,9 +545,10 @@ async fn fetch_icon(client: &reqwest::Client, url: &reqwest::Url) -> Result<Icon
             .and_then(|v| v.to_str().ok())
             .map(|s| s.split(';').next().unwrap_or("").trim().to_lowercase());
         let bytes = upstream.bytes().await.map_err(|e| {
+            // Same reason as the send error above: `{e}` can contain the URL.
             LOG.log(
-                format_args!("favicon read failed: {e}"),
-                logger::Metadata::new(),
+                "favicon body read failed",
+                logger::metadata! { "timeout" => e.is_timeout() },
             );
             fetch_failure(
                 StatusCode::BAD_GATEWAY,

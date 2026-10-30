@@ -1,5 +1,5 @@
 use actix_session::Session;
-use actix_web::{HttpResponse, get, post, web};
+use actix_web::{HttpResponse, get, http::StatusCode, post, web};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +10,8 @@ use crate::db::DbPool;
 use crate::entity::cloud_binding::{self, Entity as CloudBindingEntity};
 use crate::entity::cloud_pending_token;
 use crate::entity::cloud_token::{self, Entity as CloudTokenEntity};
+use crate::error::error_response;
+use crate::log_safety::short_id;
 use crate::session_auth::session_vault_id;
 
 const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Cloud);
@@ -97,7 +99,7 @@ async fn live_session_vault_id(pool: &DbPool, session: &Session) -> Option<Strin
                 LOG.warn(
                     format_args!(
                         "session names vault {} which does not exist; treating as no session",
-                        &id[..8.min(id.len())]
+                        short_id(&id)
                     ),
                     logger::Metadata::new(),
                 );
@@ -156,7 +158,7 @@ pub async fn cloud_credentials(pool: web::Data<DbPool>, session: Session) -> Htt
             LOG.error(
                 format_args!(
                     "failed to list cloud credentials for vault {}: {err}",
-                    &vault_id[..8.min(vault_id.len())]
+                    short_id(&vault_id)
                 ),
                 logger::Metadata::new(),
             );
@@ -214,7 +216,7 @@ pub async fn cloud_auth_start(
             Ok(v) => v,
             Err(e) => {
                 LOG.error(
-                    format_args!("Failed to start Google authorization: {}", e),
+                    format_args!("Failed to start {kind} authorization: {}", e.code()),
                     logger::Metadata::new(),
                 );
                 return HttpResponse::InternalServerError().json(
@@ -223,15 +225,15 @@ pub async fn cloud_auth_start(
             }
         };
 
-    if vault_id_opt.is_some() {
-        let _ = oauth_flow::store_state_in_session(&session, &state);
-    }
+    // The state is validated against the database row; there is no second copy
+    // in the session. (The old `store_state_in_session` write was never read and
+    // duplicated a live bearer value into the cookie.)
     LOG.log(
         format_args!(
             "Generated cloud OAuth state for vault {}",
             vault_id_opt
                 .as_deref()
-                .map(|v| &v[..8.min(v.len())])
+                .map(|v| short_id(v))
                 .unwrap_or("(pending)")
         ),
         logger::Metadata::new(),
@@ -263,137 +265,118 @@ async fn cloud_oauth_callback_inner(
 ) -> HttpResponse {
     let kind = match ProviderKind::parse(&query.provider) {
         Ok(kind) => kind,
-        Err(_) => return HttpResponse::BadRequest().body("unknown provider"),
+        Err(_) => {
+            // No valid provider means no landing URL to send the browser back
+            // to; answer with the standard error envelope.
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "unknown provider",
+                "OAUTH_UNKNOWN_PROVIDER",
+            );
+        }
     };
     let Some(impl_) = provider::provider(kind) else {
-        return HttpResponse::ServiceUnavailable().body("provider not configured");
-    };
-    let post_auth_redirect = impl_.post_auth_redirect();
-
-    if let Some(err) = &query.error {
-        LOG.warn(
-            format_args!("cloud OAuth error: {}", err),
-            logger::Metadata::new(),
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provider not configured",
+            "OAUTH_PROVIDER_UNCONFIGURED",
         );
-        return HttpResponse::Found()
-            .insert_header((
-                "Location",
-                format!(
-                    "{}?cloud_error={}&provider={}",
-                    post_auth_redirect,
-                    urlencoding::encode(err),
-                    kind.as_str(),
-                ),
-            ))
-            .finish();
+    };
+    let base = impl_.post_auth_redirect();
+
+    // A provider denial is a normal outcome, not a body to reflect. The
+    // provider's `error` string is untrusted (it can contain newlines or HTML);
+    // map it to our vocabulary and log only that.
+    if query.error.is_some() {
+        LOG.warn(
+            "cloud OAuth denied by provider",
+            logger::metadata! { "provider" => kind.as_str() },
+        );
+        return failure_redirect(&base, "OAUTH_CANCELLED", kind);
     }
 
-    let Some(code) = query.code.as_deref() else {
-        return HttpResponse::BadRequest().body("missing code");
-    };
-    let Some(state) = query.state.as_deref() else {
-        return HttpResponse::BadRequest().body("missing state");
+    let (Some(code), Some(state)) = (query.code.as_deref(), query.state.as_deref()) else {
+        return failure_redirect(&base, "OAUTH_INVALID_REQUEST", kind);
     };
 
     let vault_id_opt = live_session_vault_id(pool.get_ref(), &session).await;
-
-    let redirect_err = |detail: &str| {
-        HttpResponse::Found()
-            .insert_header((
-                "Location",
-                format!(
-                    "{}?cloud_error={}&provider={}&cloud_error_detail={}",
-                    post_auth_redirect,
-                    urlencoding::encode("exchange_failed"),
-                    kind.as_str(),
-                    urlencoding::encode(detail),
-                ),
-            ))
-            .finish()
+    let outcome = if let Some(vault_id) = &vault_id_opt {
+        oauth_flow::complete_for_vault(pool.get_ref(), kind, state, code, vault_id).await
+    } else {
+        oauth_flow::complete_pending(pool.get_ref(), kind, state, code).await
     };
 
-    if let Some(vault_id) = vault_id_opt {
-        match oauth_flow::complete_for_vault(pool.get_ref(), kind, state, code, &vault_id).await {
-            Ok((_acct, email)) => {
+    match outcome {
+        Ok(()) => {
+            if let Some(vault_id) = &vault_id_opt {
                 LOG.log(
-                    format_args!(
-                        "cloud OAuth success (vault-bound) for {} provider {}",
-                        &vault_id[..8.min(vault_id.len())],
-                        email.as_deref().unwrap_or("unknown")
-                    ),
-                    logger::Metadata::new(),
+                    "cloud OAuth connected",
+                    logger::metadata! {
+                        "provider" => kind.as_str(),
+                        "vault" => short_id(vault_id),
+                    },
                 );
-                HttpResponse::Found()
-                    .insert_header((
-                        "Location",
-                        format!(
-                            "{}?cloud_connected=1&provider={}&email={}",
-                            post_auth_redirect,
-                            kind.as_str(),
-                            urlencoding::encode(email.as_deref().unwrap_or_default()),
-                        ),
-                    ))
-                    .finish()
-            }
-            Err(e) => {
-                // An invalid/expired state is a CSRF failure, not an exchange
-                // failure, and must be reported as such.
-                if e.detail().contains("state") {
-                    LOG.warn(
-                        format_args!("cloud OAuth state validation failed: {}", e),
-                        logger::Metadata::new(),
-                    );
-                    return HttpResponse::Found()
-                        .insert_header((
-                            "Location",
-                            format!(
-                                "{}?cloud_error={}&provider={}",
-                                post_auth_redirect,
-                                urlencoding::encode("invalid_state"),
-                                kind.as_str(),
-                            ),
-                        ))
-                        .finish();
-                }
-                LOG.warn(
-                    format_args!("cloud OAuth exchange failed: {}", e),
-                    logger::Metadata::new(),
+                redirect(
+                    &base,
+                    &[("cloud_connected", "1"), ("provider", kind.as_str())],
+                )
+            } else {
+                LOG.log(
+                    "cloud OAuth connected (pending)",
+                    logger::metadata! { "provider" => kind.as_str() },
                 );
-                redirect_err(&e.redacted_detail().to_string())
+                // The client needs the state to read the pending token's vault
+                // list and to link it after creating the local vault. It is a
+                // live bearer handle, so it is never logged (see
+                // `oauth_state`); this is its only remaining exposure.
+                redirect(
+                    &base,
+                    &[("cloud_state", state), ("provider", kind.as_str())],
+                )
             }
         }
-    } else {
-        match oauth_flow::complete_pending(pool.get_ref(), kind, state, code).await {
-            Ok((_acct, email)) => {
-                LOG.log(
-                    format_args!(
-                        "cloud OAuth success (pending) provider {}",
-                        email.as_deref().unwrap_or("unknown")
-                    ),
-                    logger::Metadata::new(),
-                );
-                HttpResponse::Found()
-                    .insert_header((
-                        "Location",
-                        format!(
-                            "{}?cloud_state={}&provider={}&email={}",
-                            post_auth_redirect,
-                            urlencoding::encode(state),
-                            kind.as_str(),
-                            urlencoding::encode(email.as_deref().unwrap_or_default()),
-                        ),
-                    ))
-                    .finish()
-            }
-            Err(e) => {
-                LOG.warn(
-                    format_args!("cloud OAuth exchange failed: {}", e),
-                    logger::Metadata::new(),
-                );
-                redirect_err(&e.redacted_detail().to_string())
-            }
+        Err(oauth_flow::CallbackError::StateRejected) => {
+            // The specific reason is logged by `oauth_state` as a closed word;
+            // the browser gets only the coarse code.
+            failure_redirect(&base, "OAUTH_INVALID_STATE", kind)
+        }
+        Err(oauth_flow::CallbackError::Provider(e)) => {
+            LOG.warn(
+                "cloud OAuth exchange failed",
+                logger::metadata! {
+                    "provider" => kind.as_str(),
+                    "code" => e.code(),
+                },
+            );
+            failure_redirect(&base, "OAUTH_EXCHANGE_FAILED", kind)
         }
     }
+}
+
+/// Build a `Found` response to `base` plus query parameters.
+fn redirect(base: &str, params: &[(&str, &str)]) -> HttpResponse {
+    HttpResponse::Found()
+        .insert_header(("Location", with_params(base, params)))
+        .finish()
+}
+
+/// A fixed browser-visible failure. No detail, no email, no provider text.
+fn failure_redirect(base: &str, code: &'static str, kind: ProviderKind) -> HttpResponse {
+    redirect(base, &[("cloud_error", code), ("provider", kind.as_str())])
+}
+
+/// Append query parameters to a landing URL without dropping an existing query.
+///
+/// Values are URL-encoded. Keeping an existing `?` correct means a configured
+/// landing page with its own parameters does not produce `?a=1?b=2`.
+pub(crate) fn with_params(base: &str, params: &[(&str, &str)]) -> String {
+    let separator = if base.contains('?') { '&' } else { '?' };
+    let encoded = params
+        .iter()
+        .map(|(key, value)| format!("{key}={}", urlencoding::encode(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{base}{separator}{encoded}")
 }
 
 #[derive(Serialize)]
@@ -491,10 +474,7 @@ pub async fn cloud_disconnect(pool: web::Data<DbPool>, session: Session) -> Http
     // and any upload still in flight can no longer report the copy as current.
     mirror::mark_disconnected(pool.get_ref(), &vault_id).await;
     LOG.log(
-        format_args!(
-            "cloud disconnect for user {}",
-            &vault_id[..8.min(vault_id.len())]
-        ),
+        format_args!("cloud disconnect for user {}", short_id(&vault_id)),
         logger::Metadata::new(),
     );
     HttpResponse::Ok().json(serde_json::json!({"disconnected": true}))
@@ -714,7 +694,7 @@ pub async fn cloud_mirror_vault(pool: web::Data<DbPool>, session: Session) -> Ht
         mirror::MirrorOutcome::Mirrored { vault_version } => LOG.log(
             format_args!(
                 "Manual Drive backup completed for vault {} at version {}",
-                &vault_id[..8.min(vault_id.len())],
+                short_id(&vault_id),
                 vault_version
             ),
             logger::Metadata::new(),
@@ -722,7 +702,7 @@ pub async fn cloud_mirror_vault(pool: web::Data<DbPool>, session: Session) -> Ht
         mirror::MirrorOutcome::Conflict => LOG.warn(
             format_args!(
                 "Manual Drive backup refused for vault {}: the Drive copy changed since last sync",
-                &vault_id[..8.min(vault_id.len())]
+                short_id(&vault_id)
             ),
             logger::Metadata::new(),
         ),
@@ -860,7 +840,7 @@ pub async fn cloud_create_vault(
             LOG.warn(
                 format_args!(
                     "Rejected cloud package for vault {}: {}",
-                    &vault_id[..8.min(vault_id.len())],
+                    short_id(&vault_id),
                     code
                 ),
                 logger::Metadata::new(),
@@ -953,8 +933,8 @@ pub async fn cloud_create_vault(
     LOG.log(
         format_args!(
             "Created cloud vault {} file {} at logical revision {}",
-            &body.vault_id[..8],
-            &created.file_id[..8.min(created.file_id.len())],
+            short_id(&body.vault_id),
+            short_id(&created.file_id),
             header.logical_revision
         ),
         logger::Metadata::new(),
@@ -963,7 +943,7 @@ pub async fn cloud_create_vault(
         LOG.warn(
             format_args!(
                 "Cloud enrollment mirror for vault {} did not converge: {}",
-                &vault_id[..8.min(vault_id.len())],
+                short_id(&vault_id),
                 code
             ),
             logger::Metadata::new(),
@@ -1274,7 +1254,7 @@ pub async fn cloud_upsert_binding(
             LOG.log(
                 format_args!(
                     "cloud switch for vault {} refused: a backup is still running",
-                    &vault_id[..8.min(vault_id.len())]
+                    short_id(&vault_id)
                 ),
                 logger::Metadata::new(),
             );
@@ -1637,7 +1617,7 @@ mod tests {
     use crate::db::DbPool;
     use crate::endpoints::register;
     use actix_web::cookie::{Cookie, Key};
-    use actix_web::{App, test};
+    use actix_web::{App, test as actix_test};
     use migration::MigratorTrait;
     use sea_orm::{Database, EntityTrait};
     use serde_json::json;
@@ -1674,7 +1654,7 @@ mod tests {
     /// so the cookie from `/register` has to be replayed by hand.
     macro_rules! authenticated_app {
         ($pool:expr) => {{
-            let app = test::init_service(
+            let app = actix_test::init_service(
                 App::new()
                     .app_data(web::Data::new($pool.clone()))
                     .wrap(
@@ -1692,9 +1672,9 @@ mod tests {
                     .service(super::cloud_upsert_binding),
             )
             .await;
-            let resp = test::call_service(
+            let resp = actix_test::call_service(
                 &app,
-                test::TestRequest::post()
+                actix_test::TestRequest::post()
                     .uri("/register")
                     .set_json(json!({
                         "vault_id": VAULT_ID,
@@ -1740,9 +1720,9 @@ mod tests {
                 .await
                 .expect("claim");
 
-        let resp = test::call_service(
+        let resp = actix_test::call_service(
             &app,
-            test::TestRequest::post()
+            actix_test::TestRequest::post()
                 .uri("/cloud/binding?provider=dropbox")
                 .cookie(cookie)
                 .set_json(json!({"vault_id": VAULT_ID}))
@@ -1751,7 +1731,7 @@ mod tests {
         .await;
 
         assert_eq!(resp.status(), 409, "a busy backup must refuse the switch");
-        let body: serde_json::Value = test::read_body_json(resp).await;
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
         assert_eq!(body["code"], "BACKUP_IN_PROGRESS");
         assert!(
             CloudBindingEntity::find()
@@ -1811,5 +1791,118 @@ mod tests {
             "the remote copy is preserved; only the credential is gone"
         );
         assert_eq!(after.mirrored_vault_version, Some(1));
+    }
+
+    #[test]
+    fn landing_urls_keep_their_existing_query() {
+        assert_eq!(
+            with_params(
+                "http://localhost:8080/vault",
+                &[("cloud_connected", "1"), ("provider", "google_drive")]
+            ),
+            "http://localhost:8080/vault?cloud_connected=1&provider=google_drive"
+        );
+        assert_eq!(
+            with_params(
+                "https://app.test/vault?from=oauth",
+                &[("cloud_error", "OAUTH_CANCELLED")]
+            ),
+            "https://app.test/vault?from=oauth&cloud_error=OAUTH_CANCELLED"
+        );
+    }
+
+    #[test]
+    fn redirect_values_are_url_encoded() {
+        assert_eq!(
+            with_params("https://app.test/vault", &[("cloud_state", "a b&c")]),
+            "https://app.test/vault?cloud_state=a%20b%26c"
+        );
+    }
+
+    fn location(response: &HttpResponse) -> &str {
+        response
+            .headers()
+            .get("Location")
+            .expect("redirect must carry Location")
+            .to_str()
+            .expect("Location is ASCII")
+    }
+
+    #[test]
+    fn success_redirects_carry_no_pii() {
+        let bound = redirect(
+            "https://app.test/vault",
+            &[("cloud_connected", "1"), ("provider", "google_drive")],
+        );
+        let bound = location(&bound);
+        assert_eq!(
+            bound,
+            "https://app.test/vault?cloud_connected=1&provider=google_drive"
+        );
+        assert!(!bound.contains("email"));
+        assert!(!bound.contains("cloud_state"));
+
+        let pending = redirect(
+            "https://app.test/vault",
+            &[("cloud_state", "state-1"), ("provider", "google_drive")],
+        );
+        let pending = location(&pending);
+        assert_eq!(
+            pending,
+            "https://app.test/vault?cloud_state=state-1&provider=google_drive"
+        );
+        assert!(!pending.contains("email"));
+    }
+
+    #[test]
+    fn failure_redirects_carry_only_a_fixed_code() {
+        for code in [
+            "OAUTH_CANCELLED",
+            "OAUTH_INVALID_REQUEST",
+            "OAUTH_INVALID_STATE",
+            "OAUTH_EXCHANGE_FAILED",
+        ] {
+            let response =
+                failure_redirect("https://app.test/vault", code, ProviderKind::GoogleDrive);
+            let location = location(&response);
+
+            assert_eq!(
+                location,
+                format!("https://app.test/vault?cloud_error={code}&provider=google_drive")
+            );
+            assert!(!location.contains("email"));
+            assert!(!location.contains("detail"));
+            assert!(!location.contains("state="));
+            assert!(!location.contains("code="));
+        }
+    }
+
+    #[actix_web::test]
+    async fn unknown_provider_returns_the_fixed_envelope() {
+        use actix_web::cookie::Key;
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::new(test_pool().await))
+                .wrap(actix_session::SessionMiddleware::new(
+                    actix_session::storage::CookieSessionStore::default(),
+                    Key::from(b"test-key-for-session-middleware-must-be-at-least-64-bytes-long!!"),
+                ))
+                .service(cloud_oauth_callback),
+        )
+        .await;
+
+        let resp = actix_test::call_service(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/cloud/oauth/callback?provider=bogus")
+                .to_request(),
+        )
+        .await;
+
+        assert_eq!(resp.status(), 400);
+        let body: serde_json::Value = actix_test::read_body_json(resp).await;
+        assert_eq!(body["code"], "OAUTH_UNKNOWN_PROVIDER");
+        assert_eq!(body["error_msg"], "unknown provider");
     }
 }

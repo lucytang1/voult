@@ -59,13 +59,6 @@ export async function startCloudAuth(provider: string): Promise<{ auth_url: stri
   return res.data;
 }
 
-export async function startCloudAuthPublic(email: string, provider: string): Promise<{ auth_url: string; state: string }> {
-  const res = await http.get<{ auth_url: string; state: string }>("/cloud/auth/start", {
-    params: { email, provider },
-  });
-  return res.data;
-}
-
 export async function listCloudVaultsPending(state: string): Promise<VaultDescriptor[]> {
   const res = await http.get<{ vaults: VaultDescriptor[] }>("/cloud/vaults/pending", {
     params: { state },

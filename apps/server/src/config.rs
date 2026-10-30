@@ -199,7 +199,10 @@ pub fn database_url(env: Environment) -> String {
         if env.is_dev() && is_relative_sqlite_url(&trimmed) {
             let normalized = normalize_dev_database_url(&trimmed);
             CONFIG_LOG.log(
-                format_args!("Normalized relative {ENV_DATABASE_URL} to {normalized}"),
+                format_args!(
+                    "Normalized relative {ENV_DATABASE_URL} to {}",
+                    crate::log_safety::database_url_for_log(&normalized)
+                ),
                 logger::Metadata::new(),
             );
             return normalized;
@@ -212,7 +215,8 @@ pub fn database_url(env: Environment) -> String {
             if path_part == "voult.db" {
                 CONFIG_LOG.warn(
                     format_args!(
-                        "Ignoring dev {ENV_DATABASE_URL} '{trimmed}' in production, using prod DB at Application Support"
+                        "Ignoring dev {ENV_DATABASE_URL} '{}' in production, using prod DB at Application Support",
+                        crate::log_safety::database_url_for_log(&trimmed)
                     ),
                     logger::metadata! { "env_var" => ENV_DATABASE_URL },
                 );

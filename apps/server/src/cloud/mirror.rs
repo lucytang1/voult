@@ -77,6 +77,7 @@ use crate::cloud::{package, token_store};
 use crate::db::DbPool;
 use crate::entity::cloud_binding::{self, Entity as CloudBindingEntity};
 use crate::entity::vault::{self, Entity as VaultEntity};
+use crate::log_safety::short_id;
 
 const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Cloud);
 
@@ -1040,12 +1041,6 @@ pub async fn mark_adopted(pool: &DbPool, guard: &BindingGuard, vault_version: i3
         .filter(cloud_binding::Column::BindingGeneration.eq(guard.generation))
         .exec(pool)
         .await;
-}
-
-/// First 8 characters of an identifier, for logs. Enough to correlate, and it
-/// is a public UUID or an opaque provider revision — never key material.
-fn short_id(id: &str) -> &str {
-    &id[..8.min(id.len())]
 }
 
 /// Used by the enrollment path to learn the revision it just created, so the

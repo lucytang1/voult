@@ -76,6 +76,12 @@ impl ProviderErrorKind {
 /// diagnostics only. Callers must not switch on the message, and it must never
 /// be echoed verbatim to a client, because provider error bodies can carry
 /// account or file metadata.
+///
+/// Invariant for the message: it contains only first-party text — fixed
+/// strings, HTTP statuses, and database errors — never a provider response
+/// body. That is what makes `Display`/`detail()` safe to write to a server log.
+/// It still must never be put in a browser-visible redirect or response body;
+/// use [`ProviderError::redacted_detail`] for that.
 #[derive(Debug, Clone)]
 pub struct ProviderError {
     pub kind: ProviderErrorKind,

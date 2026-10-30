@@ -59,6 +59,8 @@ pub enum ServerContext {
     Favicon,
     /// Cloud provider bindings, OAuth, tokens, and mirroring.
     Cloud,
+    /// Query-free HTTP access log (method, route pattern, status).
+    Request,
     /// Database migrations.
     Migration,
 }
@@ -78,6 +80,7 @@ impl LogContext for ServerContext {
             Self::Recovery => "recovery",
             Self::Favicon => "favicon",
             Self::Cloud => "cloud",
+            Self::Request => "request",
             Self::Migration => "migration",
         }
     }

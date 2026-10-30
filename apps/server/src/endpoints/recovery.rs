@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::db::DbPool;
+use crate::log_safety::short_id;
 
 // Aliased: the module is `recovery_challenge`, which would otherwise collide with
 // this file's `recovery_challenge` handler.
@@ -370,7 +371,10 @@ async fn verify_recovery_proof(
         Ok(Some(c)) => c,
         Ok(None) => {
             LOG.warn(
-                format_args!("{context} rejected: unknown selector vault_id={vault_id}"),
+                format_args!(
+                    "{context} rejected: unknown selector vault_id={}",
+                    short_id(&vault_id)
+                ),
                 logger::Metadata::new(),
             );
             return Err(auth_failed());
@@ -390,14 +394,20 @@ async fn verify_recovery_proof(
 
     if challenge.vault_id != vault_id || challenge.expires_at < Utc::now() {
         LOG.warn(
-            format_args!("{context} rejected: challenge not usable vault_id={vault_id}"),
+            format_args!(
+                "{context} rejected: challenge not usable vault_id={}",
+                short_id(&vault_id)
+            ),
             logger::Metadata::new(),
         );
         return Err(auth_failed());
     }
     if challenge.challenge_hash != challenge_hash(vault_id, &challenge.challenge) {
         LOG.warn(
-            format_args!("{context} rejected: challenge integrity mismatch vault_id={vault_id}"),
+            format_args!(
+                "{context} rejected: challenge integrity mismatch vault_id={}",
+                short_id(&vault_id)
+            ),
             logger::Metadata::new(),
         );
         return Err(auth_failed());
@@ -429,7 +439,10 @@ async fn verify_recovery_proof(
         Ok(Some(v)) => v,
         Ok(None) => {
             LOG.warn(
-                format_args!("{context} rejected: vault not found vault_id={vault_id}"),
+                format_args!(
+                    "{context} rejected: vault not found vault_id={}",
+                    short_id(&vault_id)
+                ),
                 logger::Metadata::new(),
             );
             return Err(auth_failed());
@@ -450,7 +463,8 @@ async fn verify_recovery_proof(
     if vault.recovery_verifier.is_none() {
         LOG.warn(
             format_args!(
-                "{context} rejected: vault has no recovery configured vault_id={vault_id}"
+                "{context} rejected: vault has no recovery configured vault_id={}",
+                short_id(&vault_id)
             ),
             logger::Metadata::new(),
         );
@@ -458,7 +472,10 @@ async fn verify_recovery_proof(
     }
     if !proof_is_valid(&vault, vault_id, &challenge.challenge, proof) {
         LOG.warn(
-            format_args!("{context} rejected: proof mismatch vault_id={vault_id}"),
+            format_args!(
+                "{context} rejected: proof mismatch vault_id={}",
+                short_id(&vault_id)
+            ),
             logger::Metadata::new(),
         );
         return Err(auth_failed());
@@ -585,7 +602,7 @@ pub async fn recovery_challenge(
 
     // vault_id only — never the challenge, proof, verifier, or wrap.
     LOG.warn(
-        format_args!("recovery challenge issued vault_id={vault_id}"),
+        format_args!("recovery challenge issued vault_id={}", short_id(&vault_id)),
         logger::Metadata::new(),
     );
     HttpResponse::Ok().json(ChallengeResponse {
@@ -645,7 +662,10 @@ pub async fn recovery_unlock(
         load_live_challenge(pool.get_ref(), request.selector.trim(), &vault_id).await
     else {
         LOG.warn(
-            format_args!("recovery unlock rejected: no live challenge vault_id={vault_id}"),
+            format_args!(
+                "recovery unlock rejected: no live challenge vault_id={}",
+                short_id(&vault_id)
+            ),
             logger::Metadata::new(),
         );
         return auth_failed();
@@ -659,7 +679,10 @@ pub async fn recovery_unlock(
         Ok(Some(v)) => v,
         Ok(None) => {
             LOG.warn(
-                format_args!("recovery unlock rejected: vault not found vault_id={vault_id}"),
+                format_args!(
+                    "recovery unlock rejected: vault not found vault_id={}",
+                    short_id(&vault_id)
+                ),
                 logger::Metadata::new(),
             );
             return auth_failed();
@@ -679,7 +702,10 @@ pub async fn recovery_unlock(
 
     if !proof_is_valid(&vault, &vault_id, &challenge.challenge, &proof) {
         LOG.warn(
-            format_args!("recovery unlock rejected: proof mismatch vault_id={vault_id}"),
+            format_args!(
+                "recovery unlock rejected: proof mismatch vault_id={}",
+                short_id(&vault_id)
+            ),
             logger::Metadata::new(),
         );
         return auth_failed();
@@ -698,7 +724,7 @@ pub async fn recovery_unlock(
     };
 
     LOG.warn(
-        format_args!("recovery unlock succeeded vault_id={vault_id}"),
+        format_args!("recovery unlock succeeded vault_id={}", short_id(&vault_id)),
         logger::Metadata::new(),
     );
     HttpResponse::Ok().json(UnlockResponse {
@@ -938,7 +964,10 @@ pub async fn recovery_rewrap(
     // recovery path is untouched — so this vault can be recovered again with
     // the same recovery key (Rule R1).
     LOG.warn(
-        format_args!("recovery succeeded; password credential rotated vault_id={vault_id}"),
+        format_args!(
+            "recovery succeeded; password credential rotated vault_id={}",
+            short_id(&vault_id)
+        ),
         logger::Metadata::new(),
     );
     HttpResponse::Ok().json(RewrapResponse {
@@ -1137,7 +1166,7 @@ pub async fn recovery_regenerate(
     }
 
     LOG.warn(
-        format_args!("recovery key rotated vault_id={vault_id}"),
+        format_args!("recovery key rotated vault_id={}", short_id(&vault_id)),
         logger::Metadata::new(),
     );
     HttpResponse::Ok().json(serde_json::json!({ "rotated": true }))

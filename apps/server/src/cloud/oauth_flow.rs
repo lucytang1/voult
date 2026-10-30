@@ -13,6 +13,7 @@ use chrono::Utc;
 use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
 use crate::cloud::error::{ProviderError, ProviderErrorKind};
+use crate::cloud::oauth_state::StateError;
 use crate::cloud::provider::{self, CloudProvider, ProviderKind};
 use crate::cloud::{oauth_state, token_store};
 use crate::db::DbPool;
@@ -20,14 +21,29 @@ use crate::entity::cloud_pending_token;
 
 const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Cloud);
 
-/// Session key holding the in-flight state, for a quick cross-check against the
-/// database record.
-pub const SESSION_CLOUD_OAUTH_STATE: &str = "cloud_oauth_state";
+/// Distinguishes a rejected CSRF state from a provider/token failure.
+///
+/// The callback maps these to fixed browser codes. String-matching the error
+/// text (the previous `detail().contains("state")`) was both fragile and a
+/// reason to keep diagnostically rich text on the client path.
+#[derive(Debug)]
+pub enum CallbackError {
+    /// The state was unknown, expired, or bound to another provider/vault.
+    StateRejected,
+    /// Code exchange, account lookup, or credential storage failed.
+    Provider(ProviderError),
+}
 
-pub fn store_state_in_session(session: &actix_session::Session, state: &str) -> Result<(), String> {
-    session
-        .insert(SESSION_CLOUD_OAUTH_STATE, state.to_string())
-        .map_err(|e| format!("session error: {:?}", e))
+impl From<StateError> for CallbackError {
+    fn from(error: StateError) -> Self {
+        match error {
+            StateError::Invalid => CallbackError::StateRejected,
+            StateError::Unavailable => CallbackError::Provider(ProviderError::new(
+                ProviderErrorKind::Unknown,
+                "cloud OAuth state lookup failed",
+            )),
+        }
+    }
 }
 
 /// Build the authorization URL for `kind`, minting and persisting CSRF state
@@ -53,18 +69,22 @@ pub async fn begin(
 
 /// Complete a session-bound callback: validate the state, exchange the code, and
 /// store the credential against `vault_id`.
+///
+/// Returns `()` on purpose: the account email/id are not needed by the caller
+/// and must not be logged or reflected. The client reads account metadata from
+/// the authenticated `/cloud/status` response after the redirect.
 pub async fn complete_for_vault(
     pool: &DbPool,
     kind: ProviderKind,
     state: &str,
     code: &str,
     vault_id: &str,
-) -> Result<(Option<String>, Option<String>), ProviderError> {
-    oauth_state::validate(pool, kind, state, vault_id)
-        .await
-        .map_err(|e| ProviderError::new(ProviderErrorKind::AuthRequired, e))?;
+) -> Result<(), CallbackError> {
+    oauth_state::validate(pool, kind, state, vault_id).await?;
 
-    let set = exchange(pool, kind, code).await?;
+    let set = exchange(pool, kind, code)
+        .await
+        .map_err(CallbackError::Provider)?;
 
     // Best-effort: a provider that cannot tell us the account name must not stop
     // the backup from working.
@@ -78,12 +98,10 @@ pub async fn complete_for_vault(
         account.as_ref().and_then(|a| a.account_id.clone()),
         account.as_ref().and_then(|a| a.email.clone()),
     )
-    .await?;
+    .await
+    .map_err(CallbackError::Provider)?;
 
-    Ok((
-        account.as_ref().and_then(|a| a.account_id.clone()),
-        account.as_ref().and_then(|a| a.email.clone()),
-    ))
+    Ok(())
 }
 
 /// Complete a pre-session callback: validate the state and stash the credential
@@ -93,21 +111,20 @@ pub async fn complete_pending(
     kind: ProviderKind,
     state: &str,
     code: &str,
-) -> Result<(Option<String>, Option<String>), ProviderError> {
-    let rec = oauth_state::validate_pending(pool, kind, state)
-        .await
-        .map_err(|e| ProviderError::new(ProviderErrorKind::AuthRequired, e))?;
+) -> Result<(), CallbackError> {
+    let rec = oauth_state::validate_pending(pool, kind, state).await?;
 
-    let set = exchange(pool, kind, code).await?;
+    let set = exchange(pool, kind, code)
+        .await
+        .map_err(CallbackError::Provider)?;
     let account = account_of(pool, kind, &set.access_token).await;
 
-    store_pending(pool, state, &rec.provider_kind, &set, account.as_ref()).await?;
+    store_pending(pool, state, &rec.provider_kind, &set, account.as_ref())
+        .await
+        .map_err(CallbackError::Provider)?;
     oauth_state::consume(pool, state).await;
 
-    Ok((
-        account.as_ref().and_then(|a| a.account_id.clone()),
-        account.as_ref().and_then(|a| a.email.clone()),
-    ))
+    Ok(())
 }
 
 /// Move a pending credential onto a vault that now exists.

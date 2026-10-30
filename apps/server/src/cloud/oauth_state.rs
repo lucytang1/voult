@@ -15,6 +15,31 @@ use crate::cloud::provider::ProviderKind;
 use crate::db::DbPool;
 use crate::entity::oauth_state::{self, Entity as OauthStateEntity};
 
+const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Cloud);
+
+/// Why a state could not be redeemed.
+///
+/// `Invalid` is deliberately opaque: unknown, expired, wrong provider, and
+/// wrong vault must all look identical to the caller or each becomes an
+/// oracle. The specific reason is logged (as a closed word) but never returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateError {
+    /// Not redeemable: unknown, expired, or bound to another provider/vault.
+    Invalid,
+    /// The database could not be read. Operational failure, not a CSRF one.
+    Unavailable,
+}
+
+/// Record a rejection with a closed-vocabulary reason. Never log the state
+/// value itself: it is a live bearer handle for the pending flow.
+fn reject(reason: &'static str) -> StateError {
+    LOG.warn(
+        "cloud OAuth state rejected",
+        logger::metadata! { "reason" => reason },
+    );
+    StateError::Invalid
+}
+
 /// How long a minted state stays redeemable. Comfortably longer than a
 /// human-driven consent screen, short enough that an abandoned authorization
 /// cannot be resumed much later.
@@ -58,7 +83,7 @@ pub async fn validate(
     kind: ProviderKind,
     state: &str,
     vault_id: &str,
-) -> Result<(), String> {
+) -> Result<(), StateError> {
     let rec = lookup(pool, state).await?;
 
     // Provider binding is checked BEFORE the vault binding: the whole point of
@@ -77,7 +102,7 @@ pub async fn validate_pending(
     pool: &DbPool,
     kind: ProviderKind,
     state: &str,
-) -> Result<oauth_state::Model, String> {
+) -> Result<oauth_state::Model, StateError> {
     let rec = lookup(pool, state).await?;
     ensure_provider(&rec, kind)?;
     // Deliberately not consumed: the exchange still has to happen.
@@ -91,34 +116,41 @@ pub async fn consume(pool: &DbPool, state: &str) {
         .await;
 }
 
-async fn lookup(pool: &DbPool, state: &str) -> Result<oauth_state::Model, String> {
+async fn lookup(pool: &DbPool, state: &str) -> Result<oauth_state::Model, StateError> {
     let rec = OauthStateEntity::find()
         .filter(oauth_state::Column::State.eq(state))
         .one(pool)
         .await
-        .map_err(|e| format!("db error: {:?}", e))?
-        .ok_or_else(|| "invalid state".to_string())?;
+        .map_err(|e| {
+            // DB diagnostics are first-party text/SQL, never the state value.
+            LOG.error(
+                "cloud OAuth state lookup failed",
+                logger::metadata! { "cause" => logger::MetaValue::error(&e) },
+            );
+            StateError::Unavailable
+        })?
+        .ok_or_else(|| reject("unknown"))?;
 
     let now: chrono::DateTime<chrono::Utc> = Utc::now().into();
     let expires: chrono::DateTime<chrono::Utc> = rec.expires_at.into();
     if now > expires {
         // Best-effort cleanup of the dead row before rejecting it.
         consume(pool, state).await;
-        return Err("state expired".to_string());
+        return Err(reject("expired"));
     }
     Ok(rec)
 }
 
-fn ensure_provider(rec: &oauth_state::Model, kind: ProviderKind) -> Result<(), String> {
+fn ensure_provider(rec: &oauth_state::Model, kind: ProviderKind) -> Result<(), StateError> {
     if rec.provider_kind != kind.as_str() {
-        return Err("state provider mismatch".to_string());
+        return Err(reject("provider"));
     }
     Ok(())
 }
 
-fn ensure_vault(rec: &oauth_state::Model, vault_id: &str) -> Result<(), String> {
+fn ensure_vault(rec: &oauth_state::Model, vault_id: &str) -> Result<(), StateError> {
     if rec.vault_id.as_deref() != Some(vault_id) {
-        return Err("state user mismatch".to_string());
+        return Err(reject("vault"));
     }
     Ok(())
 }

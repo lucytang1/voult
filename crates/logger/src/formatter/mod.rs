@@ -6,7 +6,6 @@
 //! and returns a message plus normal [`Metadata`]; anything unrecognised falls
 //! back to the raw message.
 
-mod actix_web;
 mod sqlx;
 
 use crate::Metadata;
@@ -20,8 +19,6 @@ pub(crate) struct FormattedEvent {
 pub(crate) fn format(target: &str, message: &str) -> Option<FormattedEvent> {
     if target.starts_with("sqlx::query") {
         sqlx::parse(message)
-    } else if target.starts_with("actix_web::middleware::logger") {
-        actix_web::parse(message)
     } else {
         None
     }
