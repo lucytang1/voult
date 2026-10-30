@@ -571,9 +571,6 @@ export type UpdateVaultRequest = {
   vault: string;
   vaultiv: string;
   version: number;
-  crypto_version?: number;
-  vault_key_wrap?: string;
-  vault_key_wrap_iv?: string;
 };
 
 export type UpdateVaultResponse = {

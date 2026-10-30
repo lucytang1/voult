@@ -4,7 +4,9 @@ use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, EntityTrait, ExprTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 
+use crate::endpoints::validate;
 use crate::entity::vault::{self, Entity as Vault};
+use crate::error::error_response;
 use crate::session_auth::session_vault_id;
 
 use crate::db::DbPool;
@@ -12,40 +14,22 @@ use crate::db::DbPool;
 const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Vault);
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateVaultRequest {
     pub vault: String,
     pub vaultiv: String,
     pub version: u32,
-    #[serde(default)]
-    pub crypto_version: Option<i32>,
-    #[serde(default)]
-    pub vault_key_wrap: Option<String>,
-    #[serde(default)]
-    pub vault_key_wrap_iv: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct UpdateVaultResponse {
     pub vault: String,
     pub vaultiv: String,
-    pub iterations: u32,
+    pub iterations: i32,
     pub version: u32,
     pub crypto_version: i32,
     pub vault_key_wrap: Option<String>,
     pub vault_key_wrap_iv: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ErrorResponse {
-    error_msg: String,
-    code: &'static str,
-}
-
-fn error_response(status: StatusCode, error_msg: &str, code: &'static str) -> HttpResponse {
-    HttpResponse::build(status).json(ErrorResponse {
-        error_msg: error_msg.to_string(),
-        code,
-    })
 }
 
 #[post("/update_vault")]
@@ -66,6 +50,26 @@ pub async fn update_vault(
     };
 
     let request = payload.into_inner();
+
+    // Shape before the row read: a malformed body must not even cost a query.
+    if let Err(e) = validate::require_b64_in_range(
+        "vault",
+        &request.vault,
+        validate::MIN_CIPHERTEXT_LEN,
+        validate::MAX_CIPHERTEXT_LEN,
+    ) {
+        return e.response();
+    }
+    if let Err(e) = validate::require_b64_exact("vaultiv", &request.vaultiv, validate::IV_LEN) {
+        return e.response();
+    }
+    // The column is `i32`; the response reports `version + 1`, so the top value
+    // must leave room for the increment. Without this, `version = u32::MAX`
+    // panicked in debug and wrapped in release.
+    if request.version == 0 || request.version > i32::MAX as u32 - 1 {
+        return validate::FieldError::new("version", format!("between 1 and {}", i32::MAX - 1))
+            .response();
+    }
 
     let vault = match Vault::find()
         .filter(vault::Column::Id.eq(&vault_id))
@@ -89,32 +93,32 @@ pub async fn update_vault(
         }
     };
 
-    let new_vault = request.vault;
-    let new_vaultiv = request.vaultiv;
-    let new_crypto_version = request.crypto_version.unwrap_or(vault.crypto_version);
-    let new_vault_key_wrap = request.vault_key_wrap.or(vault.vault_key_wrap.clone());
-    let new_vault_key_wrap_iv = request
-        .vault_key_wrap_iv
-        .or(vault.vault_key_wrap_iv.clone());
+    // A document write may not change the crypto scheme: that is a credential
+    // rewrap, which has its own endpoint and its own proof. v1 rows cannot be
+    // written at all — they have no envelope and cannot be backed up.
+    if vault.crypto_version != validate::SUPPORTED_CRYPTO_VERSION {
+        LOG.warn(
+            format_args!("vault write refused: unsupported crypto_version"),
+            logger::Metadata::new(),
+        );
+        return error_response(
+            StatusCode::CONFLICT,
+            "vault is not on crypto version 2",
+            "UNSUPPORTED_CRYPTO_VERSION",
+        );
+    }
 
     // Atomic compare-and-swap: only write when the vault is still at the
     // version the client pushed against. rows_affected == 0 means a
     // concurrent push from another device already won — return 409.
+    //
+    // Column discipline: this writes the document and the version counter and
+    // nothing else. It used to accept a password envelope and a crypto version,
+    // which let a single request replace half an envelope (new wrap, old IV)
+    // and leave the vault unwrappable forever.
     let update_result = Vault::update_many()
-        .col_expr(vault::Column::Vault, Expr::value(new_vault.clone()))
-        .col_expr(vault::Column::Vaultiv, Expr::value(new_vaultiv.clone()))
-        .col_expr(
-            vault::Column::CryptoVersion,
-            Expr::value(new_crypto_version),
-        )
-        .col_expr(
-            vault::Column::VaultKeyWrap,
-            Expr::value(new_vault_key_wrap.clone()),
-        )
-        .col_expr(
-            vault::Column::VaultKeyWrapIv,
-            Expr::value(new_vault_key_wrap_iv.clone()),
-        )
+        .col_expr(vault::Column::Vault, Expr::value(request.vault.clone()))
+        .col_expr(vault::Column::Vaultiv, Expr::value(request.vaultiv.clone()))
         .col_expr(
             vault::Column::Version,
             Expr::col(vault::Column::Version).add(1),
@@ -147,7 +151,18 @@ pub async fn update_vault(
     }
 
     // The CAS guarantees the stored version was request.version, so it is now +1.
-    let new_version = request.version + 1;
+    // The bound above makes this infallible; `checked_add` keeps it that way if
+    // the bound ever moves.
+    let new_version = match request.version.checked_add(1) {
+        Some(v) => v,
+        None => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "vault version overflow",
+                "DATA_INTEGRITY_ERROR",
+            );
+        }
+    };
 
     // Disaster-recovery mirroring, strictly AFTER the commit.
     //
@@ -163,13 +178,13 @@ pub async fn update_vault(
     crate::cloud::mirror::spawn_after_commit(mirror_pool, mirror_vault_id);
 
     HttpResponse::Ok().json(UpdateVaultResponse {
-        vault: new_vault,
-        vaultiv: new_vaultiv,
-        iterations: vault.iterations as u32,
+        vault: request.vault,
+        vaultiv: request.vaultiv,
+        iterations: vault.iterations,
         version: new_version,
-        crypto_version: new_crypto_version,
-        vault_key_wrap: new_vault_key_wrap,
-        vault_key_wrap_iv: new_vault_key_wrap_iv,
+        crypto_version: vault.crypto_version,
+        vault_key_wrap: vault.vault_key_wrap,
+        vault_key_wrap_iv: vault.vault_key_wrap_iv,
     })
 }
 
@@ -220,12 +235,19 @@ mod tests {
         am.insert(pool).await.expect("insert binding");
     }
 
+    /// Deterministic base64 of an exact byte length.
+    fn b64_of(len: usize, fill: u8) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(vec![fill; len])
+    }
+
     /// Builds the app with the session middleware so the handler sees a session.
     macro_rules! test_app {
         ($pool:expr) => {
             test::init_service(
                 App::new()
                     .app_data(web::Data::new($pool.clone()))
+                    .app_data(crate::endpoints::json_config())
                     .wrap(
                         actix_session::SessionMiddleware::builder(
                             actix_session::storage::CookieSessionStore::default(),
@@ -256,21 +278,21 @@ mod tests {
                 .uri("/register")
                 .set_json(json!({
                     "vault_id": VAULT_ID,
-                    "vault_verifier": "dmVyaWZpZXI=",
-                    "salt": "c2FsdA==",
+                    "vault_verifier": b64_of(32, 0xA4),
+                    "salt": b64_of(16, 0xA3),
                     "iterations": 60000,
-                    "vaultiv": "aXY=",
-                    "vault": "Y2lwaGVydGV4dA==",
+                    "vaultiv": b64_of(12, 0xA2),
+                    "vault": b64_of(64, 0xA1),
                     "crypto_version": 2,
-                    "vault_key_wrap": "d3JhcA==",
-                    "vault_key_wrap_iv": "d2l2",
+                    "vault_key_wrap": b64_of(48, 0xA5),
+                    "vault_key_wrap_iv": b64_of(12, 0xA6),
                     // Recovery is mandatory at registration. These tests cover
                     // vault writes and mirroring, not recovery, so opaque
                     // stand-in values are enough to get a valid row.
-                    "recovery_verifier": "cmVjb3ZlcnktdmVyaWZpZXI=",
-                    "recovery_salt": "cmVjb3Zlcnktc2FsdA==",
-                    "recovery_wrap": "cmVjb3Zlcnktd3JhcA==",
-                    "recovery_wrap_iv": "cmVjdml2",
+                    "recovery_verifier": b64_of(32, 0xB1),
+                    "recovery_salt": b64_of(16, 0xB2),
+                    "recovery_wrap": b64_of(48, 0xB3),
+                    "recovery_wrap_iv": b64_of(12, 0xB4),
                 }))
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -298,8 +320,8 @@ mod tests {
             .uri("/update_vault")
             .cookie(cookie.clone())
             .set_json(json!({
-                "vault": "bmV3LWNpcGhlcnRleHQ=",
-                "vaultiv": "bmV3aXY=",
+                "vault": b64_of(64, 0xC1),
+                "vaultiv": b64_of(12, 0xC2),
                 "version": version,
             }))
     }
@@ -331,7 +353,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.version, 4);
-        assert_eq!(stored.vault, "bmV3LWNpcGhlcnRleHQ=");
+        assert_eq!(stored.vault, b64_of(64, 0xC1));
     }
 
     /// A stale base version must still lose the CAS before any mirroring
@@ -422,5 +444,129 @@ mod tests {
             4,
             "the vault write stands regardless of mirror outcome"
         );
+    }
+
+    /// A body that cannot be a document write never reaches the CAS, and the
+    /// stored row is byte-identical afterwards. Includes the two fields that
+    /// used to be accepted here and are now refused outright.
+    #[actix_web::test]
+    async fn update_vault_rejects_malformed_bodies_before_the_cas() {
+        let pool = test_pool().await;
+        let (app, cookie) = authenticated_app!(&pool);
+
+        let before = VaultEntity::find_by_id(VAULT_ID)
+            .one(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let table: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "short ciphertext",
+                json!({"vault": b64_of(16, 0xC1), "vaultiv": b64_of(12, 0xC2), "version": 1}),
+            ),
+            (
+                "oversized ciphertext",
+                json!({
+                    "vault": b64_of(validate::MAX_CIPHERTEXT_LEN + 1, 0xC1),
+                    "vaultiv": b64_of(12, 0xC2),
+                    "version": 1
+                }),
+            ),
+            (
+                "non-base64 ciphertext",
+                json!({"vault": "not base64!!", "vaultiv": b64_of(12, 0xC2), "version": 1}),
+            ),
+            (
+                "short iv",
+                json!({"vault": b64_of(64, 0xC1), "vaultiv": b64_of(8, 0xC2), "version": 1}),
+            ),
+            (
+                "version zero",
+                json!({"vault": b64_of(64, 0xC1), "vaultiv": b64_of(12, 0xC2), "version": 0}),
+            ),
+            (
+                "version i32::MAX",
+                json!({"vault": b64_of(64, 0xC1), "vaultiv": b64_of(12, 0xC2), "version": i32::MAX}),
+            ),
+            (
+                "version u32::MAX",
+                json!({"vault": b64_of(64, 0xC1), "vaultiv": b64_of(12, 0xC2), "version": u32::MAX}),
+            ),
+            (
+                "obsolete crypto_version",
+                json!({
+                    "vault": b64_of(64, 0xC1),
+                    "vaultiv": b64_of(12, 0xC2),
+                    "version": 1,
+                    "crypto_version": 1
+                }),
+            ),
+            (
+                "obsolete password envelope",
+                json!({
+                    "vault": b64_of(64, 0xC1),
+                    "vaultiv": b64_of(12, 0xC2),
+                    "version": 1,
+                    "vault_key_wrap": b64_of(48, 0xC3)
+                }),
+            ),
+        ];
+
+        for (name, body) in table {
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/update_vault")
+                    .cookie(cookie.clone())
+                    .set_json(body)
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{name}");
+
+            let after = VaultEntity::find_by_id(VAULT_ID)
+                .one(&pool)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.version, before.version, "{name} changed the version");
+            assert_eq!(after.vault, before.vault, "{name} changed the document");
+        }
+
+        // The harness is still authorised and a valid write still works.
+        let resp = test::call_service(&app, write_request(1, &cookie).to_request()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A v1 row has no password envelope and cannot be backed up, so it is not
+    /// writable: the write is refused before the CAS rather than silently
+    /// storing a v2-shaped document under a v1 row.
+    #[actix_web::test]
+    async fn update_vault_refuses_a_non_v2_row() {
+        use sea_orm::{ColumnTrait, QueryFilter};
+
+        let pool = test_pool().await;
+        let (app, cookie) = authenticated_app!(&pool);
+
+        vault::Entity::update_many()
+            .col_expr(vault::Column::CryptoVersion, Expr::value(1))
+            .filter(vault::Column::Id.eq(VAULT_ID))
+            .exec(&pool)
+            .await
+            .expect("set crypto version");
+
+        let resp = test::call_service(&app, write_request(1, &cookie).to_request()).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], "UNSUPPORTED_CRYPTO_VERSION");
+
+        let stored = VaultEntity::find_by_id(VAULT_ID)
+            .one(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.version, 1, "the refused write must not advance");
+        assert_eq!(stored.crypto_version, 1);
     }
 }

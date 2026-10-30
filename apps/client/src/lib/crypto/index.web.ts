@@ -45,6 +45,28 @@ export {
   RECOVERY_PDF_MAGIC,
   RECOVERY_PDF_MAX_BYTES,
 } from "@voult/vault-core";
+
+// Protocol bounds — the client half of the server's write-boundary contract.
+// Import these instead of hard-coding a length or an iteration count.
+export {
+  SALT_BYTES,
+  IV_BYTES,
+  VERIFIER_BYTES,
+  KEY_WRAP_BYTES,
+  PROOF_BYTES,
+  MIN_VAULT_CIPHERTEXT_BYTES,
+  MAX_VAULT_CIPHERTEXT_BYTES,
+  KDF_READ_FLOOR,
+  KDF_ITERATIONS_WRITE_FLOOR,
+  KDF_ITERATIONS_CEILING,
+  SUPPORTED_CRYPTO_VERSION,
+  KdfParamsError,
+  assertKdfParams,
+  assertVaultCiphertextSize,
+  decodedBase64Length,
+  parseBase64Exact,
+  parseBase64Bounded,
+} from "@voult/vault-core";
 export type {
   BuildRecoveryPdfOptions,
   RecoveryPdfPayload,

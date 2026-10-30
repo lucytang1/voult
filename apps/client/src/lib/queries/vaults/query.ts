@@ -7,9 +7,17 @@ export interface CreateVaultRequest {
   vaultiv: string;
   salt: string;
   iterations: number;
-  crypto_version?: number;
-  vault_key_wrap?: string;
-  vault_key_wrap_iv?: string;
+  // Required by the server: the only supported crypto version (2). There is no
+  // default, because a missing value used to create a v1 row that could never
+  // be backed up or recovered.
+  crypto_version: number;
+  vault_key_wrap: string;
+  vault_key_wrap_iv: string;
+  vault_verifier: string;
+  recovery_verifier: string;
+  recovery_salt: string;
+  recovery_wrap: string;
+  recovery_wrap_iv: string;
 }
 
 export interface CreateVaultResponse {

@@ -117,7 +117,13 @@ export async function postLock(serverUrl = DEFAULT_SERVER_URL): Promise<{ lock_e
 }
 
 export function isVersionConflict(error: unknown): boolean {
-  return error instanceof Error && error.message.includes(" 409 ");
+  // The message carries the status and the body prefix. Require the specific
+  // code: a 409 `UNSUPPORTED_CRYPTO_VERSION` is terminal, not retryable.
+  return (
+    error instanceof Error &&
+    error.message.includes(" 409 ") &&
+    error.message.includes("VERSION_CONFLICT")
+  );
 }
 
 export function isNetworkError(error: unknown): boolean {

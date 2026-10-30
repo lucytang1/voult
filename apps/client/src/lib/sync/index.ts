@@ -12,7 +12,7 @@ import {
   markIntentsSynced,
   markIntentError,
 } from "../sqlite/web/services/intent-service";
-import { b64, decrypt, encrypt } from "../crypto/index.web";
+import { b64, decrypt, encrypt, MAX_VAULT_CIPHERTEXT_BYTES } from "../crypto/index.web";
 import { VaultItem, Folder } from "../state/type";
 import { updateVault, fetchVault } from "../queries/vault/query";
 import { isNetworkError } from "../queries/http";
@@ -76,8 +76,15 @@ const adoptServerSnapshot = async (
   await upsertVaultVersion(version);
 };
 
-const isVersionConflict = (error: unknown) =>
-  (error as { response?: { status?: number } })?.response?.status === 409;
+// Only a genuine document-version clash is retryable. Other 409s — e.g.
+// `UNSUPPORTED_CRYPTO_VERSION` — will not resolve by re-reading and re-pushing,
+// so treating every 409 as a conflict would spin the retry loop for nothing.
+const isVersionConflict = (error: unknown) => {
+  const response = (
+    error as { response?: { status?: number; data?: { code?: string } } }
+  )?.response;
+  return response?.status === 409 && response.data?.code === "VERSION_CONFLICT";
+};
 
 export async function sync() {
   const { vault, serverSession } = useAppStore.getState();
@@ -161,6 +168,18 @@ export async function sync() {
       JSON.stringify({ name: merged.name, folders: merged.folders, items: merged.items }),
       vaultKey,
     );
+    if (encryptedVault.cipher.length > MAX_VAULT_CIPHERTEXT_BYTES) {
+      // The server would reject this with a 400 and the intents would stay
+      // queued either way. Failing here keeps the reason local and avoids a
+      // pointless multi-megabyte upload. Intents are deliberately NOT marked
+      // failed: `fetchPendingIntents` skips rows with an `error`, and dropping
+      // them would let the next successful sync adopt the server snapshot and
+      // silently lose the user's local edits.
+      console.error(
+        `[Sync] Vault ciphertext is ${encryptedVault.cipher.length} bytes; the limit is ${MAX_VAULT_CIPHERTEXT_BYTES}. Intents remain queued.`,
+      );
+      return;
+    }
     if (selectionChanged()) {
       console.warn("Sync aborted before push: selection changed mid-run", { vaultId });
       return;

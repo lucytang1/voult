@@ -100,6 +100,29 @@ export { mergeVault } from "./merge.js";
 export type { MergeVaultResult, PendingIntent, VaultDocumentLike } from "./merge.js";
 
 export {
+  SALT_BYTES,
+  IV_BYTES,
+  VERIFIER_BYTES,
+  KEY_WRAP_BYTES,
+  PROOF_BYTES,
+  MIN_VAULT_CIPHERTEXT_BYTES,
+  MAX_VAULT_CIPHERTEXT_BYTES,
+  KDF_READ_FLOOR,
+  KDF_ITERATIONS_WRITE_FLOOR,
+  KDF_ITERATIONS_CEILING,
+  SUPPORTED_CRYPTO_VERSION,
+  MAX_REMOTE_ID_LENGTH,
+  MAX_JSON_BODY_BYTES,
+  MAX_PACKAGE_BYTES,
+  KdfParamsError,
+  assertKdfParams,
+  assertVaultCiphertextSize,
+  decodedBase64Length,
+  parseBase64Exact,
+  parseBase64Bounded,
+} from "./bounds.js";
+
+export {
   buildRecoveryPdf,
   parseRecoveryPdf,
   recoveryPdfFileName,

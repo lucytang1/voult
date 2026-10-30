@@ -2,12 +2,22 @@ import { passwordLoginFlow } from "../auth/flows/login";
 import { fetchCryptoParams } from "../queries/cryptoParams/query";
 import type { UnlockedSession } from "../auth/flows";
 import {
+  MAX_VAULT_CIPHERTEXT_BYTES,
   createAuthKey,
   getAuthVerifierB64,
   derivePasswordWrappingKey,
   importVaultKey,
   unwrapKeyBytes,
   decrypt,
+  assertKdfParams,
+  parseBase64Exact,
+  decodedBase64Length,
+  SALT_BYTES,
+  IV_BYTES,
+  VERIFIER_BYTES,
+  KEY_WRAP_BYTES,
+  MIN_VAULT_CIPHERTEXT_BYTES,
+  SUPPORTED_CRYPTO_VERSION,
 } from "../crypto/index.web";
 import { persistDeviceSecrets } from "../auth/utils";
 import { submitRegistration } from "./registration";
@@ -102,20 +112,58 @@ export async function importVaultFromCloud(args: {
   if (pkg.vaultId !== args.vaultId) {
     throw new Error(`Package vaultId mismatch: expected ${args.vaultId}, got ${pkg.vaultId}`);
   }
+
+  // Exact shapes BEFORE any derivation. The package is a file the user picked;
+  // `iterations: 2147483647` would otherwise pin the tab in PBKDF2 with no
+  // cancel, and a short/oversized envelope would only be refused later by
+  // /register — after the expensive part.
+  if (pkg.cryptoVersion !== SUPPORTED_CRYPTO_VERSION) {
+    throw new Error(`Unsupported backup crypto version: ${String(pkg.cryptoVersion)}.`);
+  }
   const salt = pkg.cryptoParameters?.salt;
   const iterations = pkg.cryptoParameters?.iterations;
-  if (!salt || !iterations) throw new Error("Package missing crypto parameters");
-  if (!pkg.snapshot?.ciphertext || !pkg.snapshot?.iv) throw new Error("Package missing snapshot");
-  if (!pkg.passwordKeyEnvelope?.wrappedVaultKey || !pkg.passwordKeyEnvelope?.iv) {
-    throw new Error("Package missing password envelope");
+  if (!salt || iterations === undefined) {
+    throw new Error("Package missing crypto parameters");
   }
+  if (!parseBase64Exact(salt, SALT_BYTES)) {
+    throw new Error("Backup has an invalid KDF salt.");
+  }
+  assertKdfParams(SALT_BYTES, iterations);
+
+  const snapshot = pkg.snapshot;
+  const ciphertextLen = snapshot ? decodedBase64Length(snapshot.ciphertext) : null;
+  if (
+    !snapshot ||
+    ciphertextLen === null ||
+    ciphertextLen < MIN_VAULT_CIPHERTEXT_BYTES ||
+    ciphertextLen > MAX_VAULT_CIPHERTEXT_BYTES ||
+    !parseBase64Exact(snapshot.iv, IV_BYTES)
+  ) {
+    throw new Error("Backup has an invalid vault snapshot.");
+  }
+
+  const passwordEnvelope = pkg.passwordKeyEnvelope;
+  if (
+    !passwordEnvelope ||
+    !parseBase64Exact(passwordEnvelope.wrappedVaultKey, KEY_WRAP_BYTES) ||
+    !parseBase64Exact(passwordEnvelope.iv, IV_BYTES)
+  ) {
+    throw new Error("Backup has an invalid password envelope.");
+  }
+
   // The recovery envelope is what lets this restore keep the vault's existing
   // recovery key. A package without it is not a package we can restore without
   // silently changing the user's recovery material, so refuse it.
   const recovery = pkg.recoveryEnvelope;
-  if (!recovery?.salt || !recovery.verifier || !recovery.wrappedVaultKey || !recovery.iv) {
+  if (
+    !recovery ||
+    !parseBase64Exact(recovery.salt, SALT_BYTES) ||
+    !parseBase64Exact(recovery.verifier, VERIFIER_BYTES) ||
+    !parseBase64Exact(recovery.wrappedVaultKey, KEY_WRAP_BYTES) ||
+    !parseBase64Exact(recovery.iv, IV_BYTES)
+  ) {
     throw new Error(
-      "That backup has no recovery material, so it cannot be restored without changing the vault's recovery key.",
+      "That backup has no valid recovery material, so it cannot be restored without changing the vault's recovery key.",
     );
   }
 
