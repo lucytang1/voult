@@ -8,7 +8,13 @@
 import type { VaultItem, Folder, SsoProvider, SsoSignIn } from "@voult/vault-core";
 export type { VaultItem, Folder, SsoProvider, SsoSignIn };
 
-export type Rank = "exact" | "linked" | "subdomain";
+/**
+ * Match strength. There is no weaker rank: a login is offered only for its
+ * exact canonical origin or an explicitly linked URL. `decideFillBest` in
+ * vault-core treats any other string as weak, so a future rank cannot become
+ * an automatic fill by accident.
+ */
+export type Rank = "exact" | "linked";
 
 export interface LoginMatch {
   id: string;
@@ -27,6 +33,18 @@ export interface LoginMatch {
   sso: SsoSignIn[];
   /** Display-only icon URL (stored favicon or `<origin>/favicon.ico`). */
   faviconUrl?: string;
+}
+
+/**
+ * Worker → content: result of the fill-best shortcut. `fillId` is the only way
+ * to auto-fill, and the worker sets it only when `decideFillBest` resolved
+ * exactly one exact/linked match. Otherwise the tab opens its chooser for
+ * `ids` — a single weak match must never fill itself.
+ */
+export interface FillBestMessage {
+  type: "VOULT_FILL_BEST";
+  fillId?: string;
+  ids: string[];
 }
 
 export type PopupStatus = "needs-onboarding" | "locked" | "unlocked";

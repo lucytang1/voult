@@ -77,9 +77,17 @@ cd apps/extension && npm install && npm run build
 - Idle past the configured timeout, screen lock, Lock button, and browser
   restart all return to locked (memory wiped; session + envelope kept).
 - Locked extension stays silent on login pages (no dropdown, no badge).
-- Unlocked: only same-origin matches suggested (exact/linked first, subdomain
-  marked weaker); lookalike host (`examp1e`) gets nothing; cross-origin
-  iframes never filled; `http` pages show insecure markers.
+- Unlocked: only **exact origin** matches and explicitly linked `urls` are
+  suggested. There is no subdomain/suffix fallback: a different host — parent,
+  child, sibling, or the same host on another port — gets nothing. Lookalike
+  hosts (`examp1e`, a Cyrillic `аpple.com`) get nothing; cross-origin iframes
+  are never filled; `http` pages show insecure markers.
+- `Ctrl/Cmd+Shift+L` fills only when there is exactly one exact/linked match.
+  With several matches, or none, it opens the chooser (or does nothing); it
+  never auto-fills a merely related site. The popup still lists every login
+  and its copy buttons work, but Fill is origin-checked too: for a site whose
+  host changed, copy the password (or save the login again from the new
+  origin) rather than expecting a one-click fill.
 - Suggestions are also scoped to the popup's folder filter: pick a folder with
   no login for the site and focusing the field shows no dropdown; the login
   appears again after switching to *All folders* (or its own folder).

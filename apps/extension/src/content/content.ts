@@ -14,6 +14,7 @@ import { showDropdown } from "./ui";
 import { showSaveBanner, showOAuthSaveBanner } from "./banner";
 import type {
   ExtensionMessage,
+  FillBestMessage,
   FillError,
   FillPayload,
   LoginMatch,
@@ -122,29 +123,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
   if (msg?.type === "VOULT_FILL_BEST") {
-    const ids = (msg.ids ?? []) as string[];
-    if (ids.length === 0) return false;
+    const m = msg as FillBestMessage;
     const forms = findLoginForms();
     const form = forms[0] ?? null;
-    // Shortcut semantics: exactly one candidate fills immediately (or
-    // highlights the SSO button for passwordless logins, no form needed); several
-    // candidates open the dropdown on the username (or password) field so the
-    // user — not the page — disambiguates.
-    if (ids.length === 1) {
-      void requestFill(form, ids[0]);
-    } else {
-      if (!form) return false;
-      void (async () => {
-        const matches = await send<LoginMatch[] | { error: string }>({ type: "QUERY_LOGINS" });
-        if (isErrorResponse(matches)) return;
-        const anchor = form.username ?? form.password;
-        showDropdown(anchor, matches, {
-          onPick: (id) => void pickMatch(form, matches, id),
-          onDismiss: () => undefined,
-        });
-        (anchor as HTMLElement).focus();
-      })();
+    // The worker owns the auto-fill decision. `fillId` is present only when
+    // `decideFillBest` resolved exactly one exact/linked match, so this branch
+    // is the only way the shortcut ever types a secret. A single weak match
+    // arrives without a fillId and opens the chooser instead.
+    if (m.fillId) {
+      void requestFill(form, m.fillId);
+      return false;
     }
+    const ids = (m.ids ?? []) as string[];
+    if (ids.length === 0 || !form) return false;
+    void (async () => {
+      const matches = await send<LoginMatch[] | { error: string }>({ type: "QUERY_LOGINS" });
+      if (isErrorResponse(matches)) return;
+      const anchor = form.username ?? form.password;
+      showDropdown(anchor, matches, {
+        onPick: (id) => void pickMatch(form, matches, id),
+        onDismiss: () => undefined,
+      });
+      (anchor as HTMLElement).focus();
+    })();
     return false;
   }
   return false;

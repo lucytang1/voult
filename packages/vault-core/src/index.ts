@@ -136,5 +136,6 @@ export {
   canonicalizeOrigin,
   originOfUrl,
   rankOriginMatch,
+  decideFillBest,
 } from "./origin.js";
-export type { OriginMatchRank } from "./origin.js";
+export type { OriginMatchRank, FillDecision } from "./origin.js";
