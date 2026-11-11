@@ -18,7 +18,7 @@ Client (run in `apps/client`):
 ```sh
 npm install            # runs patch-package via postinstall — patches in patches/ must apply
 npm run sync:sqlite-web   # REQUIRED before web export; copies sqlite-wasm assets into public/sqlite
-npm run build:web      # exports to dist/ (clears EXPO_PUBLIC_API_URL so it uses same-origin /api)
+npm run build:web      # exports to dist/ and runs scripts/check-web-dist.mjs (clears EXPO_PUBLIC_API_URL so it uses same-origin /api)
 npx tsc --noEmit       # typecheck; there is no lint/test script
 npm run web            # dev server on :8081
 ```

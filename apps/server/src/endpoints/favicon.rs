@@ -888,6 +888,14 @@ fn icon_response(bytes: Vec<u8>, content_type: String) -> HttpResponse {
     HttpResponse::Ok()
         .content_type(content_type)
         .insert_header(("Cross-Origin-Resource-Policy", "cross-origin"))
+        // The proxy can return SVG. Navigated directly, SVG is a document and
+        // can execute script; sandbox makes its origin opaque and blocks
+        // scripts/forms, while `default-src 'none'` blocks subresources. This
+        // replaces the app CSP on this response because DefaultHeaders does
+        // not overwrite an existing header — an image does not need the app
+        // document policy. `<img>` rendering and the client's byte fetch are
+        // unaffected.
+        .insert_header(("Content-Security-Policy", "default-src 'none'; sandbox"))
         .body(bytes)
 }
 
@@ -957,6 +965,29 @@ pub async fn favicon(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_response_is_sandboxed_and_keeps_corp() {
+        let response = icon_response(b"<svg/>".to_vec(), "image/svg+xml".to_string());
+        assert_eq!(
+            response
+                .headers()
+                .get("Content-Security-Policy")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "default-src 'none'; sandbox"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("Cross-Origin-Resource-Policy")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "cross-origin"
+        );
+    }
 
     #[test]
     fn public_ips_pass_and_special_ranges_fail() {

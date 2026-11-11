@@ -23,6 +23,24 @@ authenticated session. Updates use ciphertext-only version compare-and-swap.
 bindings, and Drive operations are likewise scoped to the authenticated
 `vault_id`; provider account/email values are metadata only.
 
+## Response headers
+
+`src/security_headers.rs` is the single policy source. It is applied as the
+outermost Actix middleware in `main.rs`, so static HTML, API responses, CORS
+preflights, and error responses all receive it. COOP/COEP remain
+`same-origin`/`require-corp` for sqlite-wasm OPFS; the CSP pins Expo's one
+inline hydration script by SHA-256, allows `wasm-unsafe-eval` and same-origin
+workers for SQLite, and keeps scripts same-origin. HSTS and
+`upgrade-insecure-requests` are emitted only when `VOULT_HTTPS=1`; the shipped
+server binds loopback HTTP, so they are off by default.
+
+Favicon responses (`GET /api/favicon`) carry their own
+`Content-Security-Policy: default-src 'none'; sandbox` because the proxy can
+return SVG and `DefaultHeaders` does not overwrite an existing header.
+
+`apps/client/public/_headers` mirrors the TLS policy for static-host
+deployments; it is copied into `dist/` but is not read by Actix.
+
 ## Logging
 
 All server logging goes through the shared `crates/logger` crate: the default

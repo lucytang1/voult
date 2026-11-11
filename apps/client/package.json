@@ -30,7 +30,6 @@
     "gl-matrix": "^3.4.4",
     "lucide-react": "^0.562.0",
     "nativewind": "^5.0.0-preview.2",
-    "posthog-react-native": "^4.23.0",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "react-native": "0.83.2",
