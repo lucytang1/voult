@@ -7,7 +7,7 @@
 //! and never sees plaintext. It can therefore re-emit the package *exactly*
 //! because every field is ciphertext or public crypto metadata the server
 //! already stores: `vault.vault` (AES-GCM ciphertext), `vault.vaultiv`,
-//! `salt`, `iterations`, `crypto_version`, the password-wrapped vault-key
+//! `salt`, the KDF profile, `crypto_version`, the password-wrapped vault-key
 //! envelope, and the recovery envelope. Building a backup is a re-serialization,
 //! never a decryption.
 //!
@@ -26,16 +26,23 @@
 use serde::Serialize;
 
 use crate::entity::vault;
+use crate::kdf::KdfParams;
 
 /// Bump only in lockstep with `PACKAGE_FORMAT_VERSION` in
-/// `apps/client/src/lib/crypto/vault.ts`. Version 2 added `recoveryEnvelope`.
-const PACKAGE_FORMAT_VERSION: u32 = 2;
+/// `apps/client/src/lib/crypto/vault.ts`. Version 3 replaced the KDF
+/// `iterations` integer with the self-describing `kdf` descriptor. The reader
+/// accepts exactly this version: no v2 adapter, because no package v2 exists
+/// in the wild.
+const PACKAGE_FORMAT_VERSION: u32 = 3;
 
 /// Why a package could not be produced. These are surfaced verbatim to the
 /// client as `sync_status`/`last_mirror_error`, so they stay short, stable, and
 /// free of provider detail, ciphertext, or key material.
 pub const ERR_MISSING_ENVELOPE: &str = "MISSING_KEY_ENVELOPE";
 pub const ERR_LEGACY_CRYPTO: &str = "LEGACY_CRYPTO_VERSION";
+/// The row's `kdf` column is missing or corrupt. A package built from it could
+/// not reproduce the vault's password credential, so the backup is refused.
+pub const ERR_INVALID_KDF: &str = "INVALID_KDF_PROFILE";
 /// The row has no recovery material, so a package built from it could not
 /// reproduce the vault's recovery path. Every row created through the API
 /// carries recovery, so this is a defensive guard rather than a real state.
@@ -44,7 +51,9 @@ pub const ERR_MISSING_RECOVERY: &str = "MISSING_RECOVERY";
 #[derive(Serialize)]
 struct CryptoParameters {
     salt: String,
-    iterations: i32,
+    /// Password KDF profile. Self-describing so a package restored on a
+    /// different server derives the same credential.
+    kdf: KdfParams,
 }
 
 #[derive(Serialize)]
@@ -159,6 +168,8 @@ pub fn build(vault: &vault::Model) -> Result<Vec<u8>, &'static str> {
         return Err(ERR_MISSING_RECOVERY);
     };
 
+    let kdf = KdfParams::parse_stored(&vault.kdf).map_err(|_| ERR_INVALID_KDF)?;
+
     let pkg = VoultPackage {
         package_format_version: PACKAGE_FORMAT_VERSION,
         vault_id: vault.id.clone(),
@@ -166,7 +177,7 @@ pub fn build(vault: &vault::Model) -> Result<Vec<u8>, &'static str> {
         crypto_version: vault.crypto_version,
         crypto_parameters: CryptoParameters {
             salt: vault.salt.clone(),
-            iterations: vault.iterations,
+            kdf,
         },
         snapshot: Snapshot {
             ciphertext: vault.vault.clone(),
@@ -196,7 +207,7 @@ mod tests {
             id: "11111111-2222-4333-8444-555555555555".to_string(),
             vault: "Y2lwaGVydGV4dA==".to_string(),
             salt: "c2FsdA==".to_string(),
-            iterations: 60_000,
+            kdf: KdfParams::floor().to_stored(),
             vaultiv: "aXY=".to_string(),
             vault_verifier: "dmVyaWZpZXI=".to_string(),
             created_at: chrono::Utc::now(),
@@ -221,12 +232,14 @@ mod tests {
 
         // Field names are the client's camelCase contract; a rename here would
         // silently break provider-side restore on another device.
-        assert_eq!(json["packageFormatVersion"], 2);
+        assert_eq!(json["packageFormatVersion"], 3);
         assert_eq!(json["vaultId"], "11111111-2222-4333-8444-555555555555");
         assert_eq!(json["logicalRevision"], 7);
         assert_eq!(json["cryptoVersion"], 2);
         assert_eq!(json["cryptoParameters"]["salt"], "c2FsdA==");
-        assert_eq!(json["cryptoParameters"]["iterations"], 60_000);
+        assert_eq!(json["cryptoParameters"]["kdf"]["algorithm"], "argon2id");
+        assert_eq!(json["cryptoParameters"]["kdf"]["memory_kib"], 19_456);
+        assert_eq!(json["cryptoParameters"]["kdf"]["time_cost"], 2);
         assert_eq!(json["snapshot"]["ciphertext"], "Y2lwaGVydGV4dA==");
         assert_eq!(json["snapshot"]["iv"], "aXY=");
         assert_eq!(json["passwordKeyEnvelope"]["wrappedVaultKey"], "d3JhcA==");
@@ -284,6 +297,15 @@ mod tests {
         assert_eq!(build(&no_verifier), Err(ERR_MISSING_RECOVERY));
     }
 
+    /// A row whose KDF descriptor does not parse cannot produce a restorable
+    /// package: restoring it would leave the vault unopenable.
+    #[test]
+    fn invalid_kdf_is_rejected() {
+        let mut v = sample_vault();
+        v.kdf = r#"{"algorithm":"pbkdf2-sha256","iterations":60000}"#.to_string();
+        assert_eq!(build(&v), Err(ERR_INVALID_KDF));
+    }
+
     /// A package mirrored after POST /recovery/rewrap must carry the NEW
     /// password envelope. That is correct, not a bug: recovery rotates the
     /// password credential, so restoring this backup needs the new password and
@@ -292,9 +314,9 @@ mod tests {
     #[test]
     fn package_after_rewrap_carries_the_new_password_envelope() {
         let mut post = sample_vault();
-        // What rewrap writes: new salt/iterations/verifier + new envelope.
+        // What rewrap writes: new salt/KDF profile/verifier + new envelope.
         post.salt = "bmV3LXNhbHQ=".to_string();
-        post.iterations = 120_000;
+        post.kdf = KdfParams::ladder()[2].to_stored();
         post.vault_verifier = "bmV3LXZlcmlmaWVy".to_string();
         post.vault_key_wrap = Some("bmV3LWdyYXA=".to_string());
         post.vault_key_wrap_iv = Some("bmV3LWl2".to_string());
@@ -309,7 +331,8 @@ mod tests {
             serde_json::from_slice(&build(&post).expect("package builds")).unwrap();
 
         assert_eq!(json["cryptoParameters"]["salt"], "bmV3LXNhbHQ=");
-        assert_eq!(json["cryptoParameters"]["iterations"], 120_000);
+        assert_eq!(json["cryptoParameters"]["kdf"]["memory_kib"], 65_536);
+        assert_eq!(json["cryptoParameters"]["kdf"]["time_cost"], 3);
         assert_eq!(
             json["passwordKeyEnvelope"]["wrappedVaultKey"],
             "bmV3LWdyYXA="

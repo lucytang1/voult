@@ -53,13 +53,36 @@ impl Environment {
     }
 }
 
+/// Platform data directory, deliberately identical to the server's
+/// `apps/server/src/config.rs::voult_data_dir()`:
+/// - macOS: `~/Library/Application Support/Voult`
+/// - Linux: `$XDG_DATA_HOME/Voult` or `~/.local/share/Voult`
+///
+/// The launcher and server must agree, or a per-install `.env` would be read by
+/// only one of the two processes.
+fn voult_data_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join("Library/Application Support"))?;
+
+    #[cfg(not(target_os = "macos"))]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+        })?;
+
+    Some(base.join("Voult"))
+}
+
 /// Load `.env` files so `VOULT_ENV` / `VOULT_LOG_LEVEL` are visible even when
 /// launcher CWD != repo root. Priority (shell wins, `from_path` does not
 /// override):
 /// 1. CWD `.env`
 /// 2. `apps/server/.env` (authoritative dev file)
 /// 3. repo root `.env`
-/// 4. `~/Library/Application Support/Voult/.env` (per-install overrides)
+/// 4. per-install `.env` (see [`voult_data_dir`])
 pub fn load_dotenv() {
     let _ = dotenvy::dotenv();
     let launcher_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -77,8 +100,8 @@ pub fn load_dotenv() {
     // A bundled launcher has no useful CWD or repo root. The server already
     // reads this per-install file, so the launcher reads it too; otherwise
     // VOULT_LOG_LEVEL would work for only one of the two processes.
-    if let Ok(home) = env::var("HOME") {
-        let user_env = PathBuf::from(home).join("Library/Application Support/Voult/.env");
+    if let Some(dir) = voult_data_dir() {
+        let user_env = dir.join(".env");
         if user_env.exists() {
             let _ = dotenvy::from_path(&user_env);
         }

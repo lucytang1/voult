@@ -10,7 +10,7 @@
 // M0 default is localhost-only. M1 adds a settings-stored server URL with
 // http-rejection outside the loopback allowlist.
 
-import type { UpdateVaultRequest, UpdateVaultResponse, VaultResponse } from "@voult/vault-core";
+import type { UpdateVaultRequest, UpdateVaultResponse, VaultResponse, KdfParams } from "@voult/vault-core";
 
 export const DEFAULT_SERVER_URL = "http://localhost:8080";
 
@@ -34,12 +34,12 @@ async function request<T>(path: string, init: RequestInit, serverUrl: string): P
 export async function fetchCryptoParams(
   vaultId: string,
   serverUrl = DEFAULT_SERVER_URL,
-): Promise<{ salt: string; iterations: number }> {
+): Promise<{ salt: string; kdf: KdfParams }> {
   const res = await fetch(`${apiBase(serverUrl)}/get_crypto_params?vault_id=${encodeURIComponent(vaultId)}`, {
     credentials: "include",
   });
   if (!res.ok) throw new Error(`get_crypto_params failed: ${res.status}`);
-  return (await res.json()) as { salt: string; iterations: number };
+  return (await res.json()) as { salt: string; kdf: KdfParams };
 }
 
 export async function postAuth(

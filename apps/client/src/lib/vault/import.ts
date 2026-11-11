@@ -1,15 +1,14 @@
 import { passwordLoginFlow } from "../auth/flows/login";
-import { fetchCryptoParams } from "../queries/cryptoParams/query";
 import type { UnlockedSession } from "../auth/flows";
 import {
-  createAuthKey,
-  getAuthVerifierB64,
-  derivePasswordWrappingKey,
+  derivePasswordKeys,
   importVaultKey,
   unwrapKeyBytes,
   decrypt,
 } from "../crypto/index.web";
+import { isKnownKdf } from "@voult/vault-core";
 import { persistDeviceSecrets } from "../auth/utils";
+import { maybeUpgradeKdf } from "../auth/kdf-upgrade";
 import { submitRegistration } from "./registration";
 import type { RegisterRequest } from "../queries/SignUp/api.schema";
 import { readCloudVaultPending, readCloudVault } from "../cloud/api";
@@ -48,13 +47,9 @@ export async function importVaultFromCloud(args: {
   const shouldTryServerFirst = !args.pendingState;
   if (shouldTryServerFirst) {
     try {
-      const params = await fetchCryptoParams(args.vaultId);
-      return await passwordLoginFlow(
-        args.vaultId,
-        args.masterPassword,
-        params.salt,
-        params.iterations,
-      );
+      // `passwordLoginFlow` fetches the params itself; a VAULT_NOT_FOUND from
+      // that fetch is what tells us to fall back to the provider copy.
+      return await passwordLoginFlow(args.vaultId, args.masterPassword);
     } catch (e: any) {
       const code = e?.response?.data?.code as string | undefined;
       // Only fallback on VAULT_NOT_FOUND; other errors (network, etc.) bubble up.
@@ -102,9 +97,22 @@ export async function importVaultFromCloud(args: {
   if (pkg.vaultId !== args.vaultId) {
     throw new Error(`Package vaultId mismatch: expected ${args.vaultId}, got ${pkg.vaultId}`);
   }
+  // Format 3 replaced the KDF iteration integer with the self-describing
+  // descriptor. There is no v2 adapter: no package in the wild predates this,
+  // and a loud rejection beats misparsing.
+  if (pkg.packageFormatVersion !== 3) {
+    throw new Error(
+      `That backup was made by an unsupported version (format ${pkg.packageFormatVersion}).`,
+    );
+  }
   const salt = pkg.cryptoParameters?.salt;
-  const iterations = pkg.cryptoParameters?.iterations;
-  if (!salt || !iterations) throw new Error("Package missing crypto parameters");
+  const kdf = pkg.cryptoParameters?.kdf;
+  if (!salt || !kdf) throw new Error("Package missing crypto parameters");
+  if (!isKnownKdf(kdf)) {
+    throw new Error(
+      "That backup uses a password protection profile this version of Voult does not know.",
+    );
+  }
   if (!pkg.snapshot?.ciphertext || !pkg.snapshot?.iv) throw new Error("Package missing snapshot");
   if (!pkg.passwordKeyEnvelope?.wrappedVaultKey || !pkg.passwordKeyEnvelope?.iv) {
     throw new Error("Package missing password envelope");
@@ -119,15 +127,17 @@ export async function importVaultFromCloud(args: {
     );
   }
 
-  // Verify master password locally: derive wrapping key and unwrap vault key.
+  // Verify master password locally: derive the credential and unwrap the vault
+  // key. One Argon2 run gives both the wrapping key and the verifier.
   let vaultKeyRaw: Uint8Array;
   let vaultKey: CryptoKey;
+  let credential: Awaited<ReturnType<typeof derivePasswordKeys>>;
   try {
-    const wrappingKey = await derivePasswordWrappingKey(args.masterPassword, salt, iterations);
+    credential = await derivePasswordKeys(args.masterPassword, salt, kdf);
     vaultKeyRaw = await unwrapKeyBytes(
       pkg.passwordKeyEnvelope.wrappedVaultKey,
       pkg.passwordKeyEnvelope.iv,
-      wrappingKey
+      credential.wrappingKey
     );
     vaultKey = await importVaultKey(vaultKeyRaw);
   } catch {
@@ -148,11 +158,10 @@ export async function importVaultFromCloud(args: {
     throw new Error("Package snapshot decrypt produced invalid JSON");
   }
 
-  // Derive verifier for registration. The recovery material comes straight from
-  // the package — no `generateRecoveryMaterial` here, so the vault keeps the one
-  // recovery key it was created with.
-  const authKey = await createAuthKey(args.masterPassword, salt, iterations);
-  const vaultVerifier = await getAuthVerifierB64(authKey);
+  // The recovery material comes straight from the package — no
+  // `generateRecoveryMaterial` here, so the vault keeps the one recovery key it
+  // was created with. The verifier comes from the credential already derived.
+  const vaultVerifier = credential.vaultVerifier;
 
   // Parse through the shared decoder so legacy packages (no `folders` key) are
   // interpreted as a single Personal folder, identically to every other surface.
@@ -165,7 +174,7 @@ export async function importVaultFromCloud(args: {
     vault_id: pkg.vaultId,
     vault_verifier: vaultVerifier,
     salt,
-    iterations,
+    kdf,
     vault: pkg.snapshot.ciphertext,
     vaultiv: pkg.snapshot.iv,
     crypto_version: pkg.cryptoVersion ?? 2,
@@ -183,6 +192,18 @@ export async function importVaultFromCloud(args: {
     const { lockEpoch } = await submitRegistration(request);
     // Persist the device envelope so the next unlock is a local unwrap.
     await persistDeviceSecrets(vaultKeyRaw, pkg.vaultId);
+    // The package may carry a lower rung than this device calibrates. Upgrade
+    // after registration, best-effort: a failure leaves the restored vault at
+    // its package profile and the next password unlock retries.
+    const upgradeKey = vaultKeyRaw.slice();
+    void maybeUpgradeKdf({
+      vaultId: pkg.vaultId,
+      password: args.masterPassword,
+      currentKdf: kdf,
+      currentVerifier: credential.vaultVerifier,
+      vaultKeyRaw: upgradeKey,
+    });
+    vaultKeyRaw.fill(0);
     return {
       session: {
         vaultId: pkg.vaultId,
@@ -203,7 +224,6 @@ export async function importVaultFromCloud(args: {
     // this write. That row is authoritative and already carries the same
     // recovery material (it came from the same package lineage), so a normal
     // login is the right outcome.
-    const params = await fetchCryptoParams(pkg.vaultId);
-    return passwordLoginFlow(pkg.vaultId, args.masterPassword, params.salt, params.iterations);
+    return passwordLoginFlow(pkg.vaultId, args.masterPassword);
   }
 }

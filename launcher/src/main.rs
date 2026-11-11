@@ -10,6 +10,13 @@ use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuId, MenuItem},
 };
+
+// Linux drives the launcher from a GTK main loop (see `main` at the bottom):
+// tray-icon's Linux backend is libappindicator, which owns GTK widgets, and
+// GTK objects must only be touched from the thread running `gtk::main()`.
+// winit is used on macOS (and would be on Windows) because there the tray is a
+// native menu-bar item and winit's own event loop is sufficient.
+#[cfg(not(target_os = "linux"))]
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -64,8 +71,20 @@ enum ServerState {
     RunningElsewhere { pid: Option<u32> },
 }
 
+#[cfg(not(target_os = "linux"))]
 enum UserEvent {
     MenuEvent(MenuEvent),
+}
+
+/// Extract the first `pid=NNN` value from `ss -p` output.
+#[cfg(target_os = "linux")]
+fn parse_pid_field(text: &str) -> Option<u32> {
+    let start = text.find("pid=")? + "pid=".len();
+    let digits: String = text[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 struct Launcher {
@@ -77,6 +96,9 @@ struct Launcher {
     /// Handle to the process we spawned (`cargo run`). Kept separate from
     /// `state` so Stop always works while we own the child.
     child: Option<Child>,
+    /// Next winit poll deadline. The Linux build uses a GLib timeout instead,
+    /// so this is only read on macOS.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     next_poll: Instant,
     last_health_probe: Instant,
     /// Whether we have already auto-opened the browser this launcher session.
@@ -112,8 +134,8 @@ impl Launcher {
     }
 
     /// Best-effort lookup of whichever PID is holding the server port, used to
-    /// label "Running elsewhere". macOS-only via lsof; failure just means no
-    /// pid is displayed.
+    /// label "Running elsewhere". Failure just means no pid is displayed.
+    #[cfg(target_os = "macos")]
     fn foreign_pid() -> Option<u32> {
         let output = Command::new("lsof")
             .args(["-ti", "tcp:8080"])
@@ -122,6 +144,43 @@ impl Launcher {
             .ok()?;
         let first = String::from_utf8_lossy(&output.stdout);
         first.lines().next()?.trim().parse().ok()
+    }
+
+    /// Linux equivalent. `ss` (iproute2) is present on essentially every
+    /// distro and, unlike lsof, does not need a separate install. Both tools
+    /// can only see other users' PIDs as root, but the only process that
+    /// matters here is the user's own leftover server.
+    #[cfg(target_os = "linux")]
+    fn foreign_pid() -> Option<u32> {
+        // `ss -ltnpH 'sport = :8080'` prints e.g.
+        //   LISTEN 0 128 127.0.0.1:8080 0.0.0.0:* users:(("voult-server",pid=1234,fd=8))
+        if let Ok(output) = Command::new("ss")
+            .args(["-ltnpH", "sport = :8080"])
+            .stdin(Stdio::null())
+            .output()
+        {
+            if let Some(pid) = parse_pid_field(&String::from_utf8_lossy(&output.stdout)) {
+                return Some(pid);
+            }
+        }
+
+        // Fallback for minimal images without iproute2.
+        let output = Command::new("lsof")
+            .args(["-ti", "tcp:8080", "-sTCP:LISTEN"])
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn foreign_pid() -> Option<u32> {
+        None
     }
 
     /// Human-readable description of an exit status for the crash line.
@@ -234,15 +293,29 @@ impl Launcher {
             format_args!("Opening browser at {url}"),
             logger::Metadata::new(),
         );
-        // `open` crate handles macOS `open` correctly; fallback to Command.
-        if open::that(url).is_err() {
-            let _ = Command::new("open").arg(url).stdin(Stdio::null()).spawn();
+        #[cfg(target_os = "linux")]
+        {
+            // xdg-open can block until the browser detaches, and this runs on
+            // the GTK main loop — a hung launcher there would freeze the tray.
+            let _ = open::that_in_background(url);
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            // `open` crate dispatches to `open` (macOS) / the platform helper;
+            // the explicit Command is only for environments where the crate's
+            // helper process is unavailable.
+            if open::that(url).is_err() {
+                let _ = Command::new("open").arg(url).stdin(Stdio::null()).spawn();
+            }
         }
     }
 
-    /// Resolve the server binary path for both bundled (.app) and dev (`cargo run`) modes.
+    /// Resolve the server binary path for bundled layouts and dev (`cargo run`).
     fn resolve_server_binary() -> Option<PathBuf> {
-        // 1. Bundled: sibling in Contents/MacOS (Voult launcher next to voult-server)
+        // 1. Bundled: sibling of the launcher. On macOS that is
+        // Contents/MacOS/voult-server; on Linux the installer puts both
+        // binaries in ~/.local/lib/voult/ (or /opt/voult/bin).
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 let sibling = dir.join("voult-server");
@@ -273,10 +346,30 @@ impl Launcher {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "repository root not found"))
     }
 
+    /// Where to append the spawned server's stdout/stderr.
+    ///
+    /// macOS keeps the existing `~/Library/Logs/Voult/server.log`. Linux
+    /// follows the XDG base-directory spec: `$XDG_STATE_HOME/voult/server.log`
+    /// (default `~/.local/state/voult/`), which is the conventional home for
+    /// logs — `~/.local/share` would put them next to the database.
     fn log_file_path() -> Option<PathBuf> {
-        // ~/Library/Logs/Voult/server.log
-        let home = std::env::var("HOME").ok()?;
-        let dir = PathBuf::from(home).join("Library/Logs/Voult");
+        let home = std::env::var_os("HOME").map(PathBuf::from)?;
+
+        #[cfg(target_os = "macos")]
+        let dir = home.join("Library/Logs/Voult");
+
+        #[cfg(target_os = "linux")]
+        let dir = {
+            let state_home = std::env::var_os("XDG_STATE_HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .unwrap_or_else(|| home.join(".local/state"));
+            state_home.join("voult")
+        };
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let dir = home.join(".voult").join("logs");
+
         let _ = fs::create_dir_all(&dir);
         Some(dir.join("server.log"))
     }
@@ -427,33 +520,38 @@ impl Launcher {
         if let Some(item) = &self.start_stop_item {
             match &self.state {
                 ServerState::Starting | ServerState::Running { .. } => {
-                    item.set_text("Stop Server");
-                    item.set_enabled(true);
+                    set_text_if_changed(item, "Stop Server");
+                    set_enabled_if_changed(item, true);
                 }
                 ServerState::Stopped | ServerState::Crashed { .. } => {
-                    item.set_text("Start Server");
-                    item.set_enabled(true);
+                    set_text_if_changed(item, "Start Server");
+                    set_enabled_if_changed(item, true);
                 }
                 ServerState::RunningElsewhere { .. } => {
-                    item.set_text("Server Already Running");
-                    item.set_enabled(false);
+                    set_text_if_changed(item, "Server Already Running");
+                    set_enabled_if_changed(item, false);
                 }
             }
         }
 
         if let Some(item) = &self.status_item {
-            item.set_text(match &self.state {
-                ServerState::Stopped => "Status: Not running".to_string(),
-                ServerState::Starting => "Status: Starting…".to_string(),
-                ServerState::Running { pid } => {
-                    format!("Status: Running · pid {pid} · {SERVER_ADDR}")
+            match &self.state {
+                ServerState::Stopped => set_text_if_changed(item, "Status: Not running"),
+                ServerState::Starting => set_text_if_changed(item, "Status: Starting…"),
+                ServerState::Running { pid } => set_text_if_changed(
+                    item,
+                    &format!("Status: Running · pid {pid} · {SERVER_ADDR}"),
+                ),
+                ServerState::Crashed { reason } => {
+                    set_text_if_changed(item, &format!("Status: Crashed ({reason})"))
                 }
-                ServerState::Crashed { reason } => format!("Status: Crashed ({reason})"),
                 ServerState::RunningElsewhere { pid } => match pid {
-                    Some(pid) => format!("Status: Running elsewhere · pid {pid}"),
-                    None => "Status: Running elsewhere".to_string(),
+                    Some(pid) => {
+                        set_text_if_changed(item, &format!("Status: Running elsewhere · pid {pid}"))
+                    }
+                    None => set_text_if_changed(item, "Status: Running elsewhere"),
                 },
-            });
+            }
         }
     }
 
@@ -514,10 +612,15 @@ impl Launcher {
     }
 }
 
-impl ApplicationHandler<UserEvent> for Launcher {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+impl Launcher {
+    /// Build the tray and apply the launch policy (auto-start / auto-open).
+    ///
+    /// Returns `false` when the tray could not be created. The caller must then
+    /// exit: without a tray there is no way to reach Start/Stop/Quit, and the
+    /// macOS build has always treated that as fatal.
+    fn initialize(&mut self) -> bool {
         if self.tray_icon.is_some() {
-            return;
+            return true;
         }
 
         if let Err(error) = self.build_tray() {
@@ -525,12 +628,18 @@ impl ApplicationHandler<UserEvent> for Launcher {
                 format_args!("Could not create Voult menu bar item: {error}"),
                 logger::Metadata::new(),
             );
-            event_loop.exit();
-            return;
+            #[cfg(target_os = "linux")]
+            TRAY_LOG.error(
+                "No system tray available. Install libayatana-appindicator3 and enable a \
+                 StatusNotifier host (GNOME needs the AppIndicator extension), or run \
+                 voult-server directly.",
+                logger::Metadata::new(),
+            );
+            return false;
         }
 
-        // Auto-start the server on launch so double-clicking the app
-        // immediately makes http://localhost:8080 usable.
+        // Auto-start the server on launch so launching the app immediately
+        // makes http://localhost:8080 usable.
         // Dev skips auto-start so launcher/server can be tested independently.
         if Environment::from_env().is_dev() {
             LAUNCHER_LOG.log(
@@ -544,7 +653,7 @@ impl ApplicationHandler<UserEvent> for Launcher {
                 self.refresh_state();
                 self.update_menu();
             }
-            return;
+            return true;
         }
 
         if self.child.is_none() && !self.is_port_open() {
@@ -560,24 +669,80 @@ impl ApplicationHandler<UserEvent> for Launcher {
                 Self::open_browser();
             }
         }
+        true
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
-        match event {
-            UserEvent::MenuEvent(event) => match event.id().as_ref() {
-                QUIT_ITEM_ID => {
-                    _event_loop.exit();
-                }
-                START_ITEM_ID => match &self.state {
+    /// Handle a menu item activation. Returns `true` when the launcher should
+    /// quit.
+    fn handle_menu(&mut self, id: &str) -> bool {
+        match id {
+            QUIT_ITEM_ID => true,
+            START_ITEM_ID => {
+                match &self.state {
                     ServerState::Starting | ServerState::Running { .. } => self.stop_server(),
                     ServerState::Stopped | ServerState::Crashed { .. } => {
                         // Starting again clears any previous crash line.
                         self.start_server();
                     }
                     ServerState::RunningElsewhere { .. } => {}
-                },
-                _ => {}
-            },
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Run one polling tick: queued menu events, process/port reconciliation,
+    /// and menu text refresh. Returns `true` when a Quit was requested.
+    ///
+    /// Menu events are drained explicitly (instead of relying on a tray event
+    /// handler) so the same code path works on the Linux GTK thread, where the
+    /// menu objects live. macOS gets its events through the winit proxy and
+    /// calls `refresh_state`/`update_menu` from `about_to_wait` instead.
+    #[cfg(target_os = "linux")]
+    fn poll(&mut self) -> bool {
+        while let Ok(event) = MenuEvent::receiver().try_recv() {
+            if self.handle_menu(event.id().as_ref()) {
+                return true;
+            }
+        }
+
+        self.refresh_state();
+        self.update_menu();
+        false
+    }
+}
+
+/// Avoid touching GTK menu widgets when nothing changed. `update_menu` runs on
+/// every poll tick, and on Linux every `set_text`/`set_enabled` is a call into
+/// GTK; rewriting identical labels makes appindicator redraw for no reason.
+fn set_text_if_changed(item: &MenuItem, text: &str) {
+    if item.text() != text {
+        item.set_text(text);
+    }
+}
+
+fn set_enabled_if_changed(item: &MenuItem, enabled: bool) {
+    if item.is_enabled() != enabled {
+        item.set_enabled(enabled);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl ApplicationHandler<UserEvent> for Launcher {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.initialize() {
+            event_loop.exit();
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::MenuEvent(event) => {
+                if self.handle_menu(event.id().as_ref()) {
+                    event_loop.exit();
+                }
+            }
         }
     }
 
@@ -604,7 +769,7 @@ impl ApplicationHandler<UserEvent> for Launcher {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn log_startup() -> logger::LevelFilter {
     config::load_dotenv();
     let log_filter = logger::init();
     LAUNCHER_LOG.log(
@@ -617,6 +782,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             logger::Metadata::new(),
         );
     }
+    log_filter
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    log_startup();
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
@@ -627,5 +798,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut launcher = Launcher::new();
     event_loop.run_app(&mut launcher)?;
+    Ok(())
+}
+
+/// Linux entry point.
+///
+/// tray-icon's Linux backend is libappindicator, which creates GTK widgets for
+/// both the indicator and its menu. GTK is explicitly not thread-safe, and its
+/// objects (`MenuItem`, `TrayIcon`) are `!Send`, so every tray/menu call must
+/// happen on the thread that runs the GTK main loop. Instead of juggling a
+/// second thread, Linux runs the entire launcher — tray, polling, and server
+/// supervision — inside `gtk::main()`, and uses a GLib timeout as the tick.
+#[cfg(target_os = "linux")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use std::{cell::RefCell, rc::Rc};
+
+    log_startup();
+
+    // Fails with a clear error when no display/GTK is available (headless SSH,
+    // no XDG_SESSION_TYPE, missing libgtk-3). Running the server directly is
+    // the supported headless path.
+    if let Err(error) = gtk::init() {
+        LAUNCHER_LOG.error(
+            format_args!(
+                "Could not initialize GTK: {error}. A graphical session and libgtk-3 are \
+                 required for the tray launcher; run voult-server directly instead."
+            ),
+            logger::Metadata::new(),
+        );
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("GTK initialization failed: {error}"),
+        )));
+    }
+
+    let launcher = Rc::new(RefCell::new(Launcher::new()));
+    if !launcher.borrow_mut().initialize() {
+        return Ok(());
+    }
+
+    let tick = Rc::clone(&launcher);
+    gtk::glib::timeout_add_local(POLL_INTERVAL, move || {
+        if tick.borrow_mut().poll() {
+            gtk::main_quit();
+            gtk::glib::ControlFlow::Break
+        } else {
+            gtk::glib::ControlFlow::Continue
+        }
+    });
+
+    gtk::main();
+
+    // Never leave an orphaned server process behind: closing the tray is the
+    // launcher's shutdown signal, exactly like Quit on macOS.
+    launcher.borrow_mut().stop_server();
     Ok(())
 }

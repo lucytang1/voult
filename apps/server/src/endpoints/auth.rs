@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::db::DbPool;
 use crate::entity::vault::{self, Entity as VaultEntity};
 use crate::id_codec::uuid_from_db;
+use crate::kdf::KdfParams;
 use crate::session_auth::establish_vault_session;
 
 const LOG: logger::ServerLogger = logger::Logger::create(logger::ServerContext::Auth);
@@ -24,8 +25,13 @@ pub struct AuthRequest {
 pub struct AuthResponse {
     pub vault_id: Uuid,
     pub salt: String,
-    pub iterations: i32,
+    /// Password KDF profile. Required for the client to derive the verifier
+    /// before `/auth`; returned here too so a re-auth needs one round-trip.
+    pub kdf: KdfParams,
     pub crypto_version: i32,
+    /// CAS counter for the password credential. The client needs it to rotate
+    /// the profile; it is post-auth only.
+    pub credential_version: i32,
     // Encrypted envelope holding the vault key, wrapped by the master password.
     // Returned so the client can unwrap the vault key locally after unlock.
     pub vault_key_wrap: Option<String>,
@@ -118,6 +124,23 @@ pub async fn auth(
         );
     }
 
+    // A stored descriptor that does not parse is a server integrity bug; the
+    // client cannot fix it and must not be told it sent a bad password.
+    let kdf = match KdfParams::parse_stored(&vault.kdf) {
+        Ok(kdf) => kdf,
+        Err(_) => {
+            LOG.error(
+                format_args!("vault has an unparsable kdf column: {:?}", vault.id),
+                logger::Metadata::new(),
+            );
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid vault metadata",
+                "DATA_INTEGRITY_ERROR",
+            );
+        }
+    };
+
     let response = AuthResponse {
         vault_id: match uuid_from_db(&vault.id) {
             Ok(id) => id,
@@ -134,8 +157,9 @@ pub async fn auth(
             }
         },
         salt: vault.salt,
-        iterations: vault.iterations,
+        kdf,
         crypto_version: vault.crypto_version,
+        credential_version: vault.credential_version,
         vault_key_wrap: vault.vault_key_wrap,
         vault_key_wrap_iv: vault.vault_key_wrap_iv,
     };

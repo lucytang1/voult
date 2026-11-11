@@ -1,10 +1,10 @@
 // Re-exported from @voult/vault-core (single source of truth shared with the
 // MV3 extension). Canonical WebCrypto implementation lives in
-// packages/vault-core/src/crypto.ts. This module path is kept stable so all
+// packages/vault-core/src/crypto.ts, and the password KDF in
+// packages/vault-core/src/kdf.ts. This module path is kept stable so all
 // existing `../crypto/index.web` imports keep working.
 export {
   CRYPTO_VERSION,
-  PBKDF2_ITERATIONS,
   b64,
   fromB64,
   newSaltB64,
@@ -18,8 +18,7 @@ export {
   wrapKeyBytes,
   unwrapKeyBytes,
   generateDeviceKey,
-  derivePasswordWrappingKey,
-  createAuthKey,
+  derivePasswordKeys,
   RECOVERY_SECRET_BYTES,
   RECOVERY_KEY_CHARS,
   RECOVERY_WRAP_INFO,
@@ -33,6 +32,25 @@ export {
   computeRecoveryProof,
   recoveryAad,
 } from "@voult/vault-core";
+
+// Password KDF profiles. Argon2id only; no legacy algorithm.
+export {
+  KDF_LADDER,
+  KDF_LADDER_VERSION,
+  KDF_FLOOR,
+  DEFAULT_KDF,
+  DEFAULT_KDF_BUDGET_MS,
+  KDF_SALT_BYTES,
+  UnknownKdfProfileError,
+  calibrateKdf,
+  derivePasswordRoot,
+  describeKdf,
+  isKdfParams,
+  isKnownKdf,
+  kdfEquals,
+  kdfRank,
+} from "@voult/vault-core";
+export type { KdfParams } from "@voult/vault-core";
 
 // The recovery artifact — the PDF that carries a recovery key. Format lives in
 // vault-core; the browser plumbing is in `lib/auth/recovery-file.ts`.

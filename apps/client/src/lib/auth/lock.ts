@@ -57,7 +57,7 @@ export interface LockOptions {
  *  2. Wipe the key/plaintext, persist the lock reason, drop ciphertext caches,
  *     close this vault's SQLite handle, and route to the lock screen. Nothing
  *     here awaits the network.
- *  3. Best-effort: cache salt/iterations + envelope so the next password unlock
+ *  3. Best-effort: cache salt/profile + envelope so the next password unlock
  *     needs no round-trip. If this fails, unlock falls back to fetching them
  *     through the still-valid session.
  *  4. For a manual lock only: `POST /lock` bumps the server `lock_epoch` so
@@ -104,7 +104,7 @@ export async function lockVaultNow(options: LockOptions): Promise<void> {
     ) {
       const metadata: LockMetadata = {
         salt: params.salt,
-        iterations: params.iterations,
+        kdf: params.kdf,
         vaultKeyWrap: envelope.vault_key_wrap,
         vaultKeyWrapIv: envelope.vault_key_wrap_iv,
       };

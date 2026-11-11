@@ -1,6 +1,7 @@
 use crate::db::DbPool;
 use crate::entity::vault::{self, Entity as VaultEntity};
 use crate::id_codec::uuid_to_db;
+use crate::kdf::KdfParams;
 use crate::session_auth::session_vault_id;
 use actix_session::Session;
 use actix_web::{HttpResponse, get, http::StatusCode, post, web};
@@ -16,7 +17,8 @@ pub struct CreateVaultRequest {
     pub vault: String,
     pub vaultiv: String,
     pub salt: String,
-    pub iterations: i32,
+    /// Password KDF profile. See `crate::kdf`; off-ladder tuples are rejected.
+    pub kdf: KdfParams,
     #[serde(default)]
     pub crypto_version: Option<i32>,
     pub vault_key_wrap: String,
@@ -41,7 +43,7 @@ pub struct CreateVaultResponse {
     pub vault: String,
     pub vaultiv: String,
     pub salt: String,
-    pub iterations: i32,
+    pub kdf: KdfParams,
     pub version: i32,
     pub crypto_version: i32,
 }
@@ -101,6 +103,13 @@ pub async fn create_vault(
             "INVALID_INPUT",
         );
     }
+    if req.kdf.validate_for_write().is_err() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "unknown KDF profile",
+            "KDF_UNKNOWN",
+        );
+    }
     let vault_uuid = match &req.vault_id {
         Some(raw) => match Uuid::parse_str(raw) {
             Ok(id) if id.to_string() == vault_id_sess => id,
@@ -124,12 +133,23 @@ pub async fn create_vault(
             }
         },
     };
-    let cv = req.crypto_version.unwrap_or(2);
+    // The v2 hierarchy is the only one this server knows; a v1 row has no
+    // password envelope and could never be rotated.
+    let cv = match req.crypto_version {
+        None | Some(2) => 2,
+        Some(_) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "crypto_version must be 2",
+                "UNSUPPORTED_CRYPTO_VERSION",
+            );
+        }
+    };
     let am = vault::ActiveModel {
         id: Set(uuid_to_db(vault_uuid)),
         vault: Set(req.vault),
         salt: Set(req.salt),
-        iterations: Set(req.iterations),
+        kdf: Set(req.kdf.to_stored()),
         vaultiv: Set(req.vaultiv),
         vault_verifier: Set(req.vault_verifier.unwrap_or_default()),
         version: Set(1),
@@ -174,7 +194,7 @@ pub async fn create_vault(
         vault: inserted.vault,
         vaultiv: inserted.vaultiv,
         salt: inserted.salt,
-        iterations: inserted.iterations,
+        kdf: req.kdf,
         version: inserted.version,
         crypto_version: inserted.crypto_version,
     })

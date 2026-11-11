@@ -23,6 +23,12 @@ echo "Version: $VERSION"
 
 # --- 1. Client build ---
 if [[ "$SKIP_CLIENT" == false ]]; then
+  # vault-core is a separate npm package consumed via `file:`. Its own
+  # dependencies (zod, typescript) are not installed by the client's `npm ci`,
+  # so build it here first — this is the step that used to fail on CI with
+  # "Cannot find module 'zod'". See scripts/build-vault-core.sh for details.
+  echo "--- Building shared vault-core package ---"
+  bash "$ROOT/scripts/build-vault-core.sh"
   echo "--- Building client (Expo web export) ---"
   pushd "$ROOT/apps/client" > /dev/null
   npm ci
@@ -84,59 +90,14 @@ chmod +x "$APP_BUNDLE/Contents/MacOS/voult-server"
 echo "Copying client/dist → Resources/dist"
 cp -R "$ROOT/apps/client/dist/"* "$APP_BUNDLE/Contents/Resources/dist/"
 
-# Google OAuth config — bundle GOOGLE_* vars so testers get working Drive sync
-# without needing a .env. We copy only GOOGLE_* (and related) from apps/server/.env,
-# stripping DATABASE_URL/SESSION_COOKIE_KEY so the per-install logic in main.rs still wins.
-# On CI (GitHub Actions) where .env file isn't committed, we also accept env vars
-# GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET directly (set as GitHub Secrets).
-rm -f "$APP_BUNDLE/Contents/Resources/google.env"
-if [[ -f "$ROOT/apps/server/.env" ]]; then
-  echo "Bundling Google OAuth config from apps/server/.env → Resources/google.env"
-  grep -E '^GOOGLE_' "$ROOT/apps/server/.env" > "$APP_BUNDLE/Contents/Resources/google.env" || true
-  grep -E '^CORS_ORIGINS=' "$ROOT/apps/server/.env" >> "$APP_BUNDLE/Contents/Resources/google.env" 2>/dev/null || true
-fi
-# Fallback: generate from environment (CI) if file missing or incomplete
-if [[ ! -s "$APP_BUNDLE/Contents/Resources/google.env" ]] && [[ -n "${GOOGLE_CLIENT_ID:-}" ]] && [[ -n "${GOOGLE_CLIENT_SECRET:-}" ]]; then
-  echo "Bundling Google OAuth config from environment → Resources/google.env"
-  {
-    echo "GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}"
-    echo "GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}"
-    [[ -n "${GOOGLE_REDIRECT_URI:-}" ]] && echo "GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}"
-    [[ -n "${GOOGLE_OAUTH_REDIRECT_URI:-}" ]] && echo "GOOGLE_OAUTH_REDIRECT_URI=${GOOGLE_OAUTH_REDIRECT_URI}"
-    [[ -n "${GOOGLE_DRIVE_SCOPE:-}" ]] && echo "GOOGLE_DRIVE_SCOPE=${GOOGLE_DRIVE_SCOPE}"
-    [[ -n "${GOOGLE_POST_AUTH_REDIRECT:-}" ]] && echo "GOOGLE_POST_AUTH_REDIRECT=${GOOGLE_POST_AUTH_REDIRECT}"
-    [[ -n "${CORS_ORIGINS:-}" ]] && echo "CORS_ORIGINS=${CORS_ORIGINS}"
-  } > "$APP_BUNDLE/Contents/Resources/google.env"
-fi
-# Normalize redirect URI: ensure the new canonical endpoint is present.
-# Google Console must have this exact URI in "Authorized redirect URIs".
-# We force GOOGLE_OAUTH_REDIRECT_URI to the non-legacy path so error 400
-# redirect_uri_mismatch doesn't happen if console only has /api/google/...
-if [[ -f "$APP_BUNDLE/Contents/Resources/google.env" ]]; then
-  if ! grep -q '^GOOGLE_OAUTH_REDIRECT_URI=' "$APP_BUNDLE/Contents/Resources/google.env"; then
-    # If only legacy GOOGLE_REDIRECT_URI exists, promote it to canonical name
-    if grep -q '^GOOGLE_REDIRECT_URI=' "$APP_BUNDLE/Contents/Resources/google.env"; then
-      echo "GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8080/api/google/oauth/callback" >> "$APP_BUNDLE/Contents/Resources/google.env"
-    else
-      echo "GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8080/api/google/oauth/callback" >> "$APP_BUNDLE/Contents/Resources/google.env"
-    fi
-  fi
-  # Also ensure legacy is present for backwards compat (server accepts both)
-  if ! grep -q '^GOOGLE_REDIRECT_URI=' "$APP_BUNDLE/Contents/Resources/google.env"; then
-    echo "GOOGLE_REDIRECT_URI=http://localhost:8080/api/google/oauth/callback" >> "$APP_BUNDLE/Contents/Resources/google.env"
-  fi
-fi
-if [[ -s "$APP_BUNDLE/Contents/Resources/google.env" ]]; then
-  echo "Bundled google.env:"
-  sed 's/SECRET=.*/SECRET=***redacted***/' "$APP_BUNDLE/Contents/Resources/google.env" | head -n 20
-else
-  echo "WARNING: No Google OAuth config found (neither apps/server/.env nor GOOGLE_CLIENT_ID env) — Drive will be GOOGLE_NOT_CONFIGURED"
-  rm -f "$APP_BUNDLE/Contents/Resources/google.env"
-fi
-# Also copy as .env for server dotenv fallback (filtered to avoid DB override)
-if [[ -f "$APP_BUNDLE/Contents/Resources/google.env" ]]; then
-  cp "$APP_BUNDLE/Contents/Resources/google.env" "$APP_BUNDLE/Contents/Resources/.env"
-fi
+# Cloud provider OAuth config — bundle every configured provider (Google Drive,
+# Dropbox) so testers get working cloud backup without needing a .env. Only
+# provider keys and CORS_ORIGINS are copied; DATABASE_URL/SESSION_COOKIE_KEY are
+# deliberately left out so the per-install logic in config.rs still wins.
+# Values come from apps/server/.env locally, or from environment variables
+# (GitHub Actions secrets) on CI. See scripts/bundle-cloud-env.sh.
+echo "--- Bundling cloud provider config ---"
+bash "$ROOT/scripts/bundle-cloud-env.sh" "$APP_BUNDLE/Contents/Resources"
 
 # Info.plist
 if [[ -f "$ROOT/resources/Info.plist" ]]; then

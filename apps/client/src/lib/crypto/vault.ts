@@ -10,13 +10,14 @@ import { v4 as uuidv4 } from "uuid";
 import type { VaultItem } from "../state/type";
 import { VaultItemSchema } from "../state/type";
 import { DEFAULT_VAULT_NAME, MAX_VAULT_NAME_LENGTH } from "@voult/vault-core";
+import type { KdfParams } from "@voult/vault-core";
 
 // Portable format versions. Bump when the encrypted payload structure changes.
 export const VAULT_FORMAT_VERSION = 1;
-// v2 added `recoveryEnvelope`: the vault's recovery material now travels with
-// the backup so a restore reproduces the same recovery key instead of minting a
-// fresh one. Server-side lockstep: `cloud/package.rs`.
-export const PACKAGE_FORMAT_VERSION = 2;
+// v2 added `recoveryEnvelope`. v3 replaced the `iterations` integer in
+// `cryptoParameters` with the self-describing KDF descriptor. Server-side
+// lockstep: `cloud/package.rs`; the reader accepts only the current version.
+export const PACKAGE_FORMAT_VERSION = 3;
 
 // UUID v4 validation – the pattern used for vault_id throughout.
 const UUID_PATTERN =
@@ -123,13 +124,13 @@ export function assertVaultDocumentMatches(doc: VaultDocument, expectedVaultId: 
 }
 
 // --- Versioned encrypted package (conceptual, Phase 1 local shape) -----------
-// The current local server stores {vault, vaultiv, salt, iterations, ...}
+// The current local server stores {vault, vaultiv, salt, kdf, ...}
 // per vault row. The package type here models the future cloud package so
 // client code can adopt vaultId-aware flows now. Serialization stays JSON.
 
 export interface CryptoParameters {
   salt: string;
-  iterations: number;
+  kdf: KdfParams;
 }
 
 export interface VoultPackage {
@@ -157,7 +158,7 @@ export function createVoultPackage(args: {
   logicalRevision: number;
   cryptoVersion: number;
   salt: string;
-  iterations: number;
+  kdf: KdfParams;
   ciphertext: string;
   iv: string;
   wrappedVaultKey: string;
@@ -173,7 +174,7 @@ export function createVoultPackage(args: {
     vaultId: args.vaultId,
     logicalRevision: args.logicalRevision,
     cryptoVersion: args.cryptoVersion,
-    cryptoParameters: { salt: args.salt, iterations: args.iterations },
+    cryptoParameters: { salt: args.salt, kdf: args.kdf },
     snapshot: { ciphertext: args.ciphertext, iv: args.iv },
     passwordKeyEnvelope: { wrappedVaultKey: args.wrappedVaultKey, iv: args.wrappedVaultKeyIv },
     recoveryEnvelope: {

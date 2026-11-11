@@ -5,8 +5,19 @@ edition = "2024"
 
 [dependencies]
 logger = { path = "../crates/logger" }
-tray-icon = "0.24.2"
-winit = "0.30.13"
+# Default features pull `libxdo` (only used for the predefined Copy/Cut/Paste/
+# SelectAll menu items, which this launcher never uses). Keep only `gtk` so a
+# plain `cargo run` doesn't require libxdo.so.3 at runtime.
+tray-icon = { version = "0.24.2", default-features = false, features = ["gtk"] }
 open = "5.3"
 dotenvy = "0.15"
 image = "0.25"
+
+# winit drives the macOS menu-bar event loop. Linux uses GTK instead: tray-icon's
+# Linux backend is libappindicator, whose menu/tray objects are GTK widgets and
+# must be created and mutated on the thread running the GTK main loop.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+winit = "0.30.13"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"

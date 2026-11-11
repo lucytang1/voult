@@ -13,15 +13,34 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          # Two independent npm projects are installed during the build: the
+          # Expo client and the shared @voult/vault-core package it links to.
+          # Both lockfiles are part of the cache key.
+          cache-dependency-path: |
+            apps/client/package-lock.json
+            packages/vault-core/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+      # Installs + builds packages/vault-core first (its dependencies are not
+      # covered by the client's `npm ci` — see scripts/build-vault-core.sh),
+      # then the client export, the server, the launcher, and the DMG.
       - name: Build Voult.app + DMG
         run: ./scripts/build-release.sh
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          # optional: GOOGLE_REDIRECT_URI, GOOGLE_DRIVE_SCOPE, etc.
+          DROPBOX_CLIENT_ID: ${{ secrets.DROPBOX_CLIENT_ID }}
+          DROPBOX_CLIENT_SECRET: ${{ secrets.DROPBOX_CLIENT_SECRET }}
+          # Optional overrides. Redirect URIs default to
+          # http://localhost:8080/api/cloud/oauth/callback?provider=<kind>,
+          # which is what must be registered in each provider's console.
+          # GOOGLE_OAUTH_REDIRECT_URI: ${{ secrets.GOOGLE_OAUTH_REDIRECT_URI }}
+          # GOOGLE_DRIVE_SCOPE: ${{ secrets.GOOGLE_DRIVE_SCOPE }}
+          # GOOGLE_POST_AUTH_REDIRECT: ${{ secrets.GOOGLE_POST_AUTH_REDIRECT }}
+          # DROPBOX_OAUTH_REDIRECT_URI: ${{ secrets.DROPBOX_OAUTH_REDIRECT_URI }}
+          # DROPBOX_POST_AUTH_REDIRECT: ${{ secrets.DROPBOX_POST_AUTH_REDIRECT }}
       - uses: actions/upload-artifact@v4
         with:
           name: Voult-aarch64

@@ -13,7 +13,8 @@ envelope, sync log, and Google OAuth bindings.
   - `vault: string` (base64-encoded AES-GCM ciphertext)
   - `vaultiv: string` (base64-encoded IV)
   - `salt: string`
-  - `iterations: number` (KDF cost; returned by `/get_vault` and `/get_crypto_params`)
+  - `kdf: string` (canonical JSON KDF descriptor, e.g. `{"algorithm":"argon2id","memory_kib":65536,"time_cost":3,"parallelism":1}`; returned by `/get_vault` and `/get_crypto_params`)
+  - `credential_version: number` (CAS counter for the password credential; bumped by `/vault/credential` and `/recovery/rewrap`)
   - `vault_verifier: string` (HMAC-derived verifier from the master password; auth credential only, not the password or any key)
   - `created_at`
   - `version`
@@ -24,10 +25,10 @@ envelope, sync log, and Google OAuth bindings.
   - `session_id`, `vault_id`, `created_at`, `expires_at`
 - **Google / cloud tables** are all keyed by `vault_id` (see `cloud_binding`, `google_token`, `oauth_state`, `google_pending_token`).
 
-Only ciphertext, salt, iterations, crypto metadata, and a derived verifier are
-exposed to the server; the master password, vault key, and all derived keys
-never leave the client. The cookie stores only `vault_id` plus framework
-session state — never keys, envelopes, or vault plaintext.
+Only ciphertext, the salt, the KDF descriptor, crypto metadata, and a derived
+verifier are exposed to the server; the master password, vault key, and all
+derived keys never leave the client. The cookie stores only `vault_id` plus
+framework session state — never keys, envelopes, or vault plaintext.
 
 ### Client-Side (SQLite)
 
@@ -101,26 +102,53 @@ End-to-end login flow as implemented today:
    field for the auto-detected vault (Flow A/B in the refactor plan).
 2. **Fetch crypto params** using `useGetCryptoParams(vaultId, enabled)`:
    - `GET /get_crypto_params?vault_id=...`
-   - Response: `{ salt, iterations }`.
-3. **User inputs master password** once salt/iterations are loaded.
-4. **Derive login payload** using the crypto helpers:
-   - Re-derives an HMAC auth key from the master password and salt.
-   - Computes `vaultVerifier` (an HMAC-based verifier, vault-scoped).
-   - Returns `{ vault_id, vault_verifier }`.
+   - Response: `{ salt, kdf }` where `kdf` is the self-describing Argon2id
+     descriptor. The client validates it against its own ladder before deriving.
+3. **User inputs master password** once salt/profile are loaded.
+4. **Derive login payload** using `derivePasswordKeys(password, salt, kdf)`:
+   - One Argon2id root derivation, then HKDF splits it into an HMAC auth key and
+     an AES-GCM wrapping key.
+   - Returns `vaultVerifier` (an HMAC-based verifier, vault-scoped).
+   - Returns `{ vault_id, vault_verifier }` for `/auth`.
 5. **Authenticate with server** using `useLogIn()`:
    - `POST /auth` with `{ vault_id, vault_verifier }`.
-   - On success, the server returns only `vault_id`, salt, iterations,
-     crypto_version, and the password-wrapped vault-key envelope — never a user
-     object or email.
-6. **Derive long-lived keys** for this session:
-   - `createEncryptionKey(masterPassword, salt, iterations)` → `encryptionKey: CryptoKey`.
-   - `createAuthKey(masterPassword, salt, iterations)` → `authKey: CryptoKey`.
-   - Unwrap the vault key from the returned `vault_key_wrap`/`vault_key_wrap_iv`.
+   - On success, the server returns only `vault_id`, salt, `kdf`,
+     `crypto_version`, `credential_version`, and the password-wrapped vault-key
+     envelope — never a user object or email.
+6. **Derive long-lived keys and unwrap** with the same credential:
+   - `authKey` + `wrappingKey` from step 4 (never derive them separately: that
+     would run Argon2 twice).
+   - Unwrap the vault key from `vault_key_wrap`/`vault_key_wrap_iv`.
+   - After the vault is open, an opportunistic profile upgrade may rotate the
+     credential in the background (see "KDF profile upgrades" below).
 7. **Store keys in Zustand** (transient — `authKey` is cleared after auth):
    - `updateEncryptionKey(encryptionKey)`
    - `updateAuthKey(authKey)`
 8. **Navigate to `/home`**, where the vault is fetched (`GET /get_vault`) and
    decrypted using these keys.
+
+## KDF profile upgrades
+
+- The password root is **Argon2id** (RFC 9106) at one of three published rungs:
+  19 MiB/t=2 (floor), 32 MiB/t=3, 64 MiB/t=3 — always `p=1`.
+  `packages/vault-core/src/kdf.ts` is the registry; `apps/server/src/kdf.rs`
+  mirrors it for validation.
+- A device calibrates once (`calibrateKdf`, cached in `localStorage` under
+  `voult.kdfTarget.v1`) and uses the highest rung under 700 ms, never below the
+  OWASP floor.
+- The profile is per-vault data (`vault.kdf`), not a client constant: unlock
+  derives with the descriptor the server returns, after validating it against
+  the local ladder.
+- `POST /api/vault/credential` is the only credential write. It requires the
+  current verifier as a reauthentication proof, a `credential_version` CAS, and
+  a complete new credential (salt, descriptor, verifier, envelope). It rejects a
+  lower rung and never touches `vault`, `version`, `recovery_*` or `lock_epoch`.
+- Web upgrades opportunistically after a password unlock and via Settings →
+  Security → Vault protection. The extension derives with the stored profile but
+  never rotates. A vault that is never unlocked again stays on its existing rung,
+  which is already at or above the floor.
+- There is no legacy algorithm: no released vaults exist, so PBKDF2 is not
+  retained and the initial schema carries `kdf` instead of `iterations`.
 
 ## Add Item Flow (Intended)
 
