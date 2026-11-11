@@ -10,7 +10,7 @@ pub mod recovery;
 pub mod register;
 pub mod session_status;
 pub mod update_vault;
-pub mod update_vault_password;
+pub mod vault_credential;
 pub mod vaults;
 
 use actix_web::error::JsonPayloadError;

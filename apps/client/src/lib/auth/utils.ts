@@ -1,4 +1,3 @@
-import { createAuthKey, derivePasswordWrappingKey, getAuthVerifierB64 } from "../crypto/index.web";
 import {
   wrapKeyBytes,
   b64,
@@ -47,14 +46,6 @@ export interface UnlockedSession {
   // Server lock_epoch observed at unlock time. Consumers store it via
   // updateLockEpoch so the session-sync check can detect a peer's later lock.
   lockEpoch: number;
-}
-
-/** Derive the vaultVerifier + password wrapping key for a password. */
-export async function derivePasswordKeys(password: string, salt: string, iterations: number) {
-  const authKey = await createAuthKey(password, salt, iterations);
-  const wrappingKey = await derivePasswordWrappingKey(password, salt, iterations);
-  const vaultVerifier = await getAuthVerifierB64(authKey);
-  return { wrappingKey, vaultVerifier };
 }
 
 /** Persist device secrets (deviceKey and deviceKey wrapped vaultKey) to the device storage. */

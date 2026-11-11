@@ -6,6 +6,7 @@ import type {
   SessionState,
   DecryptedVault,
   LockMetadata,
+  KdfParams,
 } from "@voult/vault-core";
 import type { VaultState, ServerSessionStatus, VaultAvailability } from "./vault-state";
 export {
@@ -47,7 +48,7 @@ export interface VoultPackage {
   vaultId: string;
   logicalRevision: number;
   cryptoVersion: number;
-  cryptoParameters: { salt: string; iterations: number };
+  cryptoParameters: { salt: string; kdf: KdfParams };
   snapshot: { ciphertext: string; iv: string };
   passwordKeyEnvelope: { wrappedVaultKey: string; iv: string };
   recoveryEnvelope: {

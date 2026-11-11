@@ -1,8 +1,6 @@
 import {
-  createAuthKey,
   decrypt,
-  derivePasswordWrappingKey,
-  getAuthVerifierB64,
+  derivePasswordKeys,
   importVaultKey,
   unwrapKeyBytes,
 } from "../crypto/index.web";
@@ -12,14 +10,17 @@ import { fetchVault } from "../queries/vault/query";
 import { fetchCryptoParams } from "../queries/cryptoParams/query";
 import { login } from "../queries/logIn/query";
 import type { LoginResponse } from "../queries/logIn/api.schema";
+import type { KdfParams } from "@voult/vault-core";
+import { kdfEquals } from "@voult/vault-core";
 import {
   getVaultState,
   selectVaultSession,
   commitVaultUnlock,
   useAppStore,
 } from "../state";
-import { derivePasswordKeys as deriveVerifier, parseVaultJson, persistDeviceSecrets } from "./utils";
+import { parseVaultJson, persistDeviceSecrets } from "./utils";
 import { selectedVaultId } from "../state/vault-state";
+import { maybeUpgradeKdf } from "./kdf-upgrade";
 import type { SessionState, DecryptedVault } from "../state/type";
 
 export interface UnlockedSession {
@@ -31,13 +32,23 @@ export interface UnlockedSession {
   lockEpoch: number;
 }
 
-/** Derive the vaultVerifier + password wrapping key for a password. */
-async function derivePasswordKeys(password: string, salt: string, iterations: number) {
-  const authKey = await createAuthKey(password, salt, iterations);
-  const wrappingKey = await derivePasswordWrappingKey(password, salt, iterations);
-  const vaultVerifier = await getAuthVerifierB64(authKey);
-  return { authKey, wrappingKey, vaultVerifier };
+/** Salt + profile + password envelope: everything needed to unwrap locally. */
+interface PasswordEnvelope {
+  salt: string;
+  kdf: KdfParams;
+  vaultKeyWrap: string;
+  vaultKeyWrapIv: string;
 }
+
+/**
+ * The two keys and the verifier from one root derivation. Threaded through the
+ * re-auth path so `/auth` and the local unwrap do not each pay for Argon2.
+ */
+type DerivedCredential = {
+  authKey: CryptoKey;
+  wrappingKey: CryptoKey;
+  vaultVerifier: string;
+};
 
 /**
  * Existing-session unlock after reload:
@@ -87,18 +98,18 @@ export async function unlockWithDevice(): Promise<UnlockedSession | null> {
 
 /**
  * Unlock after a lock while the server session is still alive. Re-derives the
- * password wrapping key locally from the master password + salt/iterations,
- * then unwraps the vault key. Wrong passwords fail at AES-GCM unwrap (throws) —
- * no server verification needed, so nothing about the attempt leaves the
- * device.
+ * password credential locally from the master password + salt/profile, then
+ * unwraps the vault key. Wrong passwords fail at AES-GCM unwrap (throws) — no
+ * server verification needed, so nothing about the attempt leaves the device.
  *
  * Prefers the lock metadata captured in memory at lock time; if unavailable
  * (e.g. the tab reloaded), falls back to fetching crypto params + wrapped key
  * from the server using the still-valid session.
  *
- * This is the password-only *local* unwrap the plan describes: correct whenever
- * a valid session can supply the envelope. When the session is gone, use
- * `reauthenticateAndUnlock` instead — it re-establishes the session first.
+ * If the cached metadata fails, the credential may have been rotated on another
+ * device after this tab locked. One retry against fresh server state
+ * distinguishes that from a genuinely wrong password: if the salt/profile are
+ * unchanged, there is nothing to retry.
  */
 export async function unlockWithPassword(password: string): Promise<void> {
   if (getVaultState().status !== "locked") {
@@ -107,28 +118,42 @@ export async function unlockWithPassword(password: string): Promise<void> {
   const { session, lockMetadata } = useAppStore.getState();
   if (!session) throw new Error("No active session.");
 
-  // Prefer metadata captured in memory at lock time so /lock needs no
-  // round-trip; fall back to the server when the tab reloaded and lost it.
-  const lm = lockMetadata;
-  const envelope =
-    lm?.salt && lm?.iterations && lm?.vaultKeyWrap && lm?.vaultKeyWrapIv
+  const cached: PasswordEnvelope | null =
+    lockMetadata?.salt && lockMetadata.kdf && lockMetadata.vaultKeyWrap && lockMetadata.vaultKeyWrapIv
       ? {
-          salt: lm.salt,
-          iterations: lm.iterations,
-          vaultKeyWrap: lm.vaultKeyWrap,
-          vaultKeyWrapIv: lm.vaultKeyWrapIv,
+          salt: lockMetadata.salt,
+          kdf: lockMetadata.kdf,
+          vaultKeyWrap: lockMetadata.vaultKeyWrap,
+          vaultKeyWrapIv: lockMetadata.vaultKeyWrapIv,
         }
-      : await fetchEnvelopeViaSession(session.vaultId);
+      : null;
 
-  await unlockFromEnvelope(password, envelope);
+  const envelope = cached ?? (await fetchEnvelopeViaSession(session.vaultId));
+  try {
+    await unlockFromEnvelope(password, envelope);
+  } catch (e) {
+    if (!isIncorrectPassword(e)) throw e;
+
+    // The credential may have rotated after the envelope was captured (cached
+    // metadata from a previous lock, or a race between the two params requests).
+    // Refetch once. If nothing changed, the password really is wrong and the
+    // extra KDF is skipped.
+    const fresh = await fetchEnvelopeViaSession(session.vaultId);
+    const unchanged =
+      fresh.salt === envelope.salt &&
+      kdfEquals(fresh.kdf, envelope.kdf) &&
+      fresh.vaultKeyWrap === envelope.vaultKeyWrap;
+    if (unchanged) throw e;
+    await unlockFromEnvelope(password, fresh);
+  }
 }
 
 /**
- * Fetches salt/iterations + the password-wrapped envelope using a live session.
+ * Fetches salt/profile + the password-wrapped envelope using a live session.
  * Only reachable while the cookie is valid; after `SESSION_REQUIRED` the caller
  * must use `reauthenticateAndUnlock` instead.
  */
-async function fetchEnvelopeViaSession(vaultId: string) {
+async function fetchEnvelopeViaSession(vaultId: string): Promise<PasswordEnvelope> {
   const [params, vaultData] = await Promise.all([
     fetchCryptoParams(vaultId),
     fetchVault(),
@@ -139,7 +164,7 @@ async function fetchEnvelopeViaSession(vaultId: string) {
   }
   return {
     salt: params.salt,
-    iterations: params.iterations,
+    kdf: params.kdf,
     vaultKeyWrap: vault.vault_key_wrap,
     vaultKeyWrapIv: vault.vault_key_wrap_iv,
   };
@@ -151,8 +176,8 @@ async function fetchEnvelopeViaSession(vaultId: string) {
  *
  * The user's situation after `SESSION_REQUIRED`: they are on their own vault's
  * lock screen with no cookie. A device-key unlock cannot help here, because it
- * begins with `GET /session` and would 401 straight away. So the master password
- * is the only route back in, and it does double duty:
+ * begins with `GET /session` and would 401 straight away. So the master
+ * password is the only route back in, and it does double duty:
  *
  *   1. Re-establish the server session through the *existing* verifier flow —
  *      derive `vaultVerifier` locally, POST /auth. The master password and the
@@ -175,47 +200,62 @@ export async function reauthenticateAndUnlock(password: string): Promise<void> {
   }
   const vaultId = state.vault.vaultId;
 
-  // 1. Re-establish the session. /auth rotates the cookie and returns the
-  //    password-wrapped envelope, so this doubles as our envelope fetch.
-  let auth: LoginResponse;
   try {
-    const params = await fetchCryptoParams(vaultId);
-    const { vaultVerifier } = await deriveVerifier(password, params.salt, params.iterations);
-    auth = await login({ vault_id: vaultId, vault_verifier: vaultVerifier });
+    // 1. Fetch the profile, derive once, authenticate. If another device
+    //    rotated the credential between the params read and /auth, refetch and
+    //    retry once before calling it a wrong password.
+    let params = await fetchCryptoParams(vaultId);
+    let credential = await derivePasswordKeys(password, params.salt, params.kdf);
+
+    let auth: LoginResponse;
+    try {
+      auth = await login({ vault_id: vaultId, vault_verifier: credential.vaultVerifier });
+    } catch (e) {
+      const fresh = await fetchCryptoParams(vaultId);
+      if (fresh.salt === params.salt && kdfEquals(fresh.kdf, params.kdf)) throw e;
+      params = fresh;
+      credential = await derivePasswordKeys(password, fresh.salt, fresh.kdf);
+      auth = await login({ vault_id: vaultId, vault_verifier: credential.vaultVerifier });
+    }
+
+    // The server must answer for the vault we asked about. A mismatch would
+    // install one vault's key under another vault's identity.
+    if (auth.vault_id !== vaultId) {
+      throw new Error("Unexpected vault returned while re-authenticating.");
+    }
+    if (!auth.vault_key_wrap || !auth.vault_key_wrap_iv) {
+      throw new Error("Vault key material unavailable for unlock.");
+    }
+    // The credential we derived must be the one /auth just validated. If the
+    // profile moved in between, the prepared keys would unwrap nothing.
+    if (auth.salt !== params.salt || !kdfEquals(auth.kdf, params.kdf)) {
+      throw new Error("Vault credential changed during unlock. Try again.");
+    }
+
+    // 2. Adopt the now-live session (clears the "missing" status and persists
+    //    the selection again), then unwrap locally with the keys already derived.
+    selectVaultSession({ vaultId: auth.vault_id, cryptoVersion: auth.crypto_version });
+    await unlockFromEnvelope(
+      password,
+      {
+        salt: auth.salt,
+        kdf: auth.kdf,
+        vaultKeyWrap: auth.vault_key_wrap,
+        vaultKeyWrapIv: auth.vault_key_wrap_iv,
+      },
+      credential,
+    );
   } catch (e) {
     // A rejected verifier is the wrong-password signal. Anything else (offline,
     // server down, vault gone) is a distinct condition and must not read as
     // "wrong password", or the user retries a correct password forever.
     throw toUnlockError(e);
   }
-
-  // The server must answer for the vault we asked about. A mismatch would
-  // install one vault's key under another vault's identity.
-  if (auth.vault_id !== vaultId) {
-    throw new Error("Unexpected vault returned while re-authenticating.");
-  }
-  if (!auth.vault_key_wrap || !auth.vault_key_wrap_iv) {
-    throw new Error("Vault key material unavailable for unlock.");
-  }
-
-  // 2. Adopt the now-live session (clears the "missing" status and persists the
-  //    selection again), then unwrap locally.
-  selectVaultSession({ vaultId: auth.vault_id, cryptoVersion: auth.crypto_version });
-  await unlockFromEnvelope(password, {
-    salt: auth.salt,
-    iterations: auth.iterations,
-    vaultKeyWrap: auth.vault_key_wrap,
-    vaultKeyWrapIv: auth.vault_key_wrap_iv,
-  });
 }
 
 /**
- * Shared unwrap: derive the password wrapping key, unwrap the vault key, and
- * install it against the current selection.
- *
- * The envelope values (salt/iterations/wrapped key) are all things the server
- * already holds, from lock metadata, a session fetch, or the /auth response.
- * Nothing here touches the network, and nothing but the verifier was ever sent.
+ * Shared unwrap: derive the password credential (unless the caller already
+ * did), unwrap the vault key, and install it against the current selection.
  *
  * A wrong password fails at AES-GCM. That is caught and re-labelled to one
  * consistent message here, and — importantly — *before* any key is installed, so
@@ -223,14 +263,18 @@ export async function reauthenticateAndUnlock(password: string): Promise<void> {
  */
 async function unlockFromEnvelope(
   password: string,
-  envelope: { salt: string; iterations: number; vaultKeyWrap: string; vaultKeyWrapIv: string },
+  envelope: PasswordEnvelope,
+  prepared?: DerivedCredential,
 ): Promise<void> {
-  const { salt, iterations, vaultKeyWrap, vaultKeyWrapIv } = envelope;
-  const wrappingKey = await derivePasswordWrappingKey(password, salt, iterations);
+  const { salt, kdf, vaultKeyWrap, vaultKeyWrapIv } = envelope;
+  // One Argon2 run for both keys and the verifier. Never derive the auth key
+  // and the wrapping key separately: at the top rung that would be two ~0.6 s
+  // derivations per unlock.
+  const credential = prepared ?? (await derivePasswordKeys(password, salt, kdf));
   let vaultKeyRaw: Uint8Array;
   let vaultKey: CryptoKey;
   try {
-    vaultKeyRaw = await unwrapKeyBytes(vaultKeyWrap, vaultKeyWrapIv, wrappingKey);
+    vaultKeyRaw = await unwrapKeyBytes(vaultKeyWrap, vaultKeyWrapIv, credential.wrappingKey);
     vaultKey = await importVaultKey(vaultKeyRaw);
   } catch {
     throw new Error("Incorrect password.");
@@ -251,12 +295,29 @@ async function unlockFromEnvelope(
     } catch (e) {
       console.warn("Unlocked, but could not store the device envelope", e);
     }
+
+    // Opportunistic profile upgrade. The vault is already open; a failure is a
+    // warning, never a failed unlock. The upgrade needs its own copy of the raw
+    // key because this function zeroes its copy at the end.
+    const upgradeKey = vaultKeyRaw.slice();
+    void maybeUpgradeKdf({
+      vaultId,
+      password,
+      currentKdf: kdf,
+      currentVerifier: credential.vaultVerifier,
+      vaultKeyRaw: upgradeKey,
+    });
   }
   // The imported CryptoKey has copied the bytes; drop the raw copy.
   vaultKeyRaw.fill(0);
 
   // vaultVersion is intentionally left untouched so pending sync intents
   // keep a valid base_version across lock/unlock.
+}
+
+/** True only for the one message `unlockFromEnvelope` uses for a bad unwrap. */
+function isIncorrectPassword(e: unknown): boolean {
+  return e instanceof Error && e.message === "Incorrect password.";
 }
 
 /**

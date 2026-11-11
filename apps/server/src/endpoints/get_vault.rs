@@ -4,6 +4,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Serialize;
 
 use crate::entity::vault::{self, Entity as Vaults};
+use crate::kdf::KdfParams;
 use crate::session_auth::session_vault_id;
 
 use crate::db::DbPool;
@@ -19,9 +20,12 @@ pub struct GetVaultResponse {
 pub struct Vault {
     pub vault: String,
     pub vaultiv: String,
-    pub iterations: i32,
+    pub kdf: KdfParams,
     pub version: i32,
     pub crypto_version: i32,
+    /// CAS counter for the password credential. Needed by a profile rotation;
+    /// post-auth only, like the envelope below.
+    pub credential_version: i32,
     pub vault_key_wrap: Option<String>,
     pub vault_key_wrap_iv: Option<String>,
 }
@@ -79,13 +83,29 @@ pub async fn get_vault(pool: web::Data<DbPool>, session: Session) -> HttpRespons
         }
     };
 
+    let kdf = match KdfParams::parse_stored(&vault.kdf) {
+        Ok(kdf) => kdf,
+        Err(_) => {
+            LOG.error(
+                format_args!("vault has an unparsable kdf column: {:?}", vault.id),
+                logger::Metadata::new(),
+            );
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid vault metadata",
+                "DATA_INTEGRITY_ERROR",
+            );
+        }
+    };
+
     let response = GetVaultResponse {
         vault: Vault {
             vault: vault.vault,
             vaultiv: vault.vaultiv,
-            iterations: vault.iterations,
+            kdf,
             version: vault.version,
             crypto_version: vault.crypto_version,
+            credential_version: vault.credential_version,
             vault_key_wrap: vault.vault_key_wrap,
             vault_key_wrap_iv: vault.vault_key_wrap_iv,
         },

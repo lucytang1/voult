@@ -1,49 +1,77 @@
 import {
   decrypt,
+  derivePasswordKeys,
   importVaultKey,
   unwrapKeyBytes,
 } from "../../crypto/index.web";
-import { derivePasswordKeys, persistDeviceSecrets, UnlockedSession, parseVaultJson } from "../utils";
+import { persistDeviceSecrets, UnlockedSession, parseVaultJson } from "../utils";
 import { login } from "../../queries/logIn/query";
 import { fetchSession } from "../../queries/session/query";
 import { fetchVault } from "../../queries/vault/query";
+import { fetchCryptoParams } from "../../queries/cryptoParams/query";
+import type { LoginResponse } from "../../queries/logIn/api.schema";
+import { kdfEquals } from "@voult/vault-core";
+import { maybeUpgradeKdf } from "../kdf-upgrade";
 
 /**
  * New password login (unlock) flow — vault-scoped, no account/user:
- * 1. Derive the vaultVerifier and password wrapping key locally.
- * 2. Send { vault_id, vault_verifier } to /auth — receives the session cookie
- *    plus salt/iterations/crypto_version and the password-wrapped vault-key
- *    envelope (never the key itself).
- * 3. Fetch the encrypted vault.
- * 4. Unwrap and import the vault key locally.
- * 5. Ensure a device key exists and store the device envelope locally.
- * 6. Fetch and decrypt the vault.
+ * 1. Fetch the vault's salt + KDF profile.
+ * 2. Derive the verifier and password wrapping key locally (one Argon2 run).
+ * 3. Send { vault_id, vault_verifier } to /auth — receives the session cookie
+ *    plus the password-wrapped vault-key envelope (never the key itself).
+ * 4. Fetch and decrypt the vault.
+ * 5. Unwrap and import the vault key locally.
+ * 6. Ensure a device key exists and store the device envelope locally.
+ *
+ * The parameters are fetched here rather than passed in: every caller needs
+ * them immediately before this call, and owning the fetch is what lets the flow
+ * retry once when another device rotated the credential between the params read
+ * and /auth.
  */
 export async function passwordLoginFlow(
   vaultId: string,
   password: string,
-  salt: string,
-  iterations: number,
 ): Promise<UnlockedSession> {
-  // Derive the vaultVerifier and password wrapping key locally — the master
-  // password and derived keys never leave the client.
-  const { wrappingKey, vaultVerifier } = await derivePasswordKeys(password, salt, iterations);
-  const authResponse = await login({ vault_id: vaultId, vault_verifier: vaultVerifier });
+  let params = await fetchCryptoParams(vaultId);
+  let credential = await derivePasswordKeys(password, params.salt, params.kdf);
 
+  let authResponse: LoginResponse;
+  try {
+    authResponse = await login({ vault_id: vaultId, vault_verifier: credential.vaultVerifier });
+  } catch (e) {
+    // A 401 here is a wrong password *unless* the credential rotated after we
+    // read the params. Refetch and retry once only when it actually changed.
+    const fresh = await fetchCryptoParams(vaultId);
+    if (fresh.salt === params.salt && kdfEquals(fresh.kdf, params.kdf)) throw e;
+    params = fresh;
+    credential = await derivePasswordKeys(password, fresh.salt, fresh.kdf);
+    authResponse = await login({ vault_id: vaultId, vault_verifier: credential.vaultVerifier });
+  }
+
+  if (authResponse.vault_id !== vaultId) {
+    throw new Error("Unexpected vault returned while logging in.");
+  }
+  if (!authResponse.vault_key_wrap || !authResponse.vault_key_wrap_iv) {
+    throw new Error("vault is missing the password-wrapped vault key envelope");
+  }
+  // Defensive: the keys we derived must correspond to the snapshot `/auth`
+  // validated. If the profile moved in between, unwrapping would fail with an
+  // opaque GCM error.
+  if (authResponse.salt !== params.salt || !kdfEquals(authResponse.kdf, params.kdf)) {
+    throw new Error("Vault credential changed during unlock. Try again.");
+  }
+
+  // Use the envelope that accompanied the verifier we just proved. Re-fetching
+  // it would open a window where a concurrent rotation makes the pair
+  // inconsistent.
   const vaultData = await fetchVault();
   const vault = vaultData.vault;
 
-  if (!vault.vault_key_wrap || !vault.vault_key_wrap_iv) {
-    throw new Error("vault is missing the password-wrapped vault key envelope");
-  }
-
-  // Unwrap the vault key using the password wrapping key.
   const vaultKeyRaw = await unwrapKeyBytes(
-    vault.vault_key_wrap,
-    vault.vault_key_wrap_iv,
-    wrappingKey,
+    authResponse.vault_key_wrap,
+    authResponse.vault_key_wrap_iv,
+    credential.wrappingKey,
   );
-
   const vaultKey = await importVaultKey(vaultKeyRaw);
 
   // Persist the device secrets, namespaced to the vault that just unlocked.
@@ -59,6 +87,19 @@ export async function passwordLoginFlow(
   } catch {
     // Offline/legacy server — unlock still valid; sync check converges later.
   }
+
+  // Opportunistic profile upgrade, after the session exists. A failure never
+  // fails the login; the copy is zeroed when the attempt settles.
+  const upgradeKey = vaultKeyRaw.slice();
+  void maybeUpgradeKdf({
+    vaultId,
+    password,
+    currentKdf: params.kdf,
+    currentVerifier: credential.vaultVerifier,
+    vaultKeyRaw: upgradeKey,
+  });
+  vaultKeyRaw.fill(0);
+
   return {
     session: {
       vaultId,

@@ -4,8 +4,8 @@ use sea_orm_migration::{prelude::*, schema::*};
 pub struct Migration;
 
 // Re-wrap / rotate support. Only the recovery wrap holds `vaultKeyRaw`
-// directly (R1: never HKDF(PBKDF2(password))), so rotating the password
-// credential leaves recovery intact. A recovery rotation (§5.3) is likewise
+// directly (R1: never the password-derived wrapping key), so rotating the
+// password credential leaves recovery intact. A recovery rotation (§5.3) is likewise
 // independent of the password envelope, so it never needs to move
 // credential_version either — kept separate so the two histories cannot be
 // conflated in a future refactor.

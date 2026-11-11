@@ -42,7 +42,7 @@ participant S as Server
 U->>C: set master password
 C->>C: prepareVaultFlow() — entirely local
 Note over C: vault id, vault key, ciphertext
-Note over C: password envelope (salt/PBKDF2/verifier + vault_key_wrap)
+Note over C: password envelope (salt/Argon2id profile/verifier + vault_key_wrap)
 Note over C: recovery secret (160-bit, Crockford, no checksum)
 Note over C: recovery_salt, K_rec, verifier, wrapped vault key (AAD=vaultId)
 Note over C: PendingVaultRegistration holds everything incl. recoveryKey
@@ -158,7 +158,7 @@ one irreversible write. `abandonPendingRecovery()` clears the in-memory state in
 Legacy-shaped local copy of the server-side column discipline:
 
 ```
-rewrap   (paths 2b)   touches:  salt, iterations, vault_verifier, vault_key_wrap*,
+rewrap   (paths 2b)   touches:  salt, kdf, vault_verifier, vault_key_wrap*,
                                       credential_version (+1)
                   untouches:  vault, vaultiv (ciphertext), version (document CAS),
                               recovery_* (Rule R1), lock_epoch
